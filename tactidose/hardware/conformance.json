@@ -1,0 +1,345 @@
+{
+  "version": 1,
+  "description": "TactiDose serial protocol v1 conformance scenarios. Normative reference: docs/SERIAL_PROTOCOL.md. Executed against the Python simulator, the native-compiled firmware core, and (hardware_safe scenarios only) a real ESP32.",
+  "harness": {
+    "num_slots": 6,
+    "steps_per_carousel_rev": 3200,
+    "initial_physical_offset_steps": 1600,
+    "gate_max_open_ms": 120000,
+    "notes": [
+      "The first boot of a scenario places the carousel physically 1600 steps (180 deg) before the home sensor (homing direction is +). Later boots keep the physical position. boot sets the home-sensor mode; jam state is physical and persists across boots.",
+      "Home sensor model: active while (physical_position mod steps_per_carousel_rev) is in [0, 40).",
+      "Step types: boot (ok|dead|none), send (line), press (CONFIRM|CANCEL: pressed 100 ms then released), sensor (ok|dead), jam (true|false), and pure wait (wait_ms with no other action).",
+      "After the action, the runner advances simulated time in 1 ms ticks and collects device lines (ignoring lines that start with '#') until len(collected) == len(expect) or within_ms elapses; then compares element-wise. Lines produced after a step's expectation is satisfied carry over into the next step's collection.",
+      "quiet_ms (default 0): after the expectation is met keep ticking that long and fail if any further line appears.",
+      "Pure wait step: wait_ms is the time budget. With a non-empty expect it ends as soon as the lines are collected; with expect [] it advances exactly wait_ms and asserts no line appeared.",
+      "sensor and jam steps change the simulated physics only; they produce no lines and do not advance time.",
+      "Expectation forms: exact text | 're:<python regex, full match>' | 'status:k=v,k=v' (line must be OK STATUS containing every listed key=value).",
+      "Default within_ms: 45000 for boot, 5000 otherwise."
+    ]
+  },
+  "scenarios": [
+    {
+      "name": "boot_homes_and_reports_ready",
+      "hardware_safe": true,
+      "steps": [
+        {"boot": "ok", "expect": ["re:EVENT BOOT \\S+", "OK HOMING", "OK HOMED", "OK READY"]},
+        {"send": "STATUS", "expect": ["status:state=READY,homed=1,slot=0,gate=CLOSED,slots=6"]}
+      ]
+    },
+    {
+      "name": "ping_variants_and_blank_lines",
+      "hardware_safe": true,
+      "steps": [
+        {"boot": "ok", "expect": ["re:EVENT BOOT \\S+", "OK HOMING", "OK HOMED", "OK READY"]},
+        {"send": "PING", "expect": ["OK PONG"]},
+        {"send": "ping", "expect": ["OK PONG"]},
+        {"send": "   PING   ", "expect": ["OK PONG"]},
+        {"send": "", "quiet_ms": 300, "expect": []},
+        {"send": "PING", "expect": ["OK PONG"]}
+      ]
+    },
+    {
+      "name": "unknown_and_overlong_commands",
+      "hardware_safe": true,
+      "steps": [
+        {"boot": "ok", "expect": ["re:EVENT BOOT \\S+", "OK HOMING", "OK HOMED", "OK READY"]},
+        {"send": "FOO", "expect": ["ERR UNKNOWN_COMMAND"]},
+        {"send": "MOVE_SLOTS 1", "expect": ["ERR UNKNOWN_COMMAND"]},
+        {"send": "OPEN GATE", "expect": ["ERR UNKNOWN_COMMAND"]},
+        {"send": "PINGPINGPINGPINGPINGPINGPINGPINGPINGPINGPINGPINGPINGPINGPINGPINGPING", "expect": ["ERR UNKNOWN_COMMAND"]},
+        {"send": "PING", "expect": ["OK PONG"]}
+      ]
+    },
+    {
+      "name": "move_slot_happy_path",
+      "hardware_safe": true,
+      "steps": [
+        {"boot": "ok", "expect": ["re:EVENT BOOT \\S+", "OK HOMING", "OK HOMED", "OK READY"]},
+        {"send": "MOVE_SLOT 3", "within_ms": 20000, "expect": ["OK MOVING 3", "OK AT_SLOT 3", "OK READY"]},
+        {"send": "STATUS", "expect": ["status:state=READY,homed=1,slot=3,gate=CLOSED"]},
+        {"send": "move_slot 0", "within_ms": 20000, "expect": ["OK MOVING 0", "OK AT_SLOT 0", "OK READY"]},
+        {"send": "STATUS", "expect": ["status:state=READY,slot=0"]}
+      ]
+    },
+    {
+      "name": "move_to_current_slot",
+      "hardware_safe": true,
+      "steps": [
+        {"boot": "ok", "expect": ["re:EVENT BOOT \\S+", "OK HOMING", "OK HOMED", "OK READY"]},
+        {"send": "MOVE_SLOT 0", "within_ms": 20000, "expect": ["OK MOVING 0", "OK AT_SLOT 0", "OK READY"]}
+      ]
+    },
+    {
+      "name": "every_slot_in_sequence",
+      "hardware_safe": true,
+      "steps": [
+        {"boot": "ok", "expect": ["re:EVENT BOOT \\S+", "OK HOMING", "OK HOMED", "OK READY"]},
+        {"send": "MOVE_SLOT 1", "within_ms": 20000, "expect": ["OK MOVING 1", "OK AT_SLOT 1", "OK READY"]},
+        {"send": "MOVE_SLOT 2", "within_ms": 20000, "expect": ["OK MOVING 2", "OK AT_SLOT 2", "OK READY"]},
+        {"send": "MOVE_SLOT 3", "within_ms": 20000, "expect": ["OK MOVING 3", "OK AT_SLOT 3", "OK READY"]},
+        {"send": "MOVE_SLOT 4", "within_ms": 20000, "expect": ["OK MOVING 4", "OK AT_SLOT 4", "OK READY"]},
+        {"send": "MOVE_SLOT 5", "within_ms": 20000, "expect": ["OK MOVING 5", "OK AT_SLOT 5", "OK READY"]},
+        {"send": "MOVE_SLOT 0", "within_ms": 20000, "expect": ["OK MOVING 0", "OK AT_SLOT 0", "OK READY"]},
+        {"send": "MOVE_SLOT 5", "within_ms": 20000, "expect": ["OK MOVING 5", "OK AT_SLOT 5", "OK READY"]},
+        {"send": "MOVE_SLOT 1", "within_ms": 20000, "expect": ["OK MOVING 1", "OK AT_SLOT 1", "OK READY"]},
+        {"send": "STATUS", "expect": ["status:state=READY,homed=1,slot=1,gate=CLOSED"]}
+      ]
+    },
+    {
+      "name": "invalid_slot_arguments",
+      "hardware_safe": true,
+      "steps": [
+        {"boot": "ok", "expect": ["re:EVENT BOOT \\S+", "OK HOMING", "OK HOMED", "OK READY"]},
+        {"send": "MOVE_SLOT 6", "expect": ["ERR INVALID_SLOT"]},
+        {"send": "MOVE_SLOT 99", "expect": ["ERR INVALID_SLOT"]},
+        {"send": "MOVE_SLOT -1", "expect": ["ERR INVALID_SLOT"]},
+        {"send": "MOVE_SLOT +1", "expect": ["ERR INVALID_SLOT"]},
+        {"send": "MOVE_SLOT abc", "expect": ["ERR INVALID_SLOT"]},
+        {"send": "MOVE_SLOT", "expect": ["ERR INVALID_SLOT"]},
+        {"send": "MOVE_SLOT 1 2", "expect": ["ERR INVALID_SLOT"]},
+        {"send": "MOVE_SLOT 1000", "expect": ["ERR INVALID_SLOT"]},
+        {"send": "DISPENSE_SLOT 6", "expect": ["ERR INVALID_SLOT"]},
+        {"send": "DISPENSE_SLOT x", "expect": ["ERR INVALID_SLOT"]},
+        {"send": "STATUS", "expect": ["status:state=READY,slot=0,gate=CLOSED"]},
+        {"send": "MOVE_SLOT 002", "within_ms": 20000, "expect": ["OK MOVING 2", "OK AT_SLOT 2", "OK READY"]}
+      ]
+    },
+    {
+      "name": "dispense_happy_path",
+      "hardware_safe": true,
+      "steps": [
+        {"boot": "ok", "expect": ["re:EVENT BOOT \\S+", "OK HOMING", "OK HOMED", "OK READY"]},
+        {"send": "DISPENSE_SLOT 3", "within_ms": 25000, "expect": ["OK MOVING 3", "OK AT_SLOT 3", "OK GATE_OPEN"]},
+        {"send": "STATUS", "expect": ["status:state=GATE_OPEN,homed=1,slot=3,gate=OPEN"]},
+        {"send": "CLOSE_GATE", "expect": ["OK GATE_CLOSED", "OK READY"]},
+        {"send": "STATUS", "expect": ["status:state=READY,homed=1,slot=3,gate=CLOSED"]},
+        {"send": "DISPENSE_SLOT 0", "within_ms": 25000, "expect": ["OK MOVING 0", "OK AT_SLOT 0", "OK GATE_OPEN"]},
+        {"send": "CLOSE_GATE", "expect": ["OK GATE_CLOSED", "OK READY"]}
+      ]
+    },
+    {
+      "name": "interlocks_while_gate_open",
+      "hardware_safe": true,
+      "steps": [
+        {"boot": "ok", "expect": ["re:EVENT BOOT \\S+", "OK HOMING", "OK HOMED", "OK READY"]},
+        {"send": "OPEN_GATE", "expect": ["OK GATE_OPEN"]},
+        {"send": "MOVE_SLOT 1", "expect": ["ERR INVALID_STATE"]},
+        {"send": "DISPENSE_SLOT 1", "expect": ["ERR INVALID_STATE"]},
+        {"send": "HOME", "expect": ["ERR INVALID_STATE"]},
+        {"send": "OPEN_GATE", "expect": ["OK GATE_OPEN"]},
+        {"send": "STATUS", "expect": ["status:state=GATE_OPEN,gate=OPEN,slot=0"]},
+        {"send": "CLOSE_GATE", "expect": ["OK GATE_CLOSED", "OK READY"]},
+        {"send": "CLOSE_GATE", "quiet_ms": 300, "expect": ["OK GATE_CLOSED"]}
+      ]
+    },
+    {
+      "name": "busy_while_moving",
+      "hardware_safe": true,
+      "steps": [
+        {"boot": "ok", "expect": ["re:EVENT BOOT \\S+", "OK HOMING", "OK HOMED", "OK READY"]},
+        {"send": "MOVE_SLOT 3", "expect": ["OK MOVING 3"]},
+        {"send": "MOVE_SLOT 1", "expect": ["ERR BUSY"]},
+        {"send": "DISPENSE_SLOT 2", "expect": ["ERR BUSY"]},
+        {"send": "OPEN_GATE", "expect": ["ERR BUSY"]},
+        {"send": "CLOSE_GATE", "expect": ["ERR BUSY"]},
+        {"send": "HOME", "expect": ["ERR BUSY"]},
+        {"send": "DISPENSE_SLOT 9", "expect": ["ERR INVALID_SLOT"]},
+        {"send": "PING", "expect": ["OK PONG"]},
+        {"send": "STATUS", "expect": ["status:state=MOVING,gate=CLOSED"]},
+        {"wait_ms": 20000, "expect": ["OK AT_SLOT 3", "OK READY"]}
+      ]
+    },
+    {
+      "name": "stop_during_move_requires_rehome",
+      "hardware_safe": true,
+      "steps": [
+        {"boot": "ok", "expect": ["re:EVENT BOOT \\S+", "OK HOMING", "OK HOMED", "OK READY"]},
+        {"send": "MOVE_SLOT 3", "expect": ["OK MOVING 3"]},
+        {"send": "STOP", "expect": ["ERR STOPPED", "OK STOPPED"]},
+        {"send": "STATUS", "expect": ["status:state=SAFE_STOP,homed=0,gate=CLOSED"]},
+        {"send": "MOVE_SLOT 1", "expect": ["ERR NOT_HOMED"]},
+        {"send": "DISPENSE_SLOT 1", "expect": ["ERR NOT_HOMED"]},
+        {"send": "OPEN_GATE", "expect": ["ERR NOT_HOMED"]},
+        {"send": "CLOSE_GATE", "expect": ["OK GATE_CLOSED"]},
+        {"send": "HOME", "within_ms": 45000, "expect": ["OK HOMING", "OK HOMED", "OK READY"]},
+        {"send": "STATUS", "expect": ["status:state=READY,homed=1,slot=0,gate=CLOSED"]}
+      ]
+    },
+    {
+      "name": "stop_during_dispense_never_opens_gate",
+      "hardware_safe": true,
+      "steps": [
+        {"boot": "ok", "expect": ["re:EVENT BOOT \\S+", "OK HOMING", "OK HOMED", "OK READY"]},
+        {"send": "DISPENSE_SLOT 3", "expect": ["OK MOVING 3"]},
+        {"send": "STOP", "expect": ["ERR STOPPED", "OK STOPPED"]},
+        {"wait_ms": 3000, "expect": []},
+        {"send": "STATUS", "expect": ["status:state=SAFE_STOP,homed=0,gate=CLOSED"]}
+      ]
+    },
+    {
+      "name": "stop_when_idle_and_idempotent",
+      "hardware_safe": true,
+      "steps": [
+        {"boot": "ok", "expect": ["re:EVENT BOOT \\S+", "OK HOMING", "OK HOMED", "OK READY"]},
+        {"send": "STOP", "expect": ["OK STOPPED"]},
+        {"send": "STOP", "expect": ["OK STOPPED"]},
+        {"send": "STATUS", "expect": ["status:state=SAFE_STOP,homed=0,gate=CLOSED"]},
+        {"send": "HOME", "within_ms": 45000, "expect": ["OK HOMING", "OK HOMED", "OK READY"]}
+      ]
+    },
+    {
+      "name": "stop_with_gate_open_closes_gate",
+      "hardware_safe": true,
+      "steps": [
+        {"boot": "ok", "expect": ["re:EVENT BOOT \\S+", "OK HOMING", "OK HOMED", "OK READY"]},
+        {"send": "OPEN_GATE", "expect": ["OK GATE_OPEN"]},
+        {"send": "STOP", "expect": ["OK GATE_CLOSED", "OK STOPPED"]},
+        {"send": "STATUS", "expect": ["status:state=SAFE_STOP,homed=0,gate=CLOSED"]}
+      ]
+    },
+    {
+      "name": "home_from_ready_returns_to_slot_zero",
+      "hardware_safe": true,
+      "steps": [
+        {"boot": "ok", "expect": ["re:EVENT BOOT \\S+", "OK HOMING", "OK HOMED", "OK READY"]},
+        {"send": "MOVE_SLOT 2", "within_ms": 20000, "expect": ["OK MOVING 2", "OK AT_SLOT 2", "OK READY"]},
+        {"send": "HOME", "within_ms": 45000, "expect": ["OK HOMING", "OK HOMED", "OK READY"]},
+        {"send": "STATUS", "expect": ["status:state=READY,homed=1,slot=0,gate=CLOSED"]}
+      ]
+    },
+    {
+      "name": "busy_during_boot_homing",
+      "hardware_safe": false,
+      "steps": [
+        {"boot": "ok", "expect": ["re:EVENT BOOT \\S+", "OK HOMING"]},
+        {"send": "MOVE_SLOT 1", "expect": ["ERR BUSY"]},
+        {"send": "OPEN_GATE", "expect": ["ERR BUSY"]},
+        {"send": "PING", "expect": ["OK PONG"]},
+        {"send": "STATUS", "expect": ["status:state=HOMING,homed=0,gate=CLOSED"]},
+        {"wait_ms": 45000, "expect": ["OK HOMED", "OK READY"]}
+      ]
+    },
+    {
+      "name": "home_timeout_enters_fault_and_recovers",
+      "hardware_safe": false,
+      "tags": ["fault"],
+      "steps": [
+        {"boot": "dead", "expect": ["re:EVENT BOOT \\S+", "OK HOMING", "ERR HOME_TIMEOUT"]},
+        {"send": "STATUS", "expect": ["status:state=FAULT,homed=0,gate=CLOSED"]},
+        {"send": "MOVE_SLOT 1", "expect": ["ERR NOT_HOMED"]},
+        {"send": "DISPENSE_SLOT 1", "expect": ["ERR NOT_HOMED"]},
+        {"send": "OPEN_GATE", "expect": ["ERR NOT_HOMED"]},
+        {"send": "CLOSE_GATE", "expect": ["OK GATE_CLOSED"]},
+        {"send": "HOME", "within_ms": 45000, "expect": ["OK HOMING", "ERR HOME_TIMEOUT"]},
+        {"sensor": "ok", "expect": []},
+        {"send": "HOME", "within_ms": 45000, "expect": ["OK HOMING", "OK HOMED", "OK READY"]},
+        {"send": "STATUS", "expect": ["status:state=READY,homed=1,slot=0"]}
+      ]
+    },
+    {
+      "name": "no_home_sensor_assumes_alignment",
+      "hardware_safe": false,
+      "tags": ["fault"],
+      "steps": [
+        {"boot": "none", "expect": ["re:EVENT BOOT \\S+", "OK HOMING", "OK HOMED", "OK READY"]},
+        {"send": "STATUS", "expect": ["status:state=READY,homed=1,slot=0"]},
+        {"send": "MOVE_SLOT 2", "within_ms": 20000, "expect": ["OK MOVING 2", "OK AT_SLOT 2", "OK READY"]},
+        {"send": "HOME", "expect": ["OK HOMING", "OK HOMED", "OK READY"]},
+        {"send": "STATUS", "expect": ["status:state=READY,homed=1,slot=0"]}
+      ]
+    },
+    {
+      "name": "motor_jam_during_move_faults",
+      "hardware_safe": false,
+      "tags": ["fault"],
+      "steps": [
+        {"boot": "ok", "expect": ["re:EVENT BOOT \\S+", "OK HOMING", "OK HOMED", "OK READY"]},
+        {"jam": true, "expect": []},
+        {"send": "MOVE_SLOT 3", "within_ms": 30000, "expect": ["OK MOVING 3", "ERR MOTOR_FAULT"]},
+        {"send": "STATUS", "expect": ["status:state=FAULT,homed=0,gate=CLOSED"]},
+        {"send": "MOVE_SLOT 1", "expect": ["ERR NOT_HOMED"]},
+        {"jam": false, "expect": []},
+        {"send": "HOME", "within_ms": 45000, "expect": ["OK HOMING", "OK HOMED", "OK READY"]}
+      ]
+    },
+    {
+      "name": "motor_jam_during_dispense_never_opens_gate",
+      "hardware_safe": false,
+      "tags": ["fault"],
+      "steps": [
+        {"boot": "ok", "expect": ["re:EVENT BOOT \\S+", "OK HOMING", "OK HOMED", "OK READY"]},
+        {"jam": true, "expect": []},
+        {"send": "DISPENSE_SLOT 2", "within_ms": 30000, "expect": ["OK MOVING 2", "ERR MOTOR_FAULT"]},
+        {"wait_ms": 2000, "expect": []},
+        {"send": "STATUS", "expect": ["status:state=FAULT,gate=CLOSED"]}
+      ]
+    },
+    {
+      "name": "confirm_button_is_event_only",
+      "hardware_safe": false,
+      "tags": ["buttons"],
+      "steps": [
+        {"boot": "ok", "expect": ["re:EVENT BOOT \\S+", "OK HOMING", "OK HOMED", "OK READY"]},
+        {"press": "CONFIRM", "expect": ["EVENT CONFIRM_BUTTON"]},
+        {"send": "DISPENSE_SLOT 1", "within_ms": 25000, "expect": ["OK MOVING 1", "OK AT_SLOT 1", "OK GATE_OPEN"]},
+        {"press": "CONFIRM", "expect": ["EVENT CONFIRM_BUTTON"]},
+        {"send": "STATUS", "expect": ["status:state=GATE_OPEN,gate=OPEN,slot=1"]}
+      ]
+    },
+    {
+      "name": "cancel_button_when_idle_is_event_only",
+      "hardware_safe": false,
+      "tags": ["buttons"],
+      "steps": [
+        {"boot": "ok", "expect": ["re:EVENT BOOT \\S+", "OK HOMING", "OK HOMED", "OK READY"]},
+        {"press": "CANCEL", "quiet_ms": 300, "expect": ["EVENT CANCEL_BUTTON"]},
+        {"send": "STATUS", "expect": ["status:state=READY,homed=1"]}
+      ]
+    },
+    {
+      "name": "cancel_button_with_gate_open_closes_gate",
+      "hardware_safe": false,
+      "tags": ["buttons"],
+      "steps": [
+        {"boot": "ok", "expect": ["re:EVENT BOOT \\S+", "OK HOMING", "OK HOMED", "OK READY"]},
+        {"send": "DISPENSE_SLOT 2", "within_ms": 25000, "expect": ["OK MOVING 2", "OK AT_SLOT 2", "OK GATE_OPEN"]},
+        {"press": "CANCEL", "expect": ["EVENT CANCEL_BUTTON", "OK GATE_CLOSED", "OK READY"]},
+        {"send": "STATUS", "expect": ["status:state=READY,homed=1,slot=2,gate=CLOSED"]}
+      ]
+    },
+    {
+      "name": "cancel_button_during_move_stops",
+      "hardware_safe": false,
+      "tags": ["buttons"],
+      "steps": [
+        {"boot": "ok", "expect": ["re:EVENT BOOT \\S+", "OK HOMING", "OK HOMED", "OK READY"]},
+        {"send": "MOVE_SLOT 4", "expect": ["OK MOVING 4"]},
+        {"press": "CANCEL", "expect": ["EVENT CANCEL_BUTTON", "ERR STOPPED", "OK STOPPED"]},
+        {"send": "STATUS", "expect": ["status:state=SAFE_STOP,homed=0,gate=CLOSED"]}
+      ]
+    },
+    {
+      "name": "reboot_closes_gate_and_rehomes",
+      "hardware_safe": false,
+      "steps": [
+        {"boot": "ok", "expect": ["re:EVENT BOOT \\S+", "OK HOMING", "OK HOMED", "OK READY"]},
+        {"send": "DISPENSE_SLOT 1", "within_ms": 25000, "expect": ["OK MOVING 1", "OK AT_SLOT 1", "OK GATE_OPEN"]},
+        {"boot": "ok", "expect": ["re:EVENT BOOT \\S+", "OK HOMING", "OK HOMED", "OK READY"]},
+        {"send": "STATUS", "expect": ["status:state=READY,homed=1,slot=0,gate=CLOSED"]}
+      ]
+    },
+    {
+      "name": "gate_auto_close_safety_net",
+      "hardware_safe": false,
+      "tags": ["slow"],
+      "steps": [
+        {"boot": "ok", "expect": ["re:EVENT BOOT \\S+", "OK HOMING", "OK HOMED", "OK READY"]},
+        {"send": "OPEN_GATE", "expect": ["OK GATE_OPEN"]},
+        {"wait_ms": 100000, "expect": []},
+        {"wait_ms": 30000, "expect": ["OK GATE_CLOSED", "OK READY"]},
+        {"send": "STATUS", "expect": ["status:state=READY,gate=CLOSED"]}
+      ]
+    }
+  ]
+}

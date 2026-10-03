@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tactidose"
+version = "0.1.0"
+description = "TactiDose.tech host software: voice-first motorized medication-access prototype (hackathon, not a medical device)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+  "fastapi>=0.115",
+  "uvicorn>=0.30",
+  "sqlalchemy>=2.0.30",
+  "pydantic>=2.6",
+  "pydantic-settings>=2.2",
+  "pyserial>=3.5",
+  "httpx>=0.27",
+  "python-multipart>=0.0.9",
+  "tzdata>=2024.1",
+]
+
+[project.optional-dependencies]
+voice = ["vosk>=0.3.45", "sounddevice>=0.4.6", "numpy>=1.26"]
+gemini = ["google-genai>=2.0"]
+tidb = ["pymysql>=1.1", "certifi>=2024.2.2", "cryptography>=42"]
+snowflake = ["snowflake-connector-python>=4.0"]
+dev = ["pytest>=8", "pytest-timeout>=2.3"]
+all = ["tactidose[voice,gemini,tidb,snowflake]"]
+
+[project.scripts]
+tactidose = "tactidose.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["tactidose*"]
+
+[tool.setuptools.package-data]
+tactidose = ["hardware/conformance.json", "ui/static/**/*", "audio/assets/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+timeout = 120
+addopts = "-ra"
+filterwarnings = ["ignore::DeprecationWarning:google.*"]
+markers = [
+  "slow: long-running tests (simulated 2-minute timers, 10x end-to-end loops)",
+  "native: requires the natively compiled firmware core (Docker/g++)",
+  "hardware: requires a real ESP32 on a serial port",
+]

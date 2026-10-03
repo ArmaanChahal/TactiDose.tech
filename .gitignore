@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+build/
+dist/
+
+# Local runtime data (SQLite DB, TTS cache, scanned label images)
+data/
+models/
+.env
+
+# Firmware build outputs
+firmware/**/build/
+firmware/native/bin/
+*.bin
+*.elf
+
+# OS / editor / local tool state
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+.claude/
