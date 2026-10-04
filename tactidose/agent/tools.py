@@ -268,7 +268,10 @@ def _contains_run(words: Sequence[str], run: Sequence[str]) -> bool:
 
 def name_score(query: str | Sequence[str], name: str | None) -> float:
     """How well ``query`` (free text) names medication ``name``: 1.0 exact phrase, 0.95 all
-    words, 0.85 all words with typos, 0.6 only the distinctive first word ("vitamin"), else 0."""
+    words, 0.85 all words with typos, else 0.
+
+    Every word of the name must be present: a first-word-only match ("vitamin d" vs
+    "Vitamin C", "insulin lispro" vs "Insulin glargine") would release the wrong medication."""
     words = _tokens(query) if isinstance(query, str) else list(query)
     core = name_tokens(name)
     if not core or not words:
@@ -279,8 +282,6 @@ def name_score(query: str | Sequence[str], name: str | None) -> float:
         return 0.95
     if all(_fuzzy_in(t, words) for t in core):
         return 0.85
-    if len(core[0]) >= 4 and _fuzzy_in(core[0], words):
-        return 0.6
     return 0.0
 
 

@@ -164,11 +164,11 @@ Access to `/api/reports/{rid}…` follows the report's patient (patient themself
 | `POST /api/device/home` *(caregiver)* | – | `{ok, result: CommandResultView, device}` |
 | `POST /api/device/stop` | – | same (patient or caregiver; always allowed) |
 | `POST /api/device/reconnect` *(caregiver)* | – | `{ok, device}` |
-| `POST /api/demo/command` *(demo)* | `{line: "DROP_SLOT 1"}` | `{ok, result, device}` |
-| `GET/POST /api/demo/clock` *(demo)* | `{local_time: "08:00"}` (today) \| `{local_datetime: "2026-10-05T08:00"}` \| `{offset_minutes: 30}` (absolute offset from real time) \| `{reset: true}` | `{now_local, now_utc, offset_s, travelling, tz}` (runs a scheduler tick). Sessions ignore demo travel, so jumping never signs anyone out. |
-| `POST /api/demo/jump-to-next-dose` *(demo)* | – | `{clock, next: DoseView\|null}` |
-| `GET/POST /api/demo/simulator` *(demo)* | `{fault, enabled}` \| `{press: "CONFIRM"\|"CANCEL"}` \| `{reboot: true}` \| `{pills: {slot, count}}` | `{available, physical:{angle_deg, slot, target_slot, gate_open, state, releasing, pills:[physical count per container], pills_dropped, drop_sensor, proto, num_slots, fw_version, ...}, faults:{home_sensor_dead, motor_jam, unresponsive, brownout_on_gate, brownout_on_release, disconnect}}` — simulated *physical* pill counts are separate from the database's `pill_count` |
-| `POST /api/demo/reset` *(demo)* | `{reseed?: bool}` | `{ok}` — wipes drops, doses, conversations, reports, notifications **and sessions** (everyone, including the operator, must sign in again) |
+| `POST /api/demo/command` *(demo; linked doctor/family)* | `{line: "DROP_SLOT 1"}` | `{ok, result, device}` — `DROP_SLOT` goes through the drop rules (global cooldown, 60-min per-pill floor); `DISPENSE_SLOT`/`OPEN_GATE` are refused (409) |
+| `GET/POST /api/demo/clock` *(demo; device's patient or linked doctor/family)* | `{local_time: "08:00"}` (today) \| `{local_datetime: "2026-10-05T08:00"}` \| `{offset_minutes: 30}` (absolute offset from real time) \| `{reset: true}` | `{now_local, now_utc, offset_s, travelling, tz}` (runs a scheduler tick). Sessions ignore demo travel, so jumping never signs anyone out. |
+| `POST /api/demo/jump-to-next-dose` *(demo; same)* | – | `{clock, next: DoseView\|null}` |
+| `GET/POST /api/demo/simulator` *(demo; same)* | `{fault, enabled}` \| `{press: "CONFIRM"\|"CANCEL"}` \| `{reboot: true}` \| `{pills: {slot, count}}` | `{available, physical:{angle_deg, slot, target_slot, gate_open, state, releasing, pills:[physical count per container], pills_dropped, drop_sensor, proto, num_slots, fw_version, ...}, faults:{home_sensor_dead, motor_jam, unresponsive, brownout_on_gate, brownout_on_release, disconnect}}` — simulated *physical* pill counts are separate from the database's `pill_count` |
+| `POST /api/demo/reset` *(demo; linked doctor/family)* | `{reseed?: bool}` | `{ok, summary}` — wipes drops, doses, conversations, reports and notifications and resets the demo clock; accounts and sessions are kept |
 
 ## Optional extras (kept from the handoff, off the main flow)
 

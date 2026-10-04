@@ -501,13 +501,14 @@ def test_reset_after_gate_open_makes_the_drop_uncertain(rig):
     assert hw.snapshot().resets_seen == 2 and hw.snapshot().gate is GateState.CLOSED
 
 
-def test_reset_before_the_release_opens_is_not_dropped(rig):
+def test_reset_during_gate_travel_is_uncertain(rig):
     hw, sim = rig()
     assert wait_ready(hw)
     sim.set_fault("brownout_on_gate", True)
     r = hw.drop_slot(2)
     assert r.code == HostCode.DEVICE_RESET.value and lines(r) == ["OK MOVING 2", "OK AT_SLOT 2"]
-    assert drop_certainty(r) is DropCertainty.NOT_DROPPED and sim.physical()["pills"] == [20, 20, 20]
+    # The gate starts moving after AT_SLOT: the host cannot know whether a pill fell.
+    assert drop_certainty(r) is DropCertainty.UNCERTAIN and sim.physical()["pills"] == [20, 20, 20]
 
 
 def test_drop_refusals_never_reach_the_wire(rig, bus, settings_v2):

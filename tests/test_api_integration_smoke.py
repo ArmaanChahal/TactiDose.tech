@@ -153,7 +153,8 @@ def test_scheduled_auto_drop_after_clock_jump_then_demo_reset(tmp_path, monkeypa
         manual = client.post(f"/api/patients/{pid}/drops", headers=alex, json={"slot": 0}).json()
         assert manual["status"] == "DENIED" and manual["reason"] == "COOLDOWN"
 
-        reset = client.post("/api/demo/reset", headers=alex, json={})
+        sam = _login(client, "sam@demo.tactidose", settings.demo_password.get_secret_value())
+        reset = client.post("/api/demo/reset", headers=sam, json={})   # reset: doctor/family only
         assert reset.status_code == 200, reset.text
         assert client.get("/api/auth/me", headers=alex).status_code == 200      # still signed in
         assert client.get(f"/api/patients/{pid}/drops?days=1", headers=alex).json() == []

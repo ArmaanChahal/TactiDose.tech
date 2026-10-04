@@ -75,6 +75,8 @@ WELCOME = "You're welcome."
 NOT_UNDERSTOOD = "Sorry, I didn't understand. You can say: drop my pill, what is due, or help."
 UNCLEAR_SPEECH = "Sorry, I didn't catch all of that. Please say it again."
 NEGATED = "Okay. I won't drop a pill."
+DEFERRED = "Okay, I won't drop it now. Ask me again when you are ready for it."
+QUESTION_NO_DROP = 'I won\'t drop a pill for a question. If you want your pill now, say "drop my pill".'
 WHICH_PILL = "Which pill would you like?"
 NOTHING_TO_REPEAT = "I have nothing to repeat yet."
 EMERGENCY = "This could be an emergency. Please call 911 or your local emergency number now."
@@ -130,6 +132,8 @@ CRITICAL_PHRASES: list[str] = [
     NOT_UNDERSTOOD,
     UNCLEAR_SPEECH,
     NEGATED,
+    DEFERRED,
+    QUESTION_NO_DROP,
     WHICH_PILL,
     NOTHING_TO_REPEAT,
     EMERGENCY,

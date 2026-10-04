@@ -370,3 +370,20 @@ def test_turn_guard_codes():
     assert turn_guard(analyse("I haven't taken it")).block_confirm[0] == "NEGATED"
     clear = turn_guard(analyse("drop my vitamin c"))
     assert clear.block_drop is None and clear.block_confirm is None
+
+
+@pytest.mark.parametrize("text,code", [
+    ("I'll take it later", "DEFERRED"),
+    ("drop it after dinner", "DEFERRED"),
+    ("give me my pill in an hour", "DEFERRED"),
+    ("drop my pill in 10 minutes", "DEFERRED"),
+    ("Should I take my vitamin C?", "QUESTION"),
+    ("Why do I take calcium?", "QUESTION"),
+    ("Drop my pill", None),
+    ("can I have my pill please", None),
+    ("I forgot earlier, can I have my pill now", None),
+    ("please drop my pill now", None),
+])
+def test_deferrals_and_questions_never_request_a_pill(text, code):
+    guard = turn_guard(analyse(text))
+    assert (guard.block_drop[0] if guard.block_drop else None) == code, text

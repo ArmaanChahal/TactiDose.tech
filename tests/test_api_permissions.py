@@ -219,9 +219,11 @@ def test_demo_endpoints_need_a_session_in_demo_mode(api):
     for method, path, body in DEMO_ENDPOINTS:
         kw = {"json": body} if body is not None else {}
         assert api.request(method, path, actor=None, **kw).status_code == 401, path
+        # The device's care team only; the raw console is for linked doctor/family.
+        allowed = ("family", "doctor") if path == "/api/demo/command" else ("patient", "family", "doctor")
         for actor in EVERYONE:
             r = api.request(method, path, actor=actor, **kw)
-            assert r.status_code == 200, (actor, path, r.text)
+            assert r.status_code == (200 if actor in allowed else 403), (actor, path, r.text)
 
 
 def test_demo_endpoints_are_403_when_demo_mode_is_off(api_settings, make_api):

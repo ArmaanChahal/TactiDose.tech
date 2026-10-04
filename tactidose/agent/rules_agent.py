@@ -245,6 +245,7 @@ class TextFlags:
     injection: bool = False
     stop: bool = False
     question: bool = False
+    deferred: bool = False
     #: A request verb ("can I have", "give me", "drop") - with a pill word it is a drop request.
     request_verb: bool = False
     drop_request: bool = False
@@ -283,6 +284,14 @@ def container_refs(norm: str) -> tuple[int, ...]:
         refs.append(2)
     return tuple(refs)
 
+
+#: The patient puts the pill off ("I'll take it later", "after dinner", "in an hour"): no drop now.
+_DEFERRAL = re.compile(
+    r"\b(?:later|tomorrow|tonight|not yet|not now|not right now|remind me"
+    r"|after (?:dinner|lunch|breakfast|supper|my (?:meal|nap|shower|walk))"
+    r"|in (?:a|an|one|two|three|five|ten|fifteen|twenty|thirty|a few|\d+) (?:minute|minutes|hour|hours|min|mins))\b",
+    re.IGNORECASE,
+)
 
 #: Polite fillers that contain "no" but negate nothing ("no problem, drop my pill").
 _POLITE_NO = re.compile(r"\b(?:no problem|no worries|no rush|no hurry)\b", re.IGNORECASE)
@@ -328,6 +337,7 @@ def analyse(text: str) -> TextFlags:
         injection=bool(_INJECTION.search(norm)),
         stop=parsed.intent is Intent.CANCEL and words <= MAX_STOP_WORDS,
         question=question,
+        deferred=bool(_DEFERRAL.search(norm)),
         request_verb=request_verb,
         drop_request=drop_request,
         drop_negated=drop_negated,
@@ -367,6 +377,12 @@ def turn_guard(flags: TextFlags) -> TurnGuard:
         block_drop = ("MULTIPLE", phrases.ONE_PILL_ONLY)
     elif flags.med_change:
         block_drop = ("MEDICATION_CHANGE", phrases.MEDICATION_CHANGE)
+    elif flags.deferred:
+        block_drop = ("DEFERRED", phrases.DEFERRED)
+    elif flags.question and not flags.due_question:
+        # "Should I take my vitamin C?" is a question, not a request ("can I have my pill" is polite
+        # and not a question). What's-due questions keep check_due_auto_dispense behaviour.
+        block_drop = ("QUESTION", phrases.QUESTION_NO_DROP)
     if block_confirm is None and flags.confirm_negated:
         block_confirm = ("NEGATED", phrases.NOT_MARKED)
     return TurnGuard(block_drop=block_drop, block_confirm=block_confirm)

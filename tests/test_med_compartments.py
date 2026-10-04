@@ -182,6 +182,7 @@ def test_refill_validation(env: Env, kw):
 
 def test_refill_after_drops_uses_the_current_count(env: Env):
     env.set_cooldown(0)
+    env.settings.min_dose_interval_minutes = 0                  # same pill back to back
     env.manual(0)
     env.manual(0)
     assert env.compartments.refill(0, add=10, patient_id=env.patient).pill_count == 28

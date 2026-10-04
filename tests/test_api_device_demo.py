@@ -48,8 +48,19 @@ def test_device_without_a_bound_patient(api, monkeypatch):
 
     monkeypatch.setattr(views, "device_owner_id", lambda db, settings: None)
     assert api.get("/api/device").status_code == 403
-    assert api.post("/api/demo/command", json={"line": "DROP_SLOT 0"}).status_code == 409
-    assert api.post("/api/demo/jump-to-next-dose").status_code == 409
+    assert api.post("/api/demo/command", actor="patient", json={"line": "DROP_SLOT 0"}).status_code == 403   # console: caregivers
+    assert api.post("/api/demo/command", actor="doctor", json={"line": "DROP_SLOT 0"}).status_code == 409
+    assert api.post("/api/demo/jump-to-next-dose").status_code == 403
+
+
+def test_demo_panel_is_limited_to_the_devices_care_team(api):
+    assert api.get("/api/demo/clock", actor="stranger").status_code == 403
+    assert api.post("/api/demo/simulator", actor="stranger", json={}).status_code in (403, 422)
+    assert api.post("/api/demo/reset", actor="stranger", json={"reseed": True}).status_code == 403
+    assert api.get("/api/demo/clock", actor="patient").status_code == 200
+    assert api.post("/api/demo/command", actor="patient", json={"line": "STATUS"}).status_code == 403
+    assert api.post("/api/demo/reset", actor="patient", json={"reseed": True}).status_code == 403
+    assert api.post("/api/demo/command", actor="doctor", json={"line": "STATUS"}).status_code == 200
 
 
 # --------------------------------------------------------------------------- console
@@ -68,24 +79,24 @@ def test_console_drop_is_a_recorded_demo_drop(api):
 
 def test_console_refuses_unrecorded_releases(api):
     for line in ("DISPENSE_SLOT 1", "open_gate"):
-        r = api.post("/api/demo/command", json={"line": line})
+        r = api.post("/api/demo/command", actor="doctor", json={"line": line})
         assert r.status_code == 409 and "DROP_SLOT" in r.json()["detail"]
     assert api.services.hardware.commands() == [] and api.services.drops.requests == []
 
 
 def test_console_rejects_invalid_lines(api):
     for line in ("", "   ", "FOO", "DROP_SLOT 9", "MOVE_SLOT x", "P" * 65):
-        assert api.post("/api/demo/command", json={"line": line}).status_code == 422, line
+        assert api.post("/api/demo/command", actor="doctor", json={"line": line}).status_code == 422, line
     assert api.services.hardware.commands() == []
 
 
 def test_console_raw_commands_and_stop(api):
     hw = api.services.hardware
-    status = api.post("/api/demo/command", json={"line": "status"}).json()
+    status = api.post("/api/demo/command", actor="doctor", json={"line": "status"}).json()
     assert status["ok"] is True and status["result"]["code"] == "STATUS" and status["result"]["messages"]
-    move = api.post("/api/demo/command", json={"line": "MOVE_SLOT 2"}).json()
+    move = api.post("/api/demo/command", actor="doctor", json={"line": "MOVE_SLOT 2"}).json()
     assert move["result"]["code"] == "AT_SLOT" and move["device"]["slot"] == 2
-    stop = api.post("/api/demo/command", json={"line": "STOP"}).json()
+    stop = api.post("/api/demo/command", actor="doctor", json={"line": "STOP"}).json()
     assert stop["result"]["code"] == "STOPPED" and api.services.drops.interrupts == 1
     assert hw.commands() == ["STATUS", "MOVE_SLOT 2", "STOP"]
 
@@ -217,4 +228,4 @@ def test_demo_reset_uses_the_seed_module_and_resets_the_clock(api, monkeypatch):
 
 def test_demo_reset_unavailable_is_503(api, monkeypatch):
     monkeypatch.setitem(sys.modules, "tactidose.db.seed", None)
-    assert api.post("/api/demo/reset", json={}).status_code == 503
+    assert api.post("/api/demo/reset", actor="doctor", json={}).status_code == 503

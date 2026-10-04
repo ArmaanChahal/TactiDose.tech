@@ -674,8 +674,10 @@ def drop_certainty(result: CommandResult) -> DropCertainty:
     """Did this ``DROP_SLOT`` / ``DISPENSE_SLOT`` release a pill?
 
     * ``OK DROPPED n`` (or ``OK GATE_OPEN`` for the v1 ``DISPENSE_SLOT`` emulation) -> DROPPED.
-    * ``ERR NO_PILL`` and any ERR before the gate opened -> NOT_DROPPED.
-    * ``ERR STOPPED`` / ``DEVICE_RESET`` after ``OK GATE_OPEN`` was seen -> UNCERTAIN.
+    * ``ERR NO_PILL`` and any ERR before the carousel reached the slot -> NOT_DROPPED.
+    * ``ERR STOPPED`` / ``DEVICE_RESET`` after ``OK AT_SLOT`` (or ``OK GATE_OPEN``) was seen ->
+      UNCERTAIN: the gate starts moving right after ``AT_SLOT``, so a reset or stop during gate
+      travel may already have released a pill.
     * TIMEOUT / DISCONNECTED (bytes may have reached the device) -> UNCERTAIN.
     """
     if result.command.name not in DROP_COMMANDS:
@@ -686,7 +688,7 @@ def drop_certainty(result: CommandResult) -> DropCertainty:
         return DropCertainty.UNCERTAIN
     if not result.definitive:
         return DropCertainty.UNCERTAIN
-    gate_opened = any(m.is_ok(Ok.GATE_OPEN) for m in result.messages)
-    if result.code in (Err.STOPPED.value, HostCode.DEVICE_RESET.value) and gate_opened:
+    gate_may_have_moved = any(m.is_ok(Ok.AT_SLOT) or m.is_ok(Ok.GATE_OPEN) for m in result.messages)
+    if result.code in (Err.STOPPED.value, HostCode.DEVICE_RESET.value) and gate_may_have_moved:
         return DropCertainty.UNCERTAIN
     return DropCertainty.NOT_DROPPED

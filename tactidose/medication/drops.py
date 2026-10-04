@@ -887,8 +887,8 @@ class DropService:
         blocker = self._review_blocker(s, dev.device_id, now, t)
         if blocker is not None:
             return blocker
-        # 4. global cooldown (manual / agent / button)
-        if req.source in _COOLDOWN_SOURCES:
+        # 4. global cooldown (manual / agent / button, and the demo panel)
+        if req.source in _COOLDOWN_SOURCES or req.source == _DEMO:
             remaining, next_at, last_at = self._cooldown(s, dev, now)
             if remaining > 0 and next_at is not None and last_at is not None:
                 # The drop behind the cooldown may still be in flight: its row can commit between
@@ -898,6 +898,11 @@ class DropService:
                     return in_flight
                 return _Check(t, _R.COOLDOWN.value, self._cooldown_message(last_at, next_at, remaining, now),
                               remaining_s=remaining, next_allowed_at=self.clock.to_local(next_at))
+            # 4b. per-pill floor: the same medication never drops twice within
+            # min_dose_interval_minutes on request, even with the global cooldown turned off.
+            floor = self._per_pill_floor(s, t, now)
+            if floor is not None:
+                return floor
         # 5. scheduled dose already satisfied
         if req.source == _SCHEDULE:
             satisfied = self._satisfaction(s, t, now)
@@ -1009,6 +1014,38 @@ class DropService:
         if now >= next_at:
             return 0, None, last
         return int(math.ceil((next_at - now).total_seconds())), next_at, last
+
+    def _per_pill_floor(self, s: Session, t: _Target, now: datetime) -> _Check | None:
+        """Deny when this medication dropped (or may have) within ``min_dose_interval_minutes``."""
+        minutes = int(self.settings.min_dose_interval_minutes or 0)
+        if minutes <= 0 or t.medication_id is None:
+            return None
+        happened = func.coalesce(PillDrop.completed_at, PillDrop.requested_at)
+        row = s.execute(
+            select(PillDrop.completed_at, PillDrop.requested_at)
+            .where(
+                PillDrop.patient_id == t.patient_id,
+                PillDrop.medication_id == t.medication_id,
+                PillDrop.status.in_(_COUNTED),
+                happened >= now - timedelta(minutes=minutes),
+            )
+            .order_by(happened.desc(), PillDrop.drop_id.desc())
+            .limit(1)
+        ).first()
+        if row is None:
+            return None
+        last_at = row.completed_at or row.requested_at
+        next_at = last_at + timedelta(minutes=minutes)
+        remaining = int(math.ceil((next_at - now).total_seconds()))
+        if remaining <= 0:
+            return None
+        last_local, next_local = self.clock.to_local(last_at), self.clock.to_local(next_at)
+        day = " tomorrow" if next_local.date() > self.clock.to_local(now).date() else ""
+        name = t.medication_name or _container(t.slot)
+        return _Check(t, _R.COOLDOWN.value,
+                      f"{name} was dropped at {clock_label(last_local)}. The next one can drop{day} at "
+                      f"{clock_label(next_local)}, in {duration_label(remaining)}.",
+                      remaining_s=remaining, next_allowed_at=self.clock.to_local(next_at))
 
     def _satisfaction(self, s: Session, t: _Target, now: datetime) -> _Check | None:
         ev = s.get(DoseEvent, t.event_id)

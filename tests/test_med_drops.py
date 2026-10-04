@@ -119,8 +119,11 @@ def test_drop_by_medication_resolves_its_container_now(env: Env):
     assert out.pill_count_after == 4
 
 
-def test_demo_drops_are_not_subject_to_the_cooldown(env: Env):
+def test_demo_drops_obey_the_cooldown(env: Env):
     env.manual(0)
+    out = env.drops.request_drop(patient_id=env.patient, source="demo", slot=1, requested_by_user_id=env.doctor)
+    assert (out.status, out.reason) == ("DENIED", "COOLDOWN")
+    env.set_cooldown(0)
     out = env.drops.request_drop(patient_id=env.patient, source="demo", slot=1, requested_by_user_id=env.doctor)
     assert out.status == "DROPPED" and out.source == "demo"
 
@@ -384,10 +387,24 @@ def test_scheduled_drops_ignore_the_cooldown_but_start_it(env: Env):
 
 def test_cooldown_zero_disables_the_check(env: Env):
     env.set_cooldown(0)
-    assert [env.manual(i).status for i in (0, 1, 2, 0)] == ["DROPPED"] * 4
+    assert [env.manual(i).status for i in (0, 1, 2)] == ["DROPPED"] * 3
     st = env.drops.patient_status(env.patient)
     assert st.cooldown_remaining_s == 0 and st.next_manual_allowed_at is None
-    assert env.manual(1).cooldown_remaining_s == 0
+
+
+def test_per_pill_floor_blocks_the_same_pill_even_with_the_cooldown_off(env: Env):
+    env.set_cooldown(0)
+    assert env.manual(0).status == "DROPPED"                  # 07:55 Vitamin C
+    env.advance(minutes=30)
+    agent = env.agent(0)
+    assert (agent.status, agent.reason, agent.cooldown_remaining_s) == ("DENIED", "COOLDOWN", 30 * 60)
+    assert agent.message.startswith("Vitamin C (demo candy) was dropped at 7:55 AM. The next one can drop at 8:55 AM")
+    demo = env.drops.request_drop(patient_id=env.patient, source="demo", slot=0, requested_by_user_id=env.doctor)
+    assert demo.reason == "COOLDOWN"
+    assert env.manual(1).status == "DROPPED"                  # another pill is fine
+    env.advance(minutes=30)
+    assert env.manual(0).status == "DROPPED"                  # 60 minutes after the first one
+    assert env.drop_commands() == ["DROP_SLOT 0", "DROP_SLOT 1", "DROP_SLOT 0"]
 
 
 def test_uncertain_drops_count_for_the_cooldown(env: Env):
@@ -520,6 +537,7 @@ def test_scheduled_request_outside_the_window_or_for_unknown_doses(env: Env):
 
 def test_inventory_follows_every_outcome(env: Env):
     env.set_cooldown(0)
+    env.settings.min_dose_interval_minutes = 0                  # same pill back to back
     assert env.manual(0).pill_count_after == 19
     env.hw.script(CommandName.DROP_SLOT, Err.INVALID_STATE)
     failed = env.manual(0)
@@ -547,6 +565,7 @@ def test_empty_container_is_refused_and_notified_once_per_episode(env: Env):
 
 def test_no_pill_from_the_sensor_empties_the_container(env: Env):
     env.set_cooldown(0)
+    env.settings.min_dose_interval_minutes = 0                  # same pill back to back
     env.hw.set_pills(0, 0)                                      # physically empty, the database says 20
     out = env.manual(0)
     assert (out.status, out.reason, out.pill_count_after) == ("FAILED", "NO_PILL", 0)
@@ -568,6 +587,7 @@ def test_no_pill_from_the_sensor_empties_the_container(env: Env):
 
 def test_low_stock_is_notified_once_per_crossing(env: Env):
     env.set_cooldown(0)
+    env.settings.min_dose_interval_minutes = 0                  # same pill back to back
     env.compartments.refill(0, set=5, patient_id=env.patient)
     outs = [env.manual(0) for _ in range(5)]
     assert [o.pill_count_after for o in outs] == [4, 3, 2, 1, 0]

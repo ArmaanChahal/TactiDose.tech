@@ -16,9 +16,9 @@ import contextlib
 import logging
 import re
 from datetime import datetime, time, timedelta, timezone
-from typing import Any
+from typing import Annotated, Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr
 
 from tactidose.api import domain
@@ -32,6 +32,7 @@ from tactidose.api.common import (
 )
 from tactidose.auth.deps import CurrentUser, DemoUser, ServicesDep, check_edit, check_view
 from tactidose.core.bus import Topic
+from tactidose.core.interfaces import AuthUser
 from tactidose.db.models import DropSource
 from tactidose.hardware.protocol import MAX_LINE_LENGTH, CommandName, parse_command
 
@@ -72,6 +73,27 @@ def _interrupt(services: Any) -> bool:
 def _command_out(services: Any, result: Any, **extra: Any) -> dict[str, Any]:
     return {"ok": bool(result.ok) if result is not None else False, "result": command_result_view(result),
             "device": device_view(services.hardware), **extra}
+
+
+def demo_viewer(user: DemoUser, services: ServicesDep) -> AuthUser:
+    """Demo panel (clock, simulator): the device's patient and their linked doctor/family only."""
+    _device_patient(services, user, edit=False)
+    return user
+
+
+def demo_operator(user: DemoUser, services: ServicesDep) -> AuthUser:
+    """Device console and data reset: doctor/family linked to the device's patient only."""
+    owner = domain.device_patient(services)
+    if owner is None:
+        if not user.is_caregiver:
+            raise HTTPException(403, NO_PATIENT)
+        return user
+    check_edit(services, user, owner)
+    return user
+
+
+DemoViewer = Annotated[AuthUser, Depends(demo_viewer)]
+DemoOperator = Annotated[AuthUser, Depends(demo_operator)]
 
 
 # --------------------------------------------------------------------------- device
@@ -117,7 +139,7 @@ class CommandBody(BaseModel):
 
 
 @router.post("/api/demo/command")
-def demo_command(body: CommandBody, user: DemoUser, services: ServicesDep) -> dict[str, Any]:
+def demo_command(body: CommandBody, user: DemoOperator, services: ServicesDep) -> dict[str, Any]:
     hw = services.hardware
     parsed = parse_command(body.line, int(hw.num_slots))
     if parsed.empty:
@@ -198,12 +220,12 @@ def _parse_local_datetime(services: Any, text: str) -> datetime:
 
 
 @router.get("/api/demo/clock")
-def get_clock(user: DemoUser, services: ServicesDep) -> dict[str, Any]:
+def get_clock(user: DemoViewer, services: ServicesDep) -> dict[str, Any]:
     return clock_view(services.clock)
 
 
 @router.post("/api/demo/clock")
-def set_clock(body: ClockBody, user: DemoUser, services: ServicesDep) -> dict[str, Any]:
+def set_clock(body: ClockBody, user: DemoViewer, services: ServicesDep) -> dict[str, Any]:
     """``{local_time: "08:00"}`` (today, local), ``{local_datetime: "2026-10-05T08:00"}`` (naive =
     local), ``{offset_minutes: 30}`` (absolute offset from the real time) or ``{reset: true}``."""
     given =[k for k in ("local_time", "local_datetime", "offset_minutes", "reset") if getattr(body, k) is not None]
@@ -235,7 +257,7 @@ def set_clock(body: ClockBody, user: DemoUser, services: ServicesDep) -> dict[st
 
 
 @router.post("/api/demo/jump-to-next-dose")
-def jump_to_next_dose(user: DemoUser, services: ServicesDep) -> dict[str, Any]:
+def jump_to_next_dose(user: DemoViewer, services: ServicesDep) -> dict[str, Any]:
     owner = domain.device_patient(services)
     if owner is None:
         raise HTTPException(409, NO_PATIENT)
@@ -286,12 +308,12 @@ def simulator_view(sim: Any) -> dict[str, Any]:
 
 
 @router.get("/api/demo/simulator")
-def get_simulator(user: DemoUser, services: ServicesDep) -> dict[str, Any]:
+def get_simulator(user: DemoViewer, services: ServicesDep) -> dict[str, Any]:
     return simulator_view(services.sim)
 
 
 @router.post("/api/demo/simulator")
-def post_simulator(body: SimulatorBody, user: DemoUser, services: ServicesDep) -> dict[str, Any]:
+def post_simulator(body: SimulatorBody, user: DemoViewer, services: ServicesDep) -> dict[str, Any]:
     sim = services.sim
     if sim is None:
         raise HTTPException(409, NO_SIM)
@@ -350,7 +372,7 @@ class ResetBody(BaseModel):
 
 
 @router.post("/api/demo/reset")
-def reset(user: DemoUser, services: ServicesDep, body: ResetBody | None = None) -> dict[str, Any]:
+def reset(user: DemoOperator, services: ServicesDep, body: ResetBody | None = None) -> dict[str, Any]:
     try:
         from tactidose.db.seed import reset_demo
     except ImportError:

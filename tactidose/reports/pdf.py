@@ -559,8 +559,8 @@ class _Renderer:
         self._para(f"Generated: {fmt_date(gen)}, {fmt_time(gen)}{who}", gap=0.5)
         dev = d.device
         if dev is not None:
-            cooldown = (f"{dev.manual_cooldown_minutes} minutes" if dev.manual_cooldown_minutes
-                        else "off")
+            minutes = dev.manual_cooldown_minutes
+            cooldown = (f"{minutes} minute{'' if minutes == 1 else 's'}" if minutes else "off")
             self._para(f"Device: {dev.name} ({dev.device_id}) · Cooldown after any drop: {cooldown} · "
                        f"Automatic scheduled drops: {'on' if dev.auto_drop_enabled else 'off'}",
                        size=10, color=INK2, gap=0.5)

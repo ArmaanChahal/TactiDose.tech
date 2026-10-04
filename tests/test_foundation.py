@@ -386,6 +386,12 @@ def test_drop_certainty_rules():
     assert p.CommandResult.host_failure(cmd, p.HostCode.TIMEOUT).drop_certainty is C.UNCERTAIN
     reset = p.CommandResult.host_failure(cmd, p.HostCode.DEVICE_RESET, messages=(_m("OK GATE_OPEN"),))
     assert reset.drop_certainty is C.UNCERTAIN
+    # Reset / stop during gate travel (after AT_SLOT, before GATE_OPEN): a pill may have fallen.
+    at_slot = (_m("OK MOVING 1"), _m("OK AT_SLOT 1"))
+    assert p.CommandResult.host_failure(cmd, p.HostCode.DEVICE_RESET, messages=at_slot).drop_certainty is C.UNCERTAIN
+    assert p.CommandResult(cmd, False, "STOPPED", at_slot).drop_certainty is C.UNCERTAIN
+    moving = (_m("OK MOVING 1"),)
+    assert p.CommandResult.host_failure(cmd, p.HostCode.DEVICE_RESET, messages=moving).drop_certainty is C.NOT_DROPPED
     legacy = p.CommandResult(p.Command.dispense_slot(1, 3), True, "GATE_OPEN")
     assert legacy.drop_certainty is C.DROPPED  # v1 emulation path
     assert p.CommandResult(p.Command.ping(), True, "PONG").drop_certainty is C.NOT_DROPPED

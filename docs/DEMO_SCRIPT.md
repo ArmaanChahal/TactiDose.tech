@@ -30,7 +30,8 @@ Audience: the demo presenter and operator. Use candy or labelled tokens only.
 
 ### B. The Drop button and the cooldown (1 min)
 1. In the doctor window, Cooldown tab: set the cooldown to **2 minutes** for the demo.
-2. Patient window: press **Drop pill** on a container → it drops.
+2. Patient window: press **Drop pill** on **container 3** → it drops. (Not the pill that just
+   dropped: the same pill can never drop twice within 60 minutes, whatever the cooldown.)
 3. Press **Drop pill** again (any container) → refused: *"A pill was dropped at 8:01 AM. The next
    pill can drop at 8:03 AM."* Nothing moved.
 4. Say: "One global cooldown — no accidental repeat drops, and the reason is spoken and shown."
