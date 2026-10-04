@@ -48,7 +48,25 @@ Open **http://127.0.0.1:8000** and sign in with a demo account (password `demo12
 |---|---|---|
 | `alex@demo.tactidose` | patient | patient portal: drop buttons, assistant, schedule, history, reports |
 | `sam@demo.tactidose` | family | care portal for Alex |
-| `dr.lee@demo.tactidose` | doctor | care portal for Alex; receives report emails |
+| `dr.lee@demo.tactidose` | doctor | care portal for Alex (and the test patients below); receives report emails |
+
+**More test patients on the Wi-Fi ESP32.** In Wi-Fi mode (`run --wifi`) the demo also creates four
+test patients:
+* `jordan@demo.tactidose` (Jordan Lee)
+* `maria@demo.tactidose` (Maria Garcia)
+* `priya@demo.tactidose` (Priya Patel)
+* `chen@demo.tactidose` (Chen Wei)
+
+The password is `demo1234` and Dr. Lee is linked to all of them. They all use the **same dispenser**,
+the ESP32 at `172.20.10.9`, and they can all dispense. Each still has their own 3 containers, pill
+counts, medications, schedules, cooldown and history. Patients who sign up in Wi-Fi mode get the
+same setup automatically.
+
+The ESP32 physically has one set of 3 containers. Every patient's "container 1" is the same real
+container 1, while the app keeps a separate pill count per patient.
+
+This is the `TACTIDOSE_SHARED_DEVICE` setting: automatic, so on in Wi-Fi mode and off otherwise. Set
+it to `true` or `false` to force it.
 
 The **demo panel** (`/demo`) has a demo clock ("jump to the next dose"), simulator controls
 (faults, pill counts, button presses) and one-click checklists for the four demo flows. See

@@ -23,7 +23,7 @@ with `docs/ARCHITECTURE.md`, the architecture doc wins.
 | Mechanism | 3 containers; the host sends `DROP_SLOT n` (one pill). Carousel+trapdoor *or* one servo per container — both supported in firmware (`MECHANISM_*` in `config.h`). |
 | Scheduled doses | Drop automatically at their time even if the patient forgets. |
 | Cooldown | **One global cooldown**: after any drop, button/AI drops of *any* pill are refused for N minutes (doctor/family set N, may be 0). Scheduled drops ignore it. |
-| Per-pill floor | **Added after review, owner-approved:** the same pill can never drop twice within 60 min from the button/AI/demo, even with cooldown 0 (`min_dose_interval_minutes`). |
+| Per-pill floor | **Removed by the owner (2026-10-04):** the doctor/family cooldown is the only wait on manual / AI / button / demo drops; with cooldown 0 the same pill can drop again at once. `min_dose_interval_minutes` now only feeds the scheduled double-dose guard. |
 | Double-dose guard | A scheduled dose counts as done if the same pill dropped within max(early window, 60 min) before it. |
 | Agent | Voice + text. It may only *request* a pill; deterministic rules decide. Gemini is the provider (already in the stack). Only **patient** conversations are stored (incl. tool calls). |
 | Editing rights | Only doctor/family edit schedules, cooldown, containers/refills, medications. Patient views and requests. |
@@ -105,7 +105,7 @@ chat). Confirmed findings and their status:
 | Bare negated fragment ("not the calcium", "no, not that one", "can I have my pill, not the calcium") | **fixed** — `turn_guard` blocks `request_pill` for every provider; the rules agent asks "Which pill…?" without the negated pills. The old status was wrong: the rules agent itself dropped the calcium for "not the calcium" after "Which pill?" and for "can I have my pill, not the calcium". Residual: unpunctuated speech "my pill not calcium" is caught by the rules agent only, not by the text-only guard for Gemini |
 | Gemini fallback path could actuate | **not re-verified** (one drop request per message is enforced in the tool executor) |
 | Demo panel usable by any signed-in account; demo drops skipped the cooldown; reset by anyone | **fixed differently**: demo mode stays ON by default for the hackathon, but the panel is limited to the device's patient and linked doctor/family; console and reset are doctor/family only; demo drops obey the global cooldown and the per-pill floor; `DISPENSE_SLOT`/`OPEN_GATE` refused. Set `TACTIDOSE_DEMO_MODE=false` for anything beyond a demo |
-| Same pill twice within 60 min when caregivers set the cooldown to 0 | **fixed** — per-pill floor (`min_dose_interval_minutes`, default 60) for app/agent/button/demo drops, reason `COOLDOWN` |
+| Same pill twice within 60 min when caregivers set the cooldown to 0 | was fixed with a per-pill floor; **floor removed by the owner (2026-10-04)** — the doctor/family cooldown decides |
 | Reset/brown-out while the trapdoor opens recorded as "nothing dropped" | **fixed** — `ERR STOPPED`/`DEVICE_RESET` after `OK AT_SLOT` → UNCERTAIN (needs review) |
 | Device slot count ≠ app setting only warned | open |
 | No-home-sensor carousel re-zeroes at a random position after any reset | open (`alignment_required` until a caregiver confirms Home was the plan) |

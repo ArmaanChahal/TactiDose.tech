@@ -64,8 +64,9 @@ class Settings(BaseSettings):
     gate_open_timeout_s: float = Field(60.0, ge=5, le=600)
     #: After this many hardware failures on one dose it is locked for caregiver review.
     max_dispense_attempts: int = Field(3, ge=1, le=10)
-    #: Never open the same medication's compartment twice within this many minutes, even if
-    #: two scheduled windows overlap (prevents an accidental double dose). 0 disables.
+    #: Scheduled doses only (double-dose guard): a scheduled dose counts as already taken if the same
+    #: medication dropped up to this many minutes before its time, so the automatic drop does not add
+    #: a second pill. Manual / assistant drops are limited only by the doctor/family cooldown. 0 disables.
     min_dose_interval_minutes: int = Field(60, ge=0, le=1440)
     #: If True, "What do I take now?" dispenses immediately (handoff §4.1 single-step flow).
     #: Default False: the user must say "Dispense" / press the button (explicit consent).
@@ -168,6 +169,10 @@ class Settings(BaseSettings):
     serial_baud: int = 115200
     #: hardware_mode "wifi": the ESP32's address. Empty = wifi_config.ESP32_BASE_URL (http://172.20.10.9).
     esp32_url: str | None = None
+    #: Every patient's device record is served by the ONE dispenser this app drives (the same ESP32
+    #: for everyone): each patient keeps their own containers, pill counts, medications, schedules
+    #: and cooldown, and all of them can dispense. Empty = automatic: on in "wifi" mode, off otherwise.
+    shared_device: bool | None = None
     #: Home automatically after connecting if the device reports it is not homed.
     hw_auto_home: bool = True
     hw_heartbeat_s: float = Field(5.0, ge=0.5, le=120)
@@ -290,6 +295,11 @@ class Settings(BaseSettings):
         return bool(self.smtp_host and (self.smtp_from or self.smtp_user))
 
     @property
+    def effective_shared_device(self) -> bool:
+        """All patients' device records are served by the one connected dispenser (see shared_device)."""
+        return self.hardware_mode == "wifi" if self.shared_device is None else bool(self.shared_device)
+
+    @property
     def effective_agent_provider(self) -> str:
         if self.agent_provider == "auto":
             return "gemini" if self.gemini_configured else "rules"
@@ -347,6 +357,7 @@ class Settings(BaseSettings):
             "hardware_mode": self.hardware_mode,
             "serial_port": self.serial_port,
             "esp32_url": self.esp32_url if self.hardware_mode == "wifi" else None,
+            "shared_device": self.effective_shared_device,
             "demo_mode": self.demo_mode,
             "timezone": self.timezone or "system",
             "database": "tidb" if (self.tidb_host and not self.database_url) else (

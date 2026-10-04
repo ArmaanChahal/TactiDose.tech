@@ -47,6 +47,7 @@ from tactidose.core.clock import Clock
 from tactidose.db.devlog import log_event
 from tactidose.db.models import (
     ALL_DAYS,
+    Device,
     DoseEvent,
     DoseStatus,
     Frequency,
@@ -57,7 +58,7 @@ from tactidose.db.models import (
 )
 from tactidose.db.outbox import enqueue_adherence
 from tactidose.db.session import Database
-from tactidose.medication.compartments import assigned_slots, get_device, iso
+from tactidose.medication.compartments import assigned_slots, get_device, iso, served_device_ids
 from tactidose.medication.errors import NotFoundError, ValidationError
 from tactidose.medication.notifications import PendingNotifications, clock_label
 from tactidose.medication.safety import dispense_window, display_slot, to_dose_info
@@ -330,43 +331,51 @@ class Scheduler:
         dates = [today + timedelta(days=i) for i in range(-1, days_ahead + 1)]
         payloads: list[dict[str, Any]] = []
         with self.db.session() as s:
-            dev = get_device(s, self.settings)
-            if dev is None:
+            devices = [d for d in (s.get(Device, i) for i in served_device_ids(s, self.settings)) if d is not None]
+            if not devices:
                 log.debug("materialize: device %s not bootstrapped yet", self.settings.device_id)
                 return 0
-            schedules = s.scalars(
-                select(Schedule)
-                .join(Medication, Schedule.medication_id == Medication.medication_id)
-                .options(selectinload(Schedule.medication))
-                .where(
-                    Schedule.active.is_(True),
-                    Medication.active.is_(True),
-                    Medication.confirmed_by_user.is_(True),
-                    Medication.user_id == dev.user_id,
-                )
-                .order_by(Schedule.schedule_id)
-            ).all()
-            for sched in schedules:
-                effective_from = sched.created_at or now
-                wanted: list[tuple[date, datetime]] = []
-                for d in dates:
-                    at = occurrence_for(sched, d, self.clock)
-                    if at is None:
-                        continue  # day not listed (WEEKLY)
-                    if at + late < effective_from:
-                        continue  # never fabricate past doses for new/redefined schedules
-                    if at > horizon_end:
-                        continue
-                    wanted.append((d, at))
-                if wanted:
-                    payloads.extend(self._insert_missing(s, sched, wanted))
+            for dev in devices:   # one, or every patient's record on a shared dispenser
+                payloads.extend(self._materialize_device(s, dev, dates, horizon_end, late, now))
         publish_all(self.bus, Topic.DOSE_UPDATED, payloads)
         if payloads:
             log.info("materialized %d dose event(s)", len(payloads))
             publish_patient_status(self.bus, {p["patient_id"]: "dose" for p in payloads})
         return len(payloads)
 
-    def _insert_missing(self, s: Session, sched: Schedule, wanted: list[tuple[date, datetime]]) -> list[dict[str, Any]]:
+    def _materialize_device(self, s: Session, dev: Device, dates: list[date], horizon_end: datetime,
+                            late: timedelta, now: datetime) -> list[dict[str, Any]]:
+        payloads: list[dict[str, Any]] = []
+        schedules = s.scalars(
+            select(Schedule)
+            .join(Medication, Schedule.medication_id == Medication.medication_id)
+            .options(selectinload(Schedule.medication))
+            .where(
+                Schedule.active.is_(True),
+                Medication.active.is_(True),
+                Medication.confirmed_by_user.is_(True),
+                Medication.user_id == dev.user_id,
+            )
+            .order_by(Schedule.schedule_id)
+        ).all()
+        for sched in schedules:
+            effective_from = sched.created_at or now
+            wanted: list[tuple[date, datetime]] = []
+            for d in dates:
+                at = occurrence_for(sched, d, self.clock)
+                if at is None:
+                    continue  # day not listed (WEEKLY)
+                if at + late < effective_from:
+                    continue  # never fabricate past doses for new/redefined schedules
+                if at > horizon_end:
+                    continue
+                wanted.append((d, at))
+            if wanted:
+                payloads.extend(self._insert_missing(s, sched, wanted, dev.device_id))
+        return payloads
+
+    def _insert_missing(self, s: Session, sched: Schedule, wanted: list[tuple[date, datetime]],
+                        device_id: str | None = None) -> list[dict[str, Any]]:
         lo = wanted[0][1] - timedelta(days=1)
         hi = wanted[-1][1] + timedelta(days=1)
         existing = s.scalars(
@@ -394,7 +403,7 @@ class Scheduler:
                 schedule_id=sched.schedule_id,
                 medication_id=sched.medication_id,
                 user_id=sched.medication.user_id,
-                device_id=self.settings.device_id,
+                device_id=device_id or self.settings.device_id,
                 scheduled_at=at,
                 status=DoseStatus.SCHEDULED.value,
             )
@@ -427,7 +436,7 @@ class Scheduler:
                 select(DoseEvent)
                 .options(selectinload(DoseEvent.medication))
                 .where(
-                    DoseEvent.device_id == self.settings.device_id,
+                    DoseEvent.device_id.in_(served_device_ids(s, self.settings)),
                     DoseEvent.status.in_(_RECONCILE_STATUSES),
                     DoseEvent.scheduled_at <= opens_by,
                 )
