@@ -196,7 +196,6 @@ class Settings(BaseSettings):
 
     # ------------------------------------------------------------------ voice input (offline)
     voice_enabled: bool = True
-    voice_wake_enabled: bool = True
     vosk_model_path: Path = Path("models/vosk-model-small-en-us-0.15")
     #: Restrict Vosk to the command vocabulary (much more robust for a small command set).
     voice_use_grammar: bool = True

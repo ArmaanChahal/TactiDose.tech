@@ -447,7 +447,7 @@ async function start() {
   });
 
   const initial = window.location.hash.slice(1);
-  showView(VIEWS.includes(initial) ? initial : 'assistant', { focus: false });
+  showView(VIEWS.includes(initial) ? initial : 'home', { focus: false });
   stream.start();
   notifications.load();
   await loadStatus();

@@ -35,7 +35,6 @@ from typing import Any, Callable
 from sqlalchemy import select
 
 from tactidose.agent import AgentNotAllowed, AgentUnavailable
-from tactidose.agent.wake import WakeGate
 from tactidose.agent.rules_agent import analyse, describe_outcome, status_summary
 from tactidose.agent.tools import as_int, due_doses
 from tactidose.config import Settings
@@ -84,7 +83,6 @@ class DeviceVoiceLoop:
         recognizer_factory: Callable[..., Any] | None = None,
     ) -> None:
         self.settings = settings
-        self._wake = WakeGate()
         self._agent = agent
         self._drops = drops
         self._clock = clock
@@ -197,15 +195,11 @@ class DeviceVoiceLoop:
             self._close_quietly(recognizer)
         elif not listening:
             log.info("voice loop: voice input unavailable (buttons still work)")
-        elif self.settings.voice_wake_enabled:
-            self._enqueue("say", ("CareBridge is ready. Say Hey Care, followed by your request.", "info", False))
 
     def _default_recognizer(self, *, on_text: Callable[[str, float], None], is_muted: Callable[[], bool]) -> Any:
         from tactidose.voice.recognizer import VoiceRecognizer
 
-        # Use a command vocabulary for the hands-free device microphone.
-        settings = self.settings.model_copy(update={"voice_use_grammar": True}) if self.settings.voice_wake_enabled else self.settings
-        return VoiceRecognizer(settings, on_text=on_text, is_muted=is_muted, bus=self._bus)
+        return VoiceRecognizer(self.settings, on_text=on_text, is_muted=is_muted, bus=self._bus)
 
     @staticmethod
     def _close_quietly(obj: Any) -> None:
@@ -220,18 +214,10 @@ class DeviceVoiceLoop:
         try:
             flags = analyse(text)
             if flags.stop:
-                self._wake.reset()
                 self._interrupt()
                 self._enqueue("say", (phrases.STOPPED, "info", True), cancel=True)
                 return
             if flags.norm:
-                if self.settings.voice_wake_enabled:
-                    text = self._wake.accept(text)
-                    if text is None:
-                        return
-                    if not text:
-                        self._enqueue("say", ("Mhm.", "info", False))
-                        return
                 self._enqueue("chat", text)
         except Exception:  # noqa: BLE001 - never break the recognizer thread
             log.exception("voice loop: handle_text failed")

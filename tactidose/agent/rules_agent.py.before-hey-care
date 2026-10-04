@@ -613,9 +613,6 @@ class RulesAgent:
             if len(strong) > 1:
                 return phrases.ONE_PILL_ONLY  # two medications named
             return phrases.which_pill(medication_options(mentions))
-        if f.norm in ('give me my next pill', 'please give me my next pill', 'dispense my next pill', 'give me my next dose', 'please dispense my next pill'):
-            if not due_doses(status, now=self._clock.now(), settings=self.settings):
-                return phrases.NOTHING_DUE
         args: dict[str, Any] = {"reason": " ".join(f.text.split())[:120]}
         if refs:
             args["container_number"] = refs[0]

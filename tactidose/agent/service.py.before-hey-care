@@ -302,9 +302,6 @@ class AgentService:
             return phrases.EMERGENCY, deterministic
         if flags.stop:
             return self._rules.respond(text, tools, history=history), deterministic
-        # Explicit next-dose commands use the existing guarded tools without a model round trip.
-        if flags.norm in ('give me my next pill', 'please give me my next pill', 'dispense my next pill', 'give me my next dose', 'please dispense my next pill'):
-            return self._rules.respond(text, tools, history=history), MODEL_RULES
         if provider != "gemini":
             return self._rules.respond(text, tools, history=history), MODEL_RULES
         if self._gemini_pause_s() > 0:   # breaker open: answer at once instead of waiting on a timeout

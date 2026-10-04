@@ -1,0 +1,25 @@
+"""Local wake phrase gate. Ambient transcripts never go to the agent."""
+import re
+import time
+
+class WakeGate:
+    def __init__(self, now=time.monotonic):
+        self.now = now
+        self.until = 0.0
+
+    def accept(self, text):
+        if "[unk]" in text.lower():
+            self.reset()
+            return None
+        match = re.match(r"^\s*(?:hey|okay|ok)\s+care(?:\s*bridge)?\b[\s,.!?;:]*", text, re.I)
+        if match:
+            command = text[match.end():].strip()
+            self.until = self.now() + 15 if not command else 0.0
+            return command  # empty string means acknowledge and listen for one command
+        if self.now() < self.until:
+            self.until = 0.0
+            return text.strip() or None
+        return None
+
+    def reset(self):
+        self.until = 0.0

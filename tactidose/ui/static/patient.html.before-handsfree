@@ -113,7 +113,7 @@
     <!-- ============================================================ Assistant -->
     <section id="view-assistant" class="view" aria-labelledby="assistant-title" hidden>
       <h1 id="assistant-title" class="view-title" tabindex="-1">Assistant</h1>
-      <p class="view-intro">At the dispenser, say “Hey Care, give me my pill” or “Hey Care, when is my next pill?” Other phrases: “I took my pill,” “how many pills are left,” and “repeat that.” Say “Hey Care” before each new request. Talk and typing remain available for free-form conversation.</p>
+      <p class="view-intro">Ask about your pills, or ask for a pill. Press Talk and speak, or type below.</p>
       <p id="chat-log-label" class="visually-hidden">Conversation with the assistant</p>
       <ol id="chat-log" class="chat-log" role="log" aria-live="polite" aria-relevant="additions" aria-labelledby="chat-log-label" tabindex="0"></ol>
       <p id="voice-status" class="voice-status" role="status"></p>

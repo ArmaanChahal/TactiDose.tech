@@ -198,13 +198,13 @@ class DeviceVoiceLoop:
         elif not listening:
             log.info("voice loop: voice input unavailable (buttons still work)")
         elif self.settings.voice_wake_enabled:
-            self._enqueue("say", ("CareBridge is ready. Say Hey Care, followed by your request.", "info", False))
+            self._enqueue("say", ("CareBridge is ready. Say Hey CareBridge, followed by your request.", "info", False))
 
     def _default_recognizer(self, *, on_text: Callable[[str, float], None], is_muted: Callable[[], bool]) -> Any:
         from tactidose.voice.recognizer import VoiceRecognizer
 
-        # Use a command vocabulary for the hands-free device microphone.
-        settings = self.settings.model_copy(update={"voice_use_grammar": True}) if self.settings.voice_wake_enabled else self.settings
+        # The wake phrase needs full-vocabulary local recognition.
+        settings = self.settings.model_copy(update={"voice_use_grammar": False}) if self.settings.voice_wake_enabled else self.settings
         return VoiceRecognizer(settings, on_text=on_text, is_muted=is_muted, bus=self._bus)
 
     @staticmethod
@@ -230,7 +230,7 @@ class DeviceVoiceLoop:
                     if text is None:
                         return
                     if not text:
-                        self._enqueue("say", ("Mhm.", "info", False))
+                        self._enqueue("say", ("I am listening. What would you like?", "info", False))
                         return
                 self._enqueue("chat", text)
         except Exception:  # noqa: BLE001 - never break the recognizer thread

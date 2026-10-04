@@ -344,17 +344,6 @@ GRAMMAR_PHRASES: list[str] = [
 ]
 
 
-# Common command vocabulary for the device microphone. Keep unknown speech and negations.
-_COMMON_CARE_PHRASES = ['dispense pill', 'dispense a pill', 'dispense my pill', 'please dispense my pill', 'give me a pill', 'give me my pill', 'can i have my pill', 'my next pill', 'next pill', 'when is my next pill', 'when is my next dose', 'what medicine is due', 'how many pills are left', 'i took my pill', 'i have taken my pill', 'i did not take my pill', 'i have not taken my pill', 'do not dispense pill', "don't dispense pill", 'do not give me a pill', "don't give me my pill", 'do not drop my pill', 'i do not want a pill', 'give me two pills', 'i already took my pill', 'repeat that', 'speak slower', 'start a well being check in', 'how am i doing', 'i feel good', 'i feel sad', 'i feel anxious', 'i feel tired', 'i need help', 'call my caregiver', 'i have chest pain', 'i cannot breathe', 'i took too many pills', 'i want to hurt myself']
-_COMMON_CARE_PHRASES += ['give me my next pill', 'please give me my next pill', 'dispense my next pill', 'give me my next dose', 'please dispense my next pill', 'do not give me my next pill', 'do not dispense my next pill']
-_WAKE_PHRASES = ["hey care", "okay care", "hey care bridge"]
-GRAMMAR_PHRASES = list(dict.fromkeys(
-    GRAMMAR_PHRASES + _COMMON_CARE_PHRASES + _WAKE_PHRASES
-    + [wake + " " + phrase for wake in _WAKE_PHRASES
-       for phrase in GRAMMAR_PHRASES + _COMMON_CARE_PHRASES if phrase != "[unk]"]
-))
-
-
 def grammar_words() -> set[str]:
     """Every distinct word used by :data:`GRAMMAR_PHRASES` (excluding ``[unk]``)."""
     return {w for phrase in GRAMMAR_PHRASES for w in phrase.split() if w != "[unk]"}
