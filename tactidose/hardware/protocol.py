@@ -6,6 +6,11 @@ keys in ``STATUS``. Everything from v1 is unchanged, so v1 firmware still works:
 emulates a drop with ``DISPENSE_SLOT n`` + ``CLOSE_GATE`` when the device does not report
 ``proto=1.1``.
 
+Optional extension (2026-10, additive, no version bump - ``STATUS`` is unchanged):
+``BUZZER ON <ms>`` / ``BUZZER OFF`` / ``BUZZER`` (query) -> ``OK BUZZER ON <ms>`` /
+``OK BUZZER OFF``; ``ERR NO_BUZZER`` when no buzzer is fitted. Firmware without it answers
+``ERR UNKNOWN_COMMAND``, which is how the host tells (docs/SERIAL_PROTOCOL.md §13).
+
 This module is the host-side single source of truth for the wire format.
 The normative description lives in ``docs/SERIAL_PROTOCOL.md``; the shared
 conformance scenarios live in ``tactidose/hardware/conformance.json``.
@@ -29,6 +34,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Mapping
 
+from tactidose.hardware import buzzer_config
+
 PROTOCOL_VERSION = "1.1"
 DEFAULT_BAUD = 115200
 MAX_LINE_LENGTH = 64
@@ -47,8 +54,12 @@ __all__ = [
     "parse_command", "parse_message", "format_message", "classify",
     "DEFAULT_TIMEOUTS_S", "BUSY_STATES", "UNHOMED_STATES", "GATE_OPENING_COMMANDS",
     "LONG_RUNNING_COMMANDS", "DROP_COMMANDS", "compartment_number", "compartment_label",
-    "DropCertainty", "drop_certainty", "supports_drop_slot",
+    "DropCertainty", "drop_certainty", "supports_drop_slot", "BUZZER_MAX_MS",
 ]
+
+#: Largest ``<ms>`` accepted in ``BUZZER ON <ms>`` on the wire (the device clamps to its own max).
+BUZZER_MAX_MS = 65535
+MAX_BUZZER_DIGITS = 5
 
 
 # --------------------------------------------------------------------------- enums
@@ -112,6 +123,7 @@ class CommandName(str, Enum):
     CLOSE_GATE = "CLOSE_GATE"
     STOP = "STOP"
     DROP_SLOT = "DROP_SLOT"   # v1.1
+    BUZZER = "BUZZER"         # optional extension: BUZZER ON <ms> | BUZZER OFF | BUZZER (query)
 
 
 SLOT_COMMANDS = frozenset({CommandName.MOVE_SLOT, CommandName.DISPENSE_SLOT, CommandName.DROP_SLOT})
@@ -147,6 +159,7 @@ class Ok(str, Enum):
     GATE_CLOSED = "GATE_CLOSED"
     STOPPED = "STOPPED"
     DROPPED = "DROPPED"   # v1.1: "OK DROPPED n"
+    BUZZER = "BUZZER"     # extension: "OK BUZZER ON <ms>" / "OK BUZZER OFF"
 
 
 class Err(str, Enum):
@@ -161,6 +174,7 @@ class Err(str, Enum):
     UNKNOWN_COMMAND = "UNKNOWN_COMMAND"
     STOPPED = "STOPPED"
     NO_PILL = "NO_PILL"   # v1.1: drop sensor saw no pill (container empty / jammed)
+    NO_BUZZER = "NO_BUZZER"   # extension: firmware knows BUZZER but no buzzer is fitted
 
 
 class Ev(str, Enum):
@@ -206,6 +220,7 @@ DEFAULT_TIMEOUTS_S: Mapping[CommandName, float] = {
     CommandName.CLOSE_GATE: 5.0,
     CommandName.STOP: 3.0,
     CommandName.DROP_SLOT: 30.0,
+    CommandName.BUZZER: buzzer_config.COMMAND_TIMEOUT_S,
 }
 
 
@@ -237,8 +252,18 @@ class Command:
 
     name: CommandName
     slot: int | None = None
+    #: ``BUZZER`` only: ``()`` (query), ``("OFF",)`` or ``("ON", "<ms>")``.
+    args: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
+        if self.name is CommandName.BUZZER:
+            if self.slot is not None:
+                raise ProtocolError("BUZZER takes no slot argument")
+            if _buzzer_ms(self.args) is None:
+                raise ProtocolError("BUZZER takes no argument, OFF, or ON <ms> (1..65535)")
+            return
+        if self.args:
+            raise ProtocolError(f"{self.name.value} takes no extra arguments")
         if self.name in SLOT_COMMANDS:
             if self.slot is None or isinstance(self.slot, bool) or not isinstance(self.slot, int):
                 raise ProtocolError(f"{self.name.value} requires an integer slot")
@@ -249,6 +274,8 @@ class Command:
 
     # -- encoding -------------------------------------------------------------
     def to_line(self) -> str:
+        if self.args:
+            return " ".join((self.name.value, *self.args))
         if self.slot is None:
             return self.name.value
         return f"{self.name.value} {self.slot}"
@@ -315,6 +342,34 @@ class Command:
     def stop(cls) -> "Command":
         return cls(CommandName.STOP)
 
+    @classmethod
+    def buzzer_on(cls, ms: int) -> "Command":
+        """Extension: sound the buzzer for ``ms`` milliseconds (the device clamps to its max)."""
+        if isinstance(ms, bool) or not isinstance(ms, int) or not 1 <= ms <= BUZZER_MAX_MS:
+            raise ProtocolError(f"buzzer duration must be an int in 1..{BUZZER_MAX_MS}, got {ms!r}")
+        return cls(CommandName.BUZZER, args=("ON", str(ms)))
+
+    @classmethod
+    def buzzer_off(cls) -> "Command":
+        return cls(CommandName.BUZZER, args=("OFF",))
+
+    @classmethod
+    def buzzer_query(cls) -> "Command":
+        """Extension: ``OK BUZZER ON <remaining ms>`` / ``OK BUZZER OFF``; also the capability probe."""
+        return cls(CommandName.BUZZER)
+
+
+def _buzzer_ms(args: tuple[str, ...]) -> int | None:
+    """``BUZZER`` arguments -> -1 (query), 0 (OFF), ms (ON); None when malformed."""
+    if not args:
+        return -1
+    if len(args) == 1 and args[0] == "OFF":
+        return 0
+    if len(args) == 2 and args[0] == "ON" and _DIGITS.match(args[1]) and len(args[1]) <= MAX_BUZZER_DIGITS:
+        value = int(args[1])
+        return value if 1 <= value <= BUZZER_MAX_MS else None
+    return None
+
 
 @dataclass(frozen=True)
 class ParsedCommand:
@@ -356,6 +411,10 @@ def parse_command(line: str, num_slots: int = DEFAULT_NUM_SLOTS) -> ParsedComman
     except ValueError:
         return ParsedCommand(error=Err.UNKNOWN_COMMAND)
     args = tokens[1:]
+    if name is CommandName.BUZZER:
+        if _buzzer_ms(tuple(args)) is None:
+            return ParsedCommand(error=Err.UNKNOWN_COMMAND, name=name)
+        return ParsedCommand(command=Command(name, args=tuple(args)), name=name)
     if name in SLOT_COMMANDS:
         if len(args) != 1 or not _DIGITS.match(args[0]) or len(args[0]) > MAX_SLOT_DIGITS:
             return ParsedCommand(error=Err.INVALID_SLOT, name=name)
@@ -546,6 +605,7 @@ _SUCCESS: Mapping[CommandName, str] = {
     CommandName.CLOSE_GATE: Ok.GATE_CLOSED.value,
     CommandName.STOP: Ok.STOPPED.value,
     CommandName.DROP_SLOT: Ok.DROPPED.value,
+    CommandName.BUZZER: Ok.BUZZER.value,
 }
 
 _MOTION_FAILURES = frozenset(
@@ -574,6 +634,7 @@ _FAILURES: Mapping[CommandName, frozenset[str]] = {
     CommandName.CLOSE_GATE: frozenset({Err.BUSY.value, Err.UNKNOWN_COMMAND.value}),
     CommandName.STOP: frozenset(),
     CommandName.DROP_SLOT: _MOTION_FAILURES | {Err.NO_PILL.value},
+    CommandName.BUZZER: frozenset({Err.NO_BUZZER.value, Err.UNKNOWN_COMMAND.value}),
 }
 
 _SLOT_TAGGED = frozenset({Ok.MOVING.value, Ok.AT_SLOT.value, Ok.DROPPED.value})

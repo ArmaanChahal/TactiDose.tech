@@ -236,6 +236,35 @@
  * Solid = READY / gate open, slow blink = moving / homing, fast blink = FAULT. */
 #define PIN_STATUS_LED -1
 
+/* ================================================================ BUZZER (edit here) =================
+ * The ONLY firmware block to change for the real buzzer. Checklist: docs/BUZZER.md.
+ * The host side is one setting (TACTIDOSE_BUZZER_BACKEND=serial) plus tactidose/hardware/buzzer_config.py.
+ * Protocol: BUZZER ON <ms> / BUZZER OFF / BUZZER (SERIAL_PROTOCOL.md section 13). The buzzer never
+ * blocks: it runs on a timer in loop(), STOP and a reset silence it, and it never delays DROP_SLOT. */
+
+/* GPIO the buzzer (or its transistor) is wired to.
+ * TODO: set the real pin when the buzzer is fitted, e.g. 33 (any free output-capable pin: not 6-11,
+ * not 34-39, not 1/3; avoid the strapping pins 0, 2, 5, 12, 15).
+ * -1 = no buzzer: BUZZER ON answers "ERR NO_BUZZER" and the host falls back to the laptop tone. */
+#define BUZZER_PIN -1
+
+/* What kind of buzzer is fitted:
+ *   BUZZER_ACTIVE  - has its own oscillator (usually marked "+" and sealed): the pin just switches it.
+ *   BUZZER_PASSIVE - a bare piezo/speaker: the firmware drives a square wave at BUZZER_TONE_HZ. */
+#define BUZZER_ACTIVE 1
+#define BUZZER_PASSIVE 2
+#define BUZZER_TYPE BUZZER_ACTIVE
+
+/* BUZZER_PASSIVE only: tone frequency in Hz. 2000-4000 Hz is loudest for most piezo discs. */
+#define BUZZER_TONE_HZ 2700
+
+/* BUZZER_ACTIVE only: 1 = pin HIGH sounds it (most modules, NPN transistor); 0 = pin LOW sounds it. */
+#define BUZZER_ACTIVE_HIGH 1
+
+/* Hard limit for one BUZZER ON, in ms (1..65535). The firmware switches the buzzer off after this,
+ * whatever the host asked. [host] keep it >= MAX_ON_MS in tactidose/hardware/buzzer_config.py. */
+#define BUZZER_MAX_ON_MS 10000UL
+
 /* ================================================================ host timeouts (checked at compile time) */
 
 /* [host] TACTIDOSE_TIMEOUT_MOVE_S / TACTIDOSE_TIMEOUT_HOME_S / TACTIDOSE_TIMEOUT_DROP_S in ms. The

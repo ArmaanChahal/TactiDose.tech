@@ -18,6 +18,7 @@ from typing import Literal
 from pydantic import AliasChoices, Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from tactidose.hardware import buzzer_config
 from tactidose.hardware.protocol import DEFAULT_TIMEOUTS_S, MAX_SLOTS, MIN_SLOTS, CommandName
 
 
@@ -153,6 +154,11 @@ class Settings(BaseSettings):
     demo_buzzer_seconds: float = Field(5.0, ge=0, le=60)
     #: Extract mood / symptoms / concerns from the free-text check-in with Gemini (rules otherwise).
     demo_checkin_ai: bool = True
+    #: Which buzzer guides the patient to the pill: "laptop" (beeping tone from the kiosk / demo
+    #: screen - today's behaviour), "serial" (the device's buzzer via BUZZER ON/OFF, falls back to
+    #: the laptop tone), "both", or "none". Values per side: tactidose/hardware/buzzer_config.py and
+    #: the BUZZER block in firmware config.h. Checklist: docs/BUZZER.md.
+    buzzer_backend: Literal["laptop", "serial", "both", "none"] = "laptop"
 
     # ------------------------------------------------------------------ hardware
     hardware_mode: Literal["sim", "serial", "none"] = "sim"
@@ -322,6 +328,7 @@ class Settings(BaseSettings):
             CommandName.CLOSE_GATE: self.timeout_gate_s,
             CommandName.STOP: self.timeout_stop_s,
             CommandName.DROP_SLOT: self.timeout_drop_s,
+            CommandName.BUZZER: buzzer_config.COMMAND_TIMEOUT_S,
         }[name]
 
     def ensure_dirs(self) -> None:

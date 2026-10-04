@@ -102,6 +102,11 @@ static_assert(tactidose::config_check::kWorstDropMs + 5000.0f <= static_cast<flo
 static_assert(GATE_MAX_OPEN_MS >= 10000UL && GATE_MAX_OPEN_MS <= 600000UL,
               "GATE_MAX_OPEN_MS must be 10 s..10 min (rule 8.7: default 120 s)");
 static_assert(DEBOUNCE_MS >= 30 && DEBOUNCE_MS <= 200, "buttons must be debounced 30..200 ms (rule 8.8)");
+static_assert(BUZZER_TYPE == BUZZER_ACTIVE || BUZZER_TYPE == BUZZER_PASSIVE,
+              "BUZZER_TYPE must be BUZZER_ACTIVE or BUZZER_PASSIVE");
+static_assert(BUZZER_MAX_ON_MS >= 1UL && BUZZER_MAX_ON_MS <= 65535UL, "BUZZER_MAX_ON_MS must be 1..65535 ms");
+static_assert(BUZZER_TONE_HZ >= 100 && BUZZER_TONE_HZ <= 10000, "BUZZER_TONE_HZ must be 100..10000 Hz");
+static_assert(BUZZER_PIN >= -1, "BUZZER_PIN: a GPIO number, or -1 for no buzzer");
 static_assert(SERVO_CLOSED_DEG >= 0 && SERVO_CLOSED_DEG <= 180 && SERVO_OPEN_DEG >= 0 && SERVO_OPEN_DEG <= 180,
               "servo angles must be 0..180");
 static_assert(SERVO_CLOSED_DEG != SERVO_OPEN_DEG, "SERVO_CLOSED_DEG and SERVO_OPEN_DEG must differ");
@@ -153,6 +158,8 @@ inline CoreConfig makeCoreConfig() {
   c.motionTimeoutMarginMs = MOTION_TIMEOUT_MARGIN_MS;
   c.holdWhenIdle = STEPPER_HOLD_WHEN_IDLE != 0;
   c.debugLog = DEBUG_LOG != 0;
+  c.hasBuzzer = BUZZER_PIN >= 0;
+  c.buzzerMaxOnMs = BUZZER_MAX_ON_MS;
   return c;
 }
 

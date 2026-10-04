@@ -17,6 +17,7 @@ check-apis             tiny live requests to each configured cloud service (keys
 download-voice-model   fetch the offline Vosk speech model
 warm-tts-cache         pre-render the critical spoken phrases
 guided-demo            headless MORNING / NOON / NIGHT judge demo on the simulator (scripted answers)
+buzzer-test            sound the configured buzzer backend for 2 s (wiring check, docs/BUZZER.md)
 generate-report        PDF report for a patient (optionally saved to a file)
 send-test-email        check the report e-mail set-up
 =====================  ==================================================================
@@ -790,6 +791,71 @@ def _cmd_guided_demo(args: argparse.Namespace) -> int:
         shutdown(services)
 
 
+# =========================================================================== buzzer test
+
+
+def _cmd_buzzer_test(args: argparse.Namespace) -> int:
+    import time as _time
+
+    from tactidose.hardware import buzzer_config
+    from tactidose.hardware.buzzer import create_buzzer
+
+    if args.sim:
+        os.environ["TACTIDOSE_HARDWARE_MODE"] = "sim"
+    elif args.serial is not None:
+        os.environ.update({"TACTIDOSE_HARDWARE_MODE": "serial", "TACTIDOSE_SERIAL_PORT": args.serial})
+    settings = _settings()
+    backend = args.backend or settings.buzzer_backend
+    settings = settings.model_copy(update={"buzzer_backend": backend})
+    ms = int(args.ms or buzzer_config.TEST_DURATION_MS)
+    _out(f"Buzzer test: backend {backend}, {ms} ms (hardware: {settings.hardware_mode}).")
+    hardware = None
+    if backend in ("serial", "both"):
+        from tactidose.hardware.serial_client import create_hardware
+
+        hardware, _sim = create_hardware(settings)
+        hardware.start()
+        deadline = _time.monotonic() + 15
+        while not hardware.snapshot().connected and _time.monotonic() < deadline:
+            _time.sleep(0.1)
+        if not hardware.snapshot().connected:
+            _out("  The device is not connected (check the USB cable / port).")
+        else:
+            probe = getattr(hardware, "buzzer_query", None)
+            reply = probe() if callable(probe) else None
+            meaning = {
+                "BUZZER": "the firmware has the BUZZER command",
+                "UNKNOWN_COMMAND": "the firmware is older than the BUZZER command (flash the new firmware)",
+                "NO_BUZZER": "BUZZER_PIN is still -1 in config.h (set the pin and flash again)",
+            }
+            code = getattr(reply, "code", "no reply")
+            _out(f"  Device probe: {code} - {meaning.get(code, 'no usable reply')}.")
+    buzzer = create_buzzer(settings, hardware, play_locally=True)
+    try:
+        sounded = buzzer.on(ms)
+        hw_on = buzzer.hardware_active
+        _time.sleep(ms / 1000.0)
+        buzzer.off()
+    finally:
+        buzzer.close()
+        if hardware is not None:
+            hardware.close()
+    if backend == "none":
+        _out("  Backend 'none': nothing sounds (expected).")
+        return EXIT_OK
+    if backend in ("serial", "both"):
+        if hw_on:
+            _out("  OK: the device's buzzer was switched on.")
+            return EXIT_OK
+        serial_part = getattr(buzzer, "serial", buzzer)
+        error = getattr(serial_part, "last_error", None) or "not connected"
+        fallback = "the laptop tone played instead" if backend == "serial" else "only the laptop tone played"
+        _out(f"  The device's buzzer was NOT used ({error}); {fallback}.")
+        return EXIT_FAILURE
+    _out("  OK: laptop tone played on this computer's speaker." if sounded else "  Nothing sounded.")
+    return EXIT_OK if sounded else EXIT_FAILURE
+
+
 # =========================================================================== reports / e-mail
 
 
@@ -1044,6 +1110,20 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--data-dir", help="data folder (default: <TACTIDOSE_DATA_DIR>/guided-demo)")
     p.add_argument("--speak", action="store_true", help="render speech too (default: captions only)")
     p.set_defaults(handler=_cmd_guided_demo)
+
+    p = sub.add_parser("buzzer-test", help="sound the buzzer for 2 seconds (wiring check)",
+                       description="Fire the buzzer backend (TACTIDOSE_BUZZER_BACKEND, or --backend) once, "
+                                   "without running the demo, and say what happened. serial/both talk to "
+                                   "the device (TACTIDOSE_HARDWARE_MODE / --serial PORT / --sim). Exit 0 when "
+                                   "the chosen backend sounded, 1 when it fell back. See docs/BUZZER.md.")
+    p.add_argument("--backend", choices=["laptop", "serial", "both", "none"],
+                   help="override TACTIDOSE_BUZZER_BACKEND for this test")
+    hw_choice = p.add_mutually_exclusive_group()
+    hw_choice.add_argument("--serial", metavar="PORT", help="the device's port: COM5, /dev/ttyUSB0 or auto")
+    hw_choice.add_argument("--sim", action="store_true", help="use the built-in simulated ESP32")
+    p.add_argument("--ms", type=_int_in(1, 65535, "the duration"), default=None,
+                   help="how long to sound it (default: buzzer_config.TEST_DURATION_MS = 2000)")
+    p.set_defaults(handler=_cmd_buzzer_test)
 
     p = sub.add_parser("warm-tts-cache", help="pre-render the critical spoken phrases")
     p.set_defaults(handler=_cmd_warm_tts_cache)

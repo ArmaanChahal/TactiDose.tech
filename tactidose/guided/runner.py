@@ -7,7 +7,7 @@ on its own ``guided-demo`` thread, cancellable at every wait. For each slot (con
    more, then treated as no). Answers are read by ``rules_agent.analyse`` (:func:`classify_yes_no`).
 2. No -> the slot's scheduled dose is skipped (``DropService.skip_dose``, note "Declined ...") and
    the slot is DECLINED.
-3. Yes -> "I'm turning on the buzzer ..." + the (simulated) buzzer, then exactly ONE
+3. Yes -> "I'm turning on the buzzer ..." + ``Buzzer.on()``, then exactly ONE
    ``DropService.request_drop(source="schedule", dose_event_id=<this slot's dose>)``. DropService
    applies every rule as for any scheduled dose (dose window, double-dose guard, inventory, review,
    hardware); a refusal is said honestly with the deterministic sentence (``describe_outcome``).
@@ -27,6 +27,9 @@ morning slot and re-seeds the demo data there (``reset_demo``), so no earlier do
 
 Storage: every prompt and answer in a ``conversations`` row titled "Guided demo"; each slot in
 ``guided_demo_slots`` (answers, outcome, ``drop_id``, ``dose_event_id``, check-in extraction).
+Buzzer: only through the :class:`~tactidose.hardware.buzzer.Buzzer` interface (backend from
+``TACTIDOSE_BUZZER_BACKEND``; default the laptop tone). Event field ``buzzer`` = the laptop tone is
+on (the screens beep), ``buzzer_hw`` = the device's buzzer is on.
 Progress: ``Topic.DEMO_GUIDED`` events (kiosk and demo panel). Speech: the prompt text plus an
 ``audio_url`` rendered by ``AgentService.speak`` (ElevenLabs -> cache -> offline voice); the
 browser falls back to ``speechSynthesis`` and captions.
@@ -59,6 +62,8 @@ from tactidose.db.models import (
     Schedule,
 )
 from tactidose.guided.checkin import CheckinExtraction, GeminiCheckinExtractor, extract
+from tactidose.hardware import buzzer_config
+from tactidose.hardware.buzzer import Buzzer, create_buzzer
 
 log = logging.getLogger(__name__)
 
@@ -142,7 +147,6 @@ class _Run:
     answer_mode: str = "text"
     #: The current question has been said (published); headless callers answer after that.
     prompted: bool = False
-    buzzer: bool = False
     conversation_id: int | None = None
     results: list[SlotResult] = field(default_factory=list)
     transcript: list[dict[str, Any]] = field(default_factory=list)
@@ -156,7 +160,8 @@ class GuidedDemoRunner:
     """Runs guided demos for the patient(s) of the configured device. Thread-safe."""
 
     def __init__(self, services: Any, *, extractor: GeminiCheckinExtractor | None = None,
-                 sleep: Callable[[threading.Event, float], bool] | None = None) -> None:
+                 sleep: Callable[[threading.Event, float], bool] | None = None,
+                 buzzer: Buzzer | None = None) -> None:
         self.services = services
         self.settings = services.settings
         self.clock = services.clock
@@ -165,6 +170,7 @@ class GuidedDemoRunner:
         self.drops = services.drops
         self.extractor = extractor if extractor is not None else GeminiCheckinExtractor(self.settings)
         self._sleep = sleep or (lambda ev, s: ev.wait(s))
+        self.buzzer = buzzer if buzzer is not None else create_buzzer(self.settings, getattr(services, "hardware", None))
         self._lock = threading.Lock()
         self._runs: dict[int, _Run] = {}
 
@@ -238,6 +244,7 @@ class GuidedDemoRunner:
         return not run.thread.is_alive()
 
     def close(self) -> None:
+        self.buzzer.close()
         for pid in list(self._runs):
             run = self._runs[pid]
             if run.thread is not None and run.thread.is_alive():
@@ -255,6 +262,7 @@ class GuidedDemoRunner:
         suppress = getattr(bridge, "suppress_offers", None)
         if callable(suppress):
             suppress(run.patient_id, True)   # this demo has its own check-in
+        unlisten = self.buzzer.add_listener(lambda _b: self._publish_buzzer(run))
         try:
             run.state = "running"
             run.conversation_id = self._open_conversation(run)
@@ -270,15 +278,15 @@ class GuidedDemoRunner:
             self._finish(run)
         except _Stopped:
             run.state = "stopped"
-            self._buzzer(run, False)
+            self.buzzer.off()
             self._say(run, phrases.DEMO_STOPPED, step="stopped", check=False)
         except _Alerted:
             run.state = "alerted"
-            self._buzzer(run, False)
+            self.buzzer.off()
         except Exception:  # noqa: BLE001 - never leave a dangling run
             log.exception("guided demo %s failed", run.run_id)
             run.state = "error"
-            self._buzzer(run, False)
+            self.buzzer.off()
             self._say(run, phrases.AGENT_ERROR, step="error", check=False)
         finally:
             with run.cond:
@@ -286,6 +294,8 @@ class GuidedDemoRunner:
                 run.cond.notify_all()
             if callable(suppress):
                 suppress(run.patient_id, False)
+            self.buzzer.off()
+            unlisten()
             self._publish(run, step=run.step, final=True)
             log.info("guided demo %s ended: %s %s", run.run_id, run.state,
                      [(r.name, r.outcome, r.taken) for r in run.results])
@@ -317,10 +327,12 @@ class GuidedDemoRunner:
             self._save_slot(run, result)
 
     def _dispense(self, run: _Run, result: SlotResult) -> None:
-        self._say(run, phrases.DEMO_BUZZER, step="buzzer", buzzer=True)
+        self._say(run, phrases.DEMO_BUZZER, step="buzzer")
+        # Sounds through the drop and demo_buzzer_seconds after it; stops by itself at MAX_ON_MS.
+        self.buzzer.on(buzzer_config.MAX_ON_MS)
         if result.dose_event_id is None:
             result.outcome, result.message = "NO_DOSE", phrases.DEMO_NO_DOSE
-            self._buzzer(run, False)
+            self.buzzer.off()
             self._say(run, phrases.DEMO_NO_DOSE, step="dispensed", outcome=self._result_view(result))
             return
         # The one and only drop request of this slot (DropService decides). Inside the scheduler
@@ -338,7 +350,7 @@ class GuidedDemoRunner:
         self._publish(run, step="dispensed", outcome=self._result_view(result))
         if result.outcome == "DROPPED":
             self._pause(run, float(self.settings.demo_buzzer_seconds))
-        self._buzzer(run, False)
+        self.buzzer.off()
         self._say(run, result.message, step="drop_result", outcome=self._result_view(result))
 
     def _record_taken(self, run: _Run, result: SlotResult, yes: bool) -> None:
@@ -428,7 +440,7 @@ class GuidedDemoRunner:
                     to_patient=True, to_caregivers=True)
         except Exception:  # noqa: BLE001 - the spoken reply below still happens
             log.exception("guided demo: HEALTH_CONCERN notification failed")
-        self._buzzer(run, False)
+        self.buzzer.off()
         self._say(run, phrases.EMERGENCY, step="emergency", check=False)
         self._say(run, phrases.DEMO_ALERT_SENT, step="emergency", check=False)
         raise _Alerted()
@@ -442,10 +454,11 @@ class GuidedDemoRunner:
         except Exception as exc:  # noqa: BLE001 - already dropped / missed: the answer is still recorded
             log.info("guided demo: dose %s not skipped (%s)", result.dose_event_id, type(exc).__name__)
 
-    def _buzzer(self, run: _Run, on: bool) -> None:
-        if run.buzzer != on:
-            run.buzzer = on
-            self._publish(run, step="buzzer_on" if on else "buzzer_off")
+    def _publish_buzzer(self, run: _Run) -> None:
+        """Buzzer listener (may run on the buzzer's timer thread): publish its state, keep the step."""
+        on = self.buzzer.tone_active or self.buzzer.hardware_active
+        self.bus.publish(Topic.DEMO_GUIDED, {**self._view(run), "step": "buzzer_on" if on else "buzzer_off",
+                                             "final": False})
 
     # ================================================================== time and doses
     def _lead(self) -> timedelta:
@@ -590,12 +603,10 @@ class GuidedDemoRunner:
             log.exception("guided demo: could not store slot %s", r.name)
 
     # ================================================================== speech + events
-    def _say(self, run: _Run, text: str, *, step: str, awaiting: str | None = None, buzzer: bool | None = None,
+    def _say(self, run: _Run, text: str, *, step: str, awaiting: str | None = None,
              outcome: dict[str, Any] | None = None, check: bool = True) -> None:
         if check:
             self._check_stop(run)
-        if buzzer is not None:
-            run.buzzer = buzzer
         self._store(run, "assistant", text)
         run.transcript.append({"who": "assistant", "text": text})
         del run.transcript[:-TRANSCRIPT_KEEP]
@@ -621,7 +632,10 @@ class GuidedDemoRunner:
     def _view(self, run: _Run) -> dict[str, Any]:
         return {
             "patient_id": run.patient_id, "run_id": run.run_id, "state": run.state, "step": run.step,
-            "slot": run.slot, "awaiting": run.awaiting, "buzzer": run.buzzer, "started_at": run.started_at,
+            "slot": run.slot, "awaiting": run.awaiting, "started_at": run.started_at,
+            # buzzer = the laptop tone is on (the screens beep); buzzer_hw = the device's buzzer is on.
+            "buzzer": self.buzzer.tone_active, "buzzer_hw": self.buzzer.hardware_active,
+            "buzzer_backend": self.buzzer.name,
             "results": [self._result_view(r) for r in run.results], "transcript": list(run.transcript[-20:]),
         }
 

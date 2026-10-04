@@ -38,6 +38,11 @@ void IRAM_ATTR onDropSensorEdge() { gDropLatched = true; }
 }  // namespace
 #endif
 
+#if BUZZER_PIN >= 0 && BUZZER_TYPE == BUZZER_PASSIVE && !(defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3)
+/* Passive buzzer on Arduino-ESP32 2.x: the highest LEDC channel, away from the ones ESP32Servo takes first. */
+static const uint8_t kBuzzerLedcChannel = 15;
+#endif
+
 /* ------------------------------------------------------------------ compile-time pin checks */
 
 #if defined(CONFIG_IDF_TARGET_ESP32) /* classic ESP32 (ESP32-WROOM/WROVER, "ESP32 Dev Module") */
@@ -78,6 +83,9 @@ constexpr int kUsedPins[] = {
 #endif
 #if HAS_DROP_SENSOR
     PIN_DROP_SENSOR,
+#endif
+#if BUZZER_PIN >= 0
+    BUZZER_PIN,
 #endif
     PIN_CONFIRM_BUTTON, PIN_CANCEL_BUTTON, PIN_STATUS_LED};
 constexpr int kUsedPinCount = static_cast<int>(sizeof(kUsedPins) / sizeof(kUsedPins[0]));
@@ -120,6 +128,7 @@ static_assert(PIN_DROP_SENSOR >= 0 && okInput(PIN_DROP_SENSOR, DROP_SENSOR_PULLU
               "and fit an external 10k pull-up to 3.3 V)");
 #endif
 static_assert(okOutput(PIN_STATUS_LED), "PIN_STATUS_LED: not 6-11 (flash), 34-39 (input-only) or 1/3");
+static_assert(okOutput(BUZZER_PIN), "BUZZER_PIN: not 6-11 (flash), 34-39 (input-only) or 1/3");
 static_assert(PIN_CONFIRM_BUTTON >= 0 && okInput(PIN_CONFIRM_BUTTON, BUTTON_PULLUP != 0),
               "PIN_CONFIRM_BUTTON: required; not 6-11 or 1/3; GPIO 34-39 need BUTTON_PULLUP 0 + external pull-up");
 static_assert(okInput(PIN_CANCEL_BUTTON, BUTTON_PULLUP != 0),
@@ -203,6 +212,21 @@ void ArduinoHal::begin() {
 #if PIN_STATUS_LED >= 0
   pinMode(PIN_STATUS_LED, OUTPUT);
   digitalWrite(PIN_STATUS_LED, LOW);
+#endif
+  /* Buzzer (config.h BUZZER block): silent from the start. */
+#if BUZZER_PIN >= 0 && BUZZER_TYPE == BUZZER_ACTIVE
+  digitalWrite(BUZZER_PIN, BUZZER_ACTIVE_HIGH ? LOW : HIGH);
+  pinMode(BUZZER_PIN, OUTPUT);
+  digitalWrite(BUZZER_PIN, BUZZER_ACTIVE_HIGH ? LOW : HIGH);
+#elif BUZZER_PIN >= 0 && BUZZER_TYPE == BUZZER_PASSIVE
+#if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
+  ledcAttach(BUZZER_PIN, BUZZER_TONE_HZ, 8); /* Arduino-ESP32 3.x: pin-based LEDC API */
+  ledcWriteTone(BUZZER_PIN, 0);
+#else
+  ledcSetup(kBuzzerLedcChannel, BUZZER_TONE_HZ, 8); /* Arduino-ESP32 2.x: channel-based LEDC API */
+  ledcAttachPin(BUZZER_PIN, kBuzzerLedcChannel);
+  ledcWriteTone(kBuzzerLedcChannel, 0);
+#endif
 #endif
 
   /* 4. Host link. A large TX buffer keeps Serial.println from blocking loop() (and the stepper). */
@@ -340,5 +364,19 @@ bool ArduinoHal::dropSensorActive() {
 int ArduinoHal::serialRead() { return Serial.read(); /* -1 when nothing is waiting */ }
 
 void ArduinoHal::serialWriteLine(const char* line) { Serial.println(line); }
+
+void ArduinoHal::buzzerWrite(bool on) {
+#if BUZZER_PIN >= 0 && BUZZER_TYPE == BUZZER_ACTIVE
+  digitalWrite(BUZZER_PIN, (on == (BUZZER_ACTIVE_HIGH != 0)) ? HIGH : LOW);
+#elif BUZZER_PIN >= 0 && BUZZER_TYPE == BUZZER_PASSIVE
+#if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
+  ledcWriteTone(BUZZER_PIN, on ? BUZZER_TONE_HZ : 0);
+#else
+  ledcWriteTone(kBuzzerLedcChannel, on ? BUZZER_TONE_HZ : 0);
+#endif
+#else
+  (void)on; /* BUZZER_PIN -1 (TODO): no buzzer fitted; the core answers ERR NO_BUZZER anyway */
+#endif
+}
 
 #endif  // ARDUINO

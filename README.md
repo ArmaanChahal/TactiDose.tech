@@ -79,6 +79,11 @@ offline with the simulator and the rule-based assistant, and sounds better with 
 5. After the night pill: a goodbye and a spoken summary of the three slots. **Stop demo** (or the
    kiosk's Stop button, or saying "stop") ends it at any time and stops the dispenser.
 
+**Buzzer.** By default the screen beeps (the laptop tone). For a real buzzer on the ESP32 set
+`TACTIDOSE_BUZZER_BACKEND=serial` (or `both`) and the pin in the firmware's `config.h`, then check
+it with `python -m tactidose buzzer-test`. The step-by-step checklist, including how to roll back,
+is in [docs/BUZZER.md](docs/BUZZER.md).
+
 How it fits in: each slot is that container's *scheduled dose* (08:00 / 13:00 / 20:00). The demo
 clock jumps forward to 15 minutes before each one, and the drop is
 `DropService.request_drop(source="schedule")`, so every normal rule applies and the manual
@@ -267,6 +272,7 @@ Design rule: **AI interprets, deterministic code authorizes and actuates.** The 
 | `python -m tactidose send-test-email --to you@example.com` | check the email setup |
 | `python -m tactidose download-voice-model`, `warm-tts-cache` | offline voice setup |
 | `python -m tactidose guided-demo [--answers "yes\|yes\|…"] [--pause N]` | headless guided judge demo on the simulator (own data folder) |
+| `python -m tactidose buzzer-test [--backend serial] [--serial PORT \| --sim]` | sound the buzzer for 2 s and report what the device answered (docs/BUZZER.md) |
 
 ## Testing
 
@@ -274,7 +280,7 @@ Design rule: **AI interprets, deterministic code authorizes and actuates.** The 
 pytest                       # ~2,000 tests, about 2 minutes
 pytest -m "not native"       # skip the Docker-based firmware tests
 cd tactidose-wellbeing && pytest   # the check-in package's own suite (138 tests)
-python -m tactidose conformance --target sim      # 32 protocol scenarios on the simulator
+python -m tactidose conformance --target sim      # 40 protocol scenarios on the simulator (32 + 8 buzzer)
 python -m tactidose conformance --target native   # the same against the real firmware code (Docker)
 ```
 

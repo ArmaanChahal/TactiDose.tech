@@ -348,8 +348,15 @@ patient and can be cancelled at every wait. Each slot goes:
     own data folder `<data_dir>/guided-demo`)
 * **Settings:** `TACTIDOSE_DEMO_PAUSE_SECONDS` (7), `_ANSWER_TIMEOUT_S` (45), `_BUZZER_SECONDS`
   (5), `_CHECKIN_AI` (true).
-* **No physical buzzer exists** in the protocol, the firmware or the simulator. The buzzer is UI-only
-  for now.
+* **Buzzer:** the runner only knows `tactidose.hardware.buzzer.Buzzer`
+  (`on(ms)` / `off()` / `supports_hardware`).
+  * Backends: `LaptopToneBuzzer` (default, the screen tone), `SerialBuzzer` (`BUZZER ON/OFF` via
+    `HardwareClient`, falls back to the laptop tone on any failure), `BothBuzzer`, `NullBuzzer`.
+    Chosen by `TACTIDOSE_BUZZER_BACKEND`.
+  * Hardware values live in `tactidose/hardware/buzzer_config.py` and the firmware `config.h`
+    "BUZZER (edit here)" block (`BUZZER_PIN` is a TODO, `-1`).
+  * Protocol: §13 of `docs/SERIAL_PROTOCOL.md` (optional, probe-able, `STATUS`/`proto` unchanged).
+  * Checklist: `docs/BUZZER.md`. CLI: `buzzer-test`.
 
 ### `checkin.py`
 
@@ -376,7 +383,9 @@ pytest tests/test_wellbeing_integration.py          # integration of the check-i
 pytest tests/test_guided_demo.py                    # guided judge demo (simulator, frozen clock)
 python -m tactidose guided-demo                     # headless guided demo with scripted answers
 (cd tactidose-wellbeing && pytest)                  # check-in package suite (138 tests)
-python -m tactidose conformance --target sim        # 32 protocol scenarios
+python -m tactidose conformance --target sim        # 40 protocol scenarios (32 + 8 buzzer)
+sh firmware/native/build.sh --local                 # native firmware harness without Docker (macOS/Linux)
+TACTIDOSE_NATIVE_HARNESS_CMD=$PWD/firmware/native/bin/harness python -m tactidose conformance --target native
 ```
 
 Test notes:

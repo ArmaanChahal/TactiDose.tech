@@ -45,6 +45,8 @@ static const size_t kMaxLineLength = 64;           /* SERIAL_PROTOCOL.md §1, ex
 static const uint8_t kMinSlots = 2;
 static const uint8_t kMaxSlots = 12;
 static const size_t kMaxSlotDigits = 3;
+static const size_t kMaxBuzzerDigits = 5;   /* BUZZER ON <ms>: 1..65535 */
+static const long kMaxBuzzerArgMs = 65535;
 
 enum class DeviceState : uint8_t {
   kBoot,
@@ -68,6 +70,7 @@ enum class Command : uint8_t {
   kCloseGate,
   kStop,
   kDropSlot, /* v1.1 */
+  kBuzzer,   /* optional extension: BUZZER ON <ms> | BUZZER OFF | BUZZER (query) */
 };
 
 enum class ErrorCode : uint8_t {
@@ -81,6 +84,7 @@ enum class ErrorCode : uint8_t {
   kUnknownCommand,
   kStopped,
   kNoPill, /* v1.1: the drop sensor saw no pill during the release */
+  kNoBuzzer, /* extension: BUZZER known, but no buzzer fitted (BUZZER_PIN -1) */
 };
 
 enum class Mechanism : uint8_t {
@@ -98,6 +102,7 @@ struct ParsedLine {
   Command command;
   ErrorCode error;
   int slot;
+  long buzzerMs; /* BUZZER only: -1 query, 0 OFF, 1..65535 ON <ms> */
 };
 
 /* Parse exactly like protocol.parse_command: lines longer than kMaxLineLength ->
@@ -145,6 +150,9 @@ struct CoreConfig {
 
   float motionTimeoutFactor = 2.0f;    /* rule 8.6: limit = factor * expected + margin */
   uint32_t motionTimeoutMarginMs = 2000;
+  bool hasBuzzer = true;          /* false: BUZZER ON -> ERR NO_BUZZER (config.h BUZZER_PIN -1) */
+  uint32_t buzzerMaxOnMs = 10000; /* hard limit of one BUZZER ON (config.h BUZZER_MAX_ON_MS) */
+
   bool holdWhenIdle = true;  /* keep the motor energised in READY / SAFE_STOP */
   bool debugLog = true;      /* "# ..." lines (ignored by the host) */
 };
@@ -164,6 +172,7 @@ class TactiDoseCore {
   bool gateOpen() const { return gateOpen_; }
   bool gateMoving() const { return gateMoving_; }
   bool releasing() const { return releasing_; }
+  bool buzzerOn() const { return buzzerOn_; }
   const CoreConfig& config() const { return cfg_; }
 
   /* Absolute step target of a slot: round(slot * stepsPerRev / numSlots) (protocol §2). */
@@ -202,6 +211,9 @@ class TactiDoseCore {
   void handleLine(uint32_t now);
   void execute(const ParsedLine& parsed, uint32_t now);
   void handleStop(uint32_t now);
+  void handleBuzzer(const ParsedLine& parsed, uint32_t now);
+  void serviceBuzzer(uint32_t now);
+  void silenceBuzzer();
   void onCancelPressed(uint32_t now);
 
   void bootSequence(uint32_t now);
@@ -274,6 +286,10 @@ class TactiDoseCore {
   Debouncer cancel_;
   bool confirmPending_;
   bool cancelPending_;
+
+  bool buzzerOn_;          /* BUZZER ON running; serviced first in loop(), never blocks */
+  uint32_t buzzerStartMs_;
+  uint32_t buzzerDurMs_;    /* already clamped to cfg_.buzzerMaxOnMs */
 
   char line_[kMaxLineLength];
   size_t lineLen_;
