@@ -30,6 +30,7 @@ const CommandEntry kCommands[] = {
     {"OPEN_GATE", Command::kOpenGate},
     {"CLOSE_GATE", Command::kCloseGate},
     {"STOP", Command::kStop},
+    {"DROP_SLOT", Command::kDropSlot},
 };
 
 /* ASCII characters for which Python's str.isspace() is true (protocol.py tokenises with str.split()). */
@@ -52,7 +53,9 @@ bool tokenEquals(const char* token, size_t length, const char* name) {
   return name[i] == '\0';
 }
 
-inline bool isSlotCommand(Command c) { return c == Command::kMoveSlot || c == Command::kDispenseSlot; }
+inline bool isSlotCommand(Command c) {
+  return c == Command::kMoveSlot || c == Command::kDispenseSlot || c == Command::kDropSlot;
+}
 
 /* Wrap-safe: at least `duration` ms have passed since `since` (millis() wraps every ~49.7 days). */
 inline bool elapsed(uint32_t now, uint32_t since, uint32_t duration) {
@@ -149,6 +152,7 @@ const char* errorName(ErrorCode code) {
     case ErrorCode::kInvalidState: return "INVALID_STATE";
     case ErrorCode::kUnknownCommand: return "UNKNOWN_COMMAND";
     case ErrorCode::kStopped: return "STOPPED";
+    case ErrorCode::kNoPill: return "NO_PILL";
     case ErrorCode::kNone: break;
   }
   return "NONE";
@@ -170,6 +174,12 @@ void TactiDoseCore::resetState() {
   gateStartMs_ = 0;
   gateOpenedMs_ = 0;
   settleStartMs_ = 0;
+  settleAction_ = Motion::kNone;
+  releasing_ = false;
+  dropBeamClear_ = false;
+  dropSeen_ = false;
+  releaseStartMs_ = 0;
+  dropSeenMs_ = 0;
   motion_ = Motion::kNone;
   motionStartMs_ = 0;
   motionLimitMs_ = 0;
@@ -191,37 +201,49 @@ void TactiDoseCore::begin() {
   resetState();
   if (cfg_.numSlots < kMinSlots) cfg_.numSlots = kMinSlots;
   if (cfg_.numSlots > kMaxSlots) cfg_.numSlots = kMaxSlots;
+  if (!carousel()) cfg_.hasHomeSensor = false; /* fixed containers: nothing to home */
   const uint32_t now = hal_->millis();
-  hal_->stepperEnable(false);
-  hal_->stepperSetMaxSpeed(cfg_.maxSpeed);
-  hal_->stepperSetAcceleration(cfg_.acceleration);
-  hal_->stepperSetCurrentPosition(0);
+  if (carousel()) {
+    hal_->stepperEnable(false);
+    hal_->stepperSetMaxSpeed(cfg_.maxSpeed);
+    hal_->stepperSetAcceleration(cfg_.acceleration);
+    hal_->stepperSetCurrentPosition(0);
+  }
   /* A button held through reset must be released before it can fire. */
   const bool confirmRaw = hal_->buttonPressed(Button::kConfirm);
   const bool cancelRaw = hal_->buttonPressed(Button::kCancel);
   confirm_ = Debouncer{confirmRaw, confirmRaw, now};
   cancel_ = Debouncer{cancelRaw, cancelRaw, now};
-  debug("TactiDose REFERENCE firmware %s - hackathon prototype, NOT a medical device", cfg_.fwVersion);
-  debug("slots=%u steps_per_rev=%ld home_sensor=%s auto_home=%s", static_cast<unsigned>(cfg_.numSlots),
-        revsToSteps(1.0f), cfg_.hasHomeSensor ? "yes" : "no", cfg_.autoHomeOnBoot ? "yes" : "no");
-  /* Rule 8.9: close the gate first. Its position is unknown after a reset, so wait the full travel. */
+  debug("TactiDose REFERENCE firmware %s (protocol %s) - hackathon prototype, NOT a medical device", cfg_.fwVersion,
+        kProtocolVersion);
+  if (carousel()) {
+    debug("mechanism=carousel slots=%u steps_per_rev=%ld home_sensor=%s auto_home=%s drop_sensor=%s",
+          static_cast<unsigned>(cfg_.numSlots), revsToSteps(1.0f), cfg_.hasHomeSensor ? "yes" : "no",
+          cfg_.autoHomeOnBoot ? "yes" : "no", cfg_.hasDropSensor ? "yes" : "no");
+  } else {
+    debug("mechanism=per_container_servo slots=%u (one release servo each, no stepper) drop_sensor=%s",
+          static_cast<unsigned>(cfg_.numSlots), cfg_.hasDropSensor ? "yes" : "no");
+  }
+  /* Rule 8.9: close the gate(s) first. Their position is unknown after a reset: wait the full travel. */
   startGateTravel(false, GateDone::kBootClosed, now);
 }
 
 void TactiDoseCore::loop() {
   const uint32_t now = hal_->millis();
-  serviceButtons(now); /* debounced continuously, also during gate travel */
+  serviceButtons(now); /* debounced continuously, also during gate travel and releases */
+  if (releasing_) sampleDropSensor(now); /* the whole release, gate travel included */
   if (gateMoving_) {
     if (!elapsed(now, gateStartMs_, cfg_.gateTravelMs)) return; /* rule 8.2: travel is atomic */
     finishGateTravel(now);
   }
   serviceMotion(now);
   serviceTimers(now);
-  if (!gateMoving_ && cancelPending_) {
+  /* While a release runs (§12.3) buttons and serial input wait, like during gate travel. */
+  if (!gateMoving_ && !releasing_ && cancelPending_) {
     cancelPending_ = false;
     onCancelPressed(now);
   }
-  if (!gateMoving_ && confirmPending_) {
+  if (!gateMoving_ && !releasing_ && confirmPending_) {
     confirmPending_ = false;
     emit("EVENT CONFIRM_BUTTON"); /* rule 8.8: event only, the host decides */
   }
@@ -233,11 +255,16 @@ void TactiDoseCore::bootSequence(uint32_t now) {
   char line[48];
   snprintf(line, sizeof(line), "EVENT BOOT %s", cfg_.fwVersion);
   emit(line);
+  if (cfg_.hasDropSensor) {
+    /* Calibration aid: with nothing in the chute the beam must read clear. */
+    debug("drop sensor: beam %s",
+          hal_->dropSensorActive() ? "INTERRUPTED (check wiring, DROP_SENSOR_ACTIVE_LOW, chute)" : "clear");
+  }
   if (!cfg_.autoHomeOnBoot) {
     debug("auto-home disabled: waiting for HOME");
     return;
   }
-  if (!cfg_.hasHomeSensor) {
+  if (carousel() && !cfg_.hasHomeSensor) {
     /* MVP fallback (§6): the carousel was aligned by hand, step counter 0 = slot 0. */
     emit("OK HOMING");
     homeStartMs_ = now;
@@ -285,7 +312,7 @@ void TactiDoseCore::onCancelPressed(uint32_t now) {
 }
 
 void TactiDoseCore::serviceSerial(uint32_t now) {
-  for (int budget = 256; budget > 0 && !gateMoving_; --budget) {
+  for (int budget = 256; budget > 0 && !gateMoving_ && !releasing_; --budget) {
     const int c = hal_->serialRead();
     if (c < 0) return;
     if (c == '\n' || c == '\r') {
@@ -347,6 +374,7 @@ void TactiDoseCore::execute(const ParsedLine& parsed, uint32_t now) {
       return;
     case Command::kMoveSlot:
     case Command::kDispenseSlot:
+    case Command::kDropSlot: /* §12.2: same acceptance row as DISPENSE_SLOT */
       if (busy) {
         emitError(ErrorCode::kBusy);
       } else if (gateOpenState) {
@@ -354,7 +382,10 @@ void TactiDoseCore::execute(const ParsedLine& parsed, uint32_t now) {
       } else if (unhomed) {
         emitError(ErrorCode::kNotHomed);
       } else {
-        startMove(parsed.slot, parsed.command == Command::kDispenseSlot, now);
+        const Motion kind = parsed.command == Command::kMoveSlot       ? Motion::kMove
+                            : parsed.command == Command::kDispenseSlot ? Motion::kDispense
+                                                                       : Motion::kDrop;
+        startMove(parsed.slot, kind, now);
       }
       return;
     case Command::kOpenGate:
@@ -374,7 +405,7 @@ void TactiDoseCore::execute(const ParsedLine& parsed, uint32_t now) {
       } else if (gateOpenState) {
         startGateTravel(false, GateDone::kClosedToReady, now);
       } else {
-        hal_->servoWrite(cfg_.servoClosedDeg); /* re-assert closed, no state change */
+        closeAllGates(); /* re-assert closed, no state change */
         emit("OK GATE_CLOSED");
       }
       return;
@@ -403,7 +434,7 @@ void TactiDoseCore::handleStop(uint32_t now) {
 /* ------------------------------------------------------------------------- homing (rule 8.5) */
 
 void TactiDoseCore::startHoming(uint32_t now) {
-  hal_->servoWrite(cfg_.servoClosedDeg); /* rule 8.1 */
+  closeAllGates(); /* rule 8.1 */
   state_ = DeviceState::kHoming;
   homed_ = false;
   slot_ = -1;
@@ -411,6 +442,11 @@ void TactiDoseCore::startHoming(uint32_t now) {
   homeStartMs_ = now;
   applyDriverPower();
   emit("OK HOMING");
+  if (!carousel()) {
+    /* Fixed containers (§12.6): nothing to move or find, the same messages complete at once. */
+    finishHoming();
+    return;
+  }
   if (!cfg_.hasHomeSensor) {
     /* No sensor: "return to step 0 by dead reckoning" (§6). */
     homePhase_ = HomePhase::kDeadReckon;
@@ -521,17 +557,18 @@ void TactiDoseCore::finishHoming() {
 
 /* ------------------------------------------------------------------------- slot moves */
 
-void TactiDoseCore::startMove(int slot, bool dispense, uint32_t now) {
-  hal_->servoWrite(cfg_.servoClosedDeg); /* rule 8.1: re-assert closed (already closed in READY) */
+void TactiDoseCore::startMove(int slot, Motion kind, uint32_t now) {
+  closeAllGates(); /* rule 8.1: re-assert closed (already closed in READY) */
   state_ = DeviceState::kMoving;
   slot_ = -1;
   targetSlot_ = slot;
-  motion_ = dispense ? Motion::kDispense : Motion::kMove;
+  motion_ = kind;
   applyDriverPower();
-  beginTimedMove(slotTarget(slot), cfg_.maxSpeed, now);
+  if (carousel()) beginTimedMove(slotTarget(slot), cfg_.maxSpeed, now);
   char line[24];
   snprintf(line, sizeof(line), "OK MOVING %d", slot);
   emit(line);
+  if (!carousel()) arrive(now); /* fixed containers: already at the release, report it at once (§12.6) */
 }
 
 void TactiDoseCore::beginTimedMove(long target, float speed, uint32_t now) {
@@ -561,7 +598,7 @@ void TactiDoseCore::serviceMotion(uint32_t now) {
 }
 
 void TactiDoseCore::arrive(uint32_t now) {
-  if (cfg_.verifySlotWithHomeSensor && cfg_.hasHomeSensor) {
+  if (carousel() && cfg_.verifySlotWithHomeSensor && cfg_.hasHomeSensor) {
     const bool active = hal_->homeSensorActive();
     if (active != (targetSlot_ == 0)) {
       debug("move: home sensor %s at slot %d - position lost", active ? "active" : "inactive", targetSlot_);
@@ -570,22 +607,34 @@ void TactiDoseCore::arrive(uint32_t now) {
     }
   }
   slot_ = targetSlot_;
-  const bool dispense = motion_ == Motion::kDispense;
+  const Motion done = motion_;
   motion_ = Motion::kNone;
   char line[24];
   snprintf(line, sizeof(line), "OK AT_SLOT %d", slot_);
   emit(line);
-  if (dispense) {
-    state_ = DeviceState::kAtTarget; /* rule 8.4: settle, then open */
+  if (done == Motion::kDispense || done == Motion::kDrop) {
+    state_ = DeviceState::kAtTarget; /* rule 8.4: settle, then open (DISPENSE) or release (DROP) */
     settleStartMs_ = now;
+    settleAction_ = done;
   } else {
     enterReady();
   }
 }
 
 void TactiDoseCore::serviceTimers(uint32_t now) {
+  if (releasing_) {
+    /* §12.1: hold the release open dropOpenMs, then close it; the verdict follows the close. */
+    if (state_ == DeviceState::kGateOpen && !gateMoving_ && elapsed(now, gateOpenedMs_, cfg_.dropOpenMs)) {
+      startGateTravel(false, GateDone::kReleaseClosed, now);
+    }
+    return;
+  }
   if (state_ == DeviceState::kAtTarget && elapsed(now, settleStartMs_, cfg_.settleMs)) {
-    startGateTravel(true, GateDone::kOpened, now);
+    if (settleAction_ == Motion::kDrop) {
+      startRelease(now);
+    } else {
+      startGateTravel(true, GateDone::kOpened, now);
+    }
   } else if (state_ == DeviceState::kGateOpen && elapsed(now, gateOpenedMs_, cfg_.gateMaxOpenMs)) {
     debug("gate open for %lu ms: closing it (safety net)", static_cast<unsigned long>(cfg_.gateMaxOpenMs));
     startGateTravel(false, GateDone::kClosedToReady, now); /* rule 8.7 */
@@ -594,9 +643,22 @@ void TactiDoseCore::serviceTimers(uint32_t now) {
 
 /* ------------------------------------------------------------------------- gate */
 
+uint8_t TactiDoseCore::currentGate() const {
+  if (carousel() || slot_ < 0) return 0;
+  return static_cast<uint8_t>(slot_);
+}
+
+void TactiDoseCore::closeAllGates() {
+  for (uint8_t g = 0; g < gateCount(); ++g) hal_->servoWrite(g, cfg_.servoClosedDeg);
+}
+
 void TactiDoseCore::startGateTravel(bool open, GateDone done, uint32_t now) {
-  hal_->servoWrite(open ? cfg_.servoOpenDeg : cfg_.servoClosedDeg);
-  if (open) gateOpen_ = true; /* an opening gate counts as open */
+  if (open) {
+    hal_->servoWrite(currentGate(), cfg_.servoOpenDeg);
+    gateOpen_ = true; /* an opening gate counts as open */
+  } else {
+    closeAllGates();
+  }
   gateMoving_ = true;
   gateDone_ = done;
   gateStartMs_ = now;
@@ -613,6 +675,7 @@ void TactiDoseCore::finishGateTravel(uint32_t now) {
       bootSequence(now);
       break;
     case GateDone::kOpened:
+    case GateDone::kReleaseOpened:
       gateOpen_ = true;
       state_ = DeviceState::kGateOpen;
       gateOpenedMs_ = now;
@@ -628,9 +691,60 @@ void TactiDoseCore::finishGateTravel(uint32_t now) {
       emit("OK GATE_CLOSED");
       enterSafeStop();
       break;
+    case GateDone::kReleaseClosed:
+      gateOpen_ = false;
+      emit("OK GATE_CLOSED");
+      finishRelease(now);
+      break;
     case GateDone::kNone:
       break;
   }
+}
+
+/* ------------------------------------------------------------------------- DROP_SLOT release (§12) */
+
+void TactiDoseCore::startRelease(uint32_t now) {
+  releasing_ = true;
+  releaseStartMs_ = now;
+  dropBeamClear_ = false;
+  dropSeen_ = false;
+  sampleDropSensor(now); /* before anything moves; a beam that is already interrupted does not arm */
+  if (cfg_.hasDropSensor && !dropBeamClear_) {
+    debug("drop: beam interrupted before the release (pill stuck in the chute? sensor wiring?)");
+  }
+  startGateTravel(true, GateDone::kReleaseOpened, now);
+}
+
+void TactiDoseCore::sampleDropSensor(uint32_t now) {
+  if (!cfg_.hasDropSensor) return;
+  /* A pill counts only as a clear -> interrupted transition: a beam stuck interrupted (pill jammed in
+   * the chute, unplugged receiver) never confirms a drop, it ends in ERR NO_PILL (fail closed). */
+  if (!hal_->dropSensorActive()) {
+    dropBeamClear_ = true;
+  } else if (dropBeamClear_ && !dropSeen_) {
+    dropSeen_ = true;
+    dropSeenMs_ = now;
+  }
+}
+
+void TactiDoseCore::finishRelease(uint32_t now) {
+  releasing_ = false;
+  if (cfg_.hasDropSensor && !dropSeen_) {
+    debug("drop: no pill passed the sensor - container %d empty or jammed%s", slot_ + 1,
+          dropBeamClear_ ? "" : " (beam never clear)");
+    emitError(ErrorCode::kNoPill);
+  } else {
+    if (cfg_.hasDropSensor) {
+      /* Calibration aid (DROP_OPEN_MS): when the pill crossed the beam within the release. */
+      debug("drop: pill seen %lu ms after the release started (release took %lu ms)",
+            static_cast<unsigned long>(dropSeenMs_ - releaseStartMs_),
+            static_cast<unsigned long>(now - releaseStartMs_));
+    }
+    char line[24];
+    snprintf(line, sizeof(line), "OK DROPPED %d", slot_); /* no sensor: the release cycle completed */
+    emit(line);
+  }
+  enterReady();
 }
 
 /* ------------------------------------------------------------------------- state entries */
@@ -651,7 +765,7 @@ void TactiDoseCore::enterReady() {
 
 void TactiDoseCore::enterSafeStop() {
   hal_->stepperStop();
-  hal_->servoWrite(cfg_.servoClosedDeg);
+  closeAllGates();
   state_ = DeviceState::kSafeStop;
   homed_ = false; /* position treated as unknown: only HOME makes the device homed again */
   slot_ = -1;
@@ -663,7 +777,7 @@ void TactiDoseCore::enterSafeStop() {
 
 void TactiDoseCore::enterFault(ErrorCode code) {
   hal_->stepperStop();
-  hal_->servoWrite(cfg_.servoClosedDeg); /* "closed (if possible)": motion only ever runs with it closed */
+  closeAllGates(); /* "closed (if possible)": motion only ever runs with it closed */
   state_ = DeviceState::kFault;
   homed_ = false;
   slot_ = -1;
@@ -674,6 +788,7 @@ void TactiDoseCore::enterFault(ErrorCode code) {
 }
 
 void TactiDoseCore::applyDriverPower() {
+  if (!carousel()) return; /* no stepper */
   bool on = false;
   switch (state_) {
     case DeviceState::kHoming:
@@ -725,10 +840,10 @@ uint32_t TactiDoseCore::motionLimitMs(long distance, float maxSpeed) const {
 long TactiDoseCore::revsToSteps(float revs) const { return static_cast<long>(revs * cfg_.stepsPerRev + 0.5f); }
 
 void TactiDoseCore::sendStatus() {
-  char line[112];
-  snprintf(line, sizeof(line), "OK STATUS state=%s homed=%d slot=%d gate=%s slots=%u fw=%s", stateName(state_),
-           homed_ ? 1 : 0, slot_, gateOpen_ ? "OPEN" : "CLOSED", static_cast<unsigned>(cfg_.numSlots),
-           cfg_.fwVersion);
+  char line[160];
+  snprintf(line, sizeof(line), "OK STATUS state=%s homed=%d slot=%d gate=%s slots=%u fw=%s proto=%s drop_sensor=%d",
+           stateName(state_), homed_ ? 1 : 0, slot_, gateOpen_ ? "OPEN" : "CLOSED",
+           static_cast<unsigned>(cfg_.numSlots), cfg_.fwVersion, kProtocolVersion, cfg_.hasDropSensor ? 1 : 0);
   emit(line);
 }
 

@@ -20,11 +20,19 @@ Safety rules implemented here
 * At most one normal command in flight (others get ``BUSY_LOCAL`` immediately); ``stop()``
   bypasses that lock and is written even while another command is waiting.
 * A command that was written but got no terminal reply (timeout, link loss) is *uncertain*
-  (``definitive=False``; ``gate_may_be_open`` for ``DISPENSE_SLOT``/``OPEN_GATE``). A write
-  that raised counts as written (conservative). Nothing is ever retried automatically.
+  (``definitive=False``; ``gate_may_be_open`` for ``DROP_SLOT``/``DISPENSE_SLOT``/``OPEN_GATE``).
+  A write that raised counts as written (conservative). Nothing is ever retried automatically.
 * After a timeout the next command is preceded by a ``STATUS`` resync; if the device does
   not answer it, the command is not sent (``NOT_CONNECTED``).
 * Device-level failures never raise; they are returned as ``CommandResult``.
+
+Pill drops (protocol v1.1, docs §12.5)
+--------------------------------------
+:meth:`HardwareClient.drop_slot` sends ``DROP_SLOT n`` when the last ``STATUS`` reported
+``proto >= 1.1``; for v1 firmware it emulates the drop as one locked sequence ``DISPENSE_SLOT n``
+-> wait ``drop_close_delay_ms`` -> ``CLOSE_GATE``. Either way ``protocol.drop_certainty(result)``
+tells the caller whether a pill dropped (DROPPED / NOT_DROPPED / UNCERTAIN). Deciding *whether*
+to drop is the job of ``medication/drops.py``; this module only executes.
 
 This is a hackathon prototype for demonstrations with candy/tokens - not a medical device.
 """
@@ -60,6 +68,7 @@ from tactidose.hardware.protocol import (
     classify,
     parse_command,
     parse_message,
+    supports_drop_slot,
 )
 from tactidose.hardware.transports import PySerialTransport, Transport, TransportError
 
@@ -91,8 +100,16 @@ MAX_LINE_BYTES = 1024
 JOIN_TIMEOUT_S = 2.0
 
 _PROBES = frozenset({CommandName.PING, CommandName.STATUS})
-_SLOT_COMMANDS = frozenset({CommandName.MOVE_SLOT, CommandName.DISPENSE_SLOT})
+_SLOT_COMMANDS = frozenset({CommandName.MOVE_SLOT, CommandName.DISPENSE_SLOT, CommandName.DROP_SLOT})
+_SLOT_FACTORIES: dict[CommandName, Callable[[int, int], Command]] = {
+    CommandName.MOVE_SLOT: Command.move_slot,
+    CommandName.DISPENSE_SLOT: Command.dispense_slot,
+    CommandName.DROP_SLOT: Command.drop_slot,
+}
 _FAULT_ERRORS = frozenset({Err.HOME_TIMEOUT.value, Err.MOTOR_FAULT.value})
+_GATE_NOT_CLOSED_NOTICE = (
+    "The dispenser gate did not close after a pill drop. Please check the device."
+)
 
 
 def _any_reply(msg: Message) -> Disposition:
@@ -141,6 +158,16 @@ def _placeholder_command(name: CommandName | None, slot: object = None) -> Comma
         except (ProtocolError, TypeError):
             pass
     return Command.ping()
+
+
+def _build_slot_command(name: CommandName, slot: object, num_slots: int) -> Command | CommandResult:
+    """The validated slot command, or an ``INVALID_ARGUMENT`` result (nothing is sent)."""
+    try:
+        return _SLOT_FACTORIES[name](slot, num_slots)  # type: ignore[arg-type]
+    except ProtocolError as exc:
+        return CommandResult.host_failure(
+            _placeholder_command(name, slot), HostCode.INVALID_ARGUMENT, detail=str(exc)
+        )
 
 
 def _invalid_line_result(line: str, parsed: ParsedCommand) -> CommandResult:
@@ -300,6 +327,25 @@ class HardwareClient:
     def dispense_slot(self, slot: int) -> CommandResult:
         return self._slot_command(CommandName.DISPENSE_SLOT, slot)
 
+    def drop_slot(self, slot: int) -> CommandResult:
+        """Drop one pill from container ``slot`` (docs §12.5); blocks until the drop is over.
+
+        * Device reported ``proto >= 1.1``: ``DROP_SLOT n`` (timeout ``timeout_drop_s``);
+          success = ``OK DROPPED n``, ``ERR NO_PILL`` = drop sensor saw nothing.
+        * v1 firmware: ``DISPENSE_SLOT n``, then - only if the gate opened - wait
+          ``drop_close_delay_ms`` and ``CLOSE_GATE``, all under one command lock. Returns the
+          ``DISPENSE_SLOT`` result (``OK GATE_OPEN`` = DROPPED) with the ``CLOSE_GATE`` outcome in
+          ``detail`` and ``elapsed_s`` covering the whole sequence; a failed close publishes a
+          ``Topic.NOTICE`` (the gate may still be open).
+
+        Refusals carry the ``DROP_SLOT`` command: ``INVALID_ARGUMENT`` (bad slot, nothing sent),
+        ``NOT_CONNECTED``, ``BUSY_LOCAL``. Use ``protocol.drop_certainty(result)`` for the outcome.
+        """
+        cmd = _build_slot_command(CommandName.DROP_SLOT, slot, self.num_slots)
+        if isinstance(cmd, CommandResult):
+            return cmd
+        return self._guarded(cmd, lambda: self._drop_locked(cmd))
+
     def open_gate(self) -> CommandResult:
         return self._execute(Command.open_gate())
 
@@ -375,18 +421,18 @@ class HardwareClient:
 
     # ------------------------------------------------------------------ command path
     def _slot_command(self, name: CommandName, slot: int) -> CommandResult:
-        try:
-            if name is CommandName.MOVE_SLOT:
-                cmd = Command.move_slot(slot, self.num_slots)
-            else:
-                cmd = Command.dispense_slot(slot, self.num_slots)
-        except ProtocolError as exc:
-            return CommandResult.host_failure(
-                _placeholder_command(name, slot), HostCode.INVALID_ARGUMENT, detail=str(exc)
-            )
+        cmd = _build_slot_command(name, slot, self.num_slots)
+        if isinstance(cmd, CommandResult):
+            return cmd
         return self._execute(cmd)
 
     def _execute(self, cmd: Command, *, internal: bool = False) -> CommandResult:
+        return self._guarded(cmd, lambda: self._execute_locked(cmd), internal=internal)
+
+    def _guarded(
+        self, cmd: Command, body: Callable[[], CommandResult], *, internal: bool = False
+    ) -> CommandResult:
+        """Run ``body`` holding the command lock; refusals are reported against ``cmd``."""
         if self._closing.is_set():
             return CommandResult.host_failure(cmd, HostCode.NOT_CONNECTED, detail="client closed")
         if not internal and not self._is_connected():
@@ -399,7 +445,7 @@ class HardwareClient:
         try:
             if not internal and not self._is_connected():
                 return CommandResult.host_failure(cmd, HostCode.NOT_CONNECTED, detail="hardware not connected")
-            return self._execute_locked(cmd)
+            return body()
         finally:
             self._cmd_lock.release()
 
@@ -428,13 +474,49 @@ class HardwareClient:
             self._cmd_lock.release()
 
     def _execute_locked(self, cmd: Command) -> CommandResult:
-        if self._resync_needed and cmd.name not in _PROBES:
-            sync = self._roundtrip(Command.status())
-            if not sync.ok:
-                return CommandResult.host_failure(
-                    cmd, HostCode.NOT_CONNECTED, detail=f"not sent: STATUS resync failed ({sync.code})"
-                )
-        return self._roundtrip(cmd)
+        failure = self._resync_failure(cmd)
+        return failure if failure is not None else self._roundtrip(cmd)
+
+    def _resync_failure(self, cmd: Command) -> CommandResult | None:
+        """After a timeout: resync with STATUS first; a failed resync means ``cmd`` is not sent."""
+        if not self._resync_needed or cmd.name in _PROBES:
+            return None
+        sync = self._roundtrip(Command.status())
+        if sync.ok:
+            return None
+        return CommandResult.host_failure(
+            cmd, HostCode.NOT_CONNECTED, detail=f"not sent: STATUS resync failed ({sync.code})"
+        )
+
+    # ------------------------------------------------------------------ pill drops (§12.5)
+    def _drop_locked(self, cmd: Command) -> CommandResult:
+        failure = self._resync_failure(cmd)     # a resync may also update the device's proto
+        if failure is not None:
+            return failure
+        with self._lock:
+            proto = self._snap.proto
+        if supports_drop_slot(proto):
+            return self._roundtrip(cmd)
+        assert cmd.slot is not None
+        return self._emulated_drop_locked(cmd.slot)
+
+    def _emulated_drop_locked(self, slot: int) -> CommandResult:
+        """v1 firmware: ``DISPENSE_SLOT n`` (the release opens, the pill falls), wait, ``CLOSE_GATE``."""
+        started = time.monotonic()
+        dispense = Command.dispense_slot(slot, self.num_slots)
+        result = self._roundtrip(dispense)
+        if not result.ok:
+            return result           # never opened (ERR ...) or uncertain: nothing more to do here
+        delay_ms = int(self.settings.drop_close_delay_ms)
+        self._closing.wait(delay_ms / 1000.0)
+        close = self._execute_locked(Command.close_gate())
+        detail = f"v1 emulation: CLOSE_GATE after {delay_ms} ms -> {close.hardware_result}"
+        if not close.ok:
+            gate = self.snapshot().gate
+            log.warning("hardware: pill drop from slot %d: %s (gate %s)", slot, detail, gate.value)
+            if gate is not GateState.CLOSED:
+                self._notice("error", _GATE_NOT_CLOSED_NOTICE)
+        return replace(result, detail=detail, elapsed_s=round(time.monotonic() - started, 3))
 
     def _roundtrip(self, cmd: Command, *, stop: bool = False) -> CommandResult:
         line = cmd.to_line()
@@ -642,9 +724,10 @@ class HardwareClient:
             snap = self._snap
         self._publish_state()
         log.info(
-            "hardware connected on %s: fw=%s state=%s homed=%s slot=%s gate=%s slots=%s",
-            snap.port, snap.fw_version, snap.state.value, snap.homed, snap.slot, snap.gate.value,
-            snap.num_slots_reported,
+            "hardware connected on %s: fw=%s proto=%s drop_sensor=%s state=%s homed=%s slot=%s "
+            "gate=%s slots=%s",
+            snap.port, snap.fw_version, snap.proto, snap.drop_sensor, snap.state.value, snap.homed,
+            snap.slot, snap.gate.value, snap.num_slots_reported,
         )
         self._after_connect(report)
         return True
@@ -656,6 +739,9 @@ class HardwareClient:
                 f"The device reports {report.num_slots} compartments but TACTIDOSE_NUM_SLOTS is "
                 f"{self.num_slots}. Fix the configuration before dispensing.",
             )
+        if not supports_drop_slot(report.proto):
+            log.info("device firmware %s has no DROP_SLOT (protocol v1): pill drops use "
+                     "DISPENSE_SLOT + CLOSE_GATE", report.fw or "?")
         snap = self.snapshot()
         if snap.state is DeviceState.FAULT:
             self._notice(
@@ -862,6 +948,9 @@ class HardwareClient:
                     upd["num_slots_reported"] = rep.num_slots
                 if rep.fw:
                     upd["fw_version"] = rep.fw
+                # Every STATUS describes the whole device: no proto key = v1 firmware (no DROP_SLOT).
+                upd["proto"] = rep.proto
+                upd["drop_sensor"] = rep.drop_sensor
                 if upd.get("state", s.state) is not DeviceState.MOVING:
                     upd["target_slot"] = None
             elif code == Ok.HOMING.value:
@@ -878,6 +967,11 @@ class HardwareClient:
                 upd.update(state=DeviceState.GATE_OPEN, gate=GateState.OPEN)
             elif code == Ok.GATE_CLOSED.value:
                 upd.update(gate=GateState.CLOSED)
+            elif code == Ok.DROPPED.value:
+                # The release cycle is over (gate closed); OK READY follows and sets the state.
+                upd.update(gate=GateState.CLOSED, target_slot=None)
+                if msg.slot is not None:
+                    upd["slot"] = msg.slot
             elif code == Ok.STOPPED.value:
                 upd.update(state=DeviceState.SAFE_STOP, homed=False, gate=GateState.CLOSED, slot=None, target_slot=None)
         elif msg.kind is MessageKind.ERR:
@@ -972,6 +1066,10 @@ class NullHardware:
     def _none(self, cmd: Command) -> CommandResult:
         return CommandResult.host_failure(cmd, HostCode.NOT_CONNECTED, detail="hardware_mode=none")
 
+    def _slot(self, name: CommandName, slot: int) -> CommandResult:
+        cmd = _build_slot_command(name, slot, self.num_slots)
+        return cmd if isinstance(cmd, CommandResult) else self._none(cmd)
+
     def ping(self) -> CommandResult:
         return self._none(Command.ping())
 
@@ -982,20 +1080,14 @@ class NullHardware:
         return self._none(Command.home())
 
     def move_slot(self, slot: int) -> CommandResult:
-        try:
-            return self._none(Command.move_slot(slot, self.num_slots))
-        except ProtocolError as exc:
-            return CommandResult.host_failure(
-                _placeholder_command(CommandName.MOVE_SLOT, slot), HostCode.INVALID_ARGUMENT, detail=str(exc)
-            )
+        return self._slot(CommandName.MOVE_SLOT, slot)
 
     def dispense_slot(self, slot: int) -> CommandResult:
-        try:
-            return self._none(Command.dispense_slot(slot, self.num_slots))
-        except ProtocolError as exc:
-            return CommandResult.host_failure(
-                _placeholder_command(CommandName.DISPENSE_SLOT, slot), HostCode.INVALID_ARGUMENT, detail=str(exc)
-            )
+        return self._slot(CommandName.DISPENSE_SLOT, slot)
+
+    def drop_slot(self, slot: int) -> CommandResult:
+        """Nothing is connected: ``NOT_CONNECTED`` (``INVALID_ARGUMENT`` for a bad slot)."""
+        return self._slot(CommandName.DROP_SLOT, slot)
 
     def open_gate(self) -> CommandResult:
         return self._none(Command.open_gate())

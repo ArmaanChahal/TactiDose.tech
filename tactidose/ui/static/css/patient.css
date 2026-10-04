@@ -1,0 +1,502 @@
+/*
+ * Patient portal. The primary user may be blind, have low vision or be older:
+ * body text 1.5rem (24px at the default size) and larger, big headings, huge buttons
+ * (drop buttons >= 5rem tall), one column on phones, generous spacing, every state in
+ * words + icon. Sizes are rem/em so the text-size setting and browser zoom scale all.
+ */
+
+.patient {
+  font-size: 1.5rem;
+  line-height: 1.45;
+}
+
+.patient .btn {
+  min-height: 3.25rem;
+  padding: 0.4em 0.9em;
+}
+
+.patient .btn-small {
+  min-height: 2.75rem;
+}
+
+.patient input[type="text"],
+.patient input[type="email"],
+.patient select {
+  min-height: 3.25rem;
+}
+
+.patient .app-header {
+  padding: 0.6rem 1rem;
+}
+
+.patient .brand {
+  font-size: 1.1em;
+}
+
+.patient .who {
+  font-size: 0.85em;
+}
+
+.patient .header-tools .btn {
+  font-size: 0.85em;
+}
+
+/* ------------------------------------------------------------------ section navigation */
+
+.views-nav {
+  background: var(--surface);
+  border-bottom: var(--border-width) solid var(--border-subtle);
+  padding: 0.5rem 1rem;
+}
+
+.views-nav ul {
+  list-style: none;
+  margin: 0 auto;
+  padding: 0;
+  max-width: 76rem;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(9.5rem, 1fr));
+  gap: 0.5rem;
+}
+
+.views-nav a {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4em;
+  min-height: 3.25rem;
+  padding: 0.3em 0.6em;
+  border: var(--border-width) solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  color: var(--fg);
+  font-weight: 750;
+  font-size: 0.9em;
+  text-decoration: none;
+  text-align: center;
+}
+
+.views-nav a:hover {
+  border-color: var(--fg);
+}
+
+.views-nav a[aria-current="page"] {
+  background: var(--invert-bg);
+  border-color: var(--invert-bg);
+  color: var(--invert-fg);
+}
+
+/* ------------------------------------------------------------------ layout */
+
+.patient main {
+  max-width: 76rem;
+  margin: 0 auto;
+  padding: 1rem 1rem 2.5rem;
+}
+
+.view-title {
+  font-size: 1.6em;
+  margin: 0.2em 0 0.5em;
+}
+
+.view-intro {
+  color: var(--fg-2);
+  max-width: 40em;
+}
+
+.patient h2 {
+  font-size: 1.2em;
+}
+
+.status-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0.9rem;
+  margin: 0 0 1.2rem;
+}
+
+@media (min-width: 52rem) {
+  .status-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.status-card {
+  padding: 0.8em 1em;
+  border: 0.1875rem solid var(--border-subtle);
+  border-radius: var(--radius);
+  background: var(--surface);
+  min-width: 0;
+}
+
+.status-label {
+  display: flex;
+  align-items: center;
+  gap: 0.4em;
+  margin: 0 0 0.3em;
+  font-size: 0.85em !important;
+  color: var(--fg-2);
+}
+
+.status-big {
+  margin: 0 0 0.3em;
+  font-size: 1.25em;
+  font-weight: 800;
+  line-height: 1.25;
+}
+
+.status-note {
+  margin: 0;
+  color: var(--fg-3);
+  font-size: 0.85em;
+}
+
+.status-card.is-waiting {
+  border-color: var(--warn-fg);
+}
+
+/* ------------------------------------------------------------------ drop result */
+
+.drop-result {
+  display: flex;
+  gap: 0.7em;
+  align-items: flex-start;
+  margin: 0 0 1.2rem;
+  padding: 0.8em 1em;
+  border: 0.1875rem solid currentColor;
+  border-left-width: 0.75rem;
+  border-radius: var(--radius);
+  background: var(--surface-2);
+}
+
+.drop-result p {
+  margin: 0;
+  color: var(--fg);
+}
+
+.drop-result-icon {
+  width: 1.6em;
+  height: 1.6em;
+  margin-top: 0.1em;
+}
+
+.drop-result-word {
+  font-weight: 850;
+  font-size: 1.15em;
+}
+
+.drop-result.is-pending .drop-result-icon {
+  animation: spin 1.2s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+/* ------------------------------------------------------------------ containers */
+
+.containers {
+  list-style: none;
+  margin: 0 0 1.4rem;
+  padding: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0.9rem;
+}
+
+@media (min-width: 52rem) {
+  .containers {
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 18rem), 1fr));
+  }
+}
+
+.container-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25em;
+  padding: 0.9em 1em 1em;
+  border: 0.1875rem solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  min-width: 0;
+}
+
+.container-card.is-low {
+  border-color: var(--warn-fg);
+}
+
+.container-card.is-empty {
+  border-color: var(--danger-fg);
+}
+
+.container-card.is-unassigned {
+  border-style: dashed;
+  border-color: var(--border-subtle);
+}
+
+.container-title {
+  margin: 0;
+  font-size: 0.9em !important;
+  color: var(--fg-2);
+}
+
+.container-med {
+  margin: 0;
+  font-size: 1.25em;
+  font-weight: 850;
+  line-height: 1.2;
+  overflow-wrap: anywhere;
+}
+
+.container-strength {
+  margin: 0;
+  color: var(--fg-2);
+}
+
+.container-count {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.3em 0.6em;
+  margin: 0.2em 0 0.6em;
+  font-weight: 700;
+}
+
+.btn-drop {
+  margin-top: auto;
+  width: 100%;
+  min-height: 5rem !important;
+  font-size: 1.25em;
+  font-weight: 850;
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-fg);
+  border-width: 0.1875rem;
+}
+
+.btn-drop .icon {
+  width: 1.3em;
+  height: 1.3em;
+}
+
+.btn-drop:hover {
+  border-color: var(--fg);
+}
+
+/* Cooldown running: still pressable (the server answers with the exact time). */
+.btn-drop.is-waiting {
+  background: var(--surface-2);
+  border-color: var(--warn-fg);
+  color: var(--fg);
+}
+
+.btn-drop.is-unavailable {
+  background: transparent;
+  border-style: dashed;
+  border-color: var(--danger-fg);
+  color: var(--fg);
+  opacity: 1;
+  cursor: not-allowed;
+}
+
+.btn-drop[aria-busy="true"] {
+  opacity: 0.7;
+}
+
+/* ------------------------------------------------------------------ alerts */
+
+.alerts-box {
+  margin: 0 0 1.2rem;
+  padding: 0.8em 1em;
+  border: 0.1875rem solid var(--warn-fg);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.alerts-box h2 {
+  display: flex;
+  align-items: center;
+  gap: 0.4em;
+}
+
+.alerts-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4em;
+}
+
+.alert-item {
+  display: flex;
+  gap: 0.5em;
+  align-items: flex-start;
+}
+
+.alert-item .alert-text {
+  color: var(--fg);
+}
+
+/* ------------------------------------------------------------------ assistant */
+
+.patient .chat-log {
+  min-height: 12rem;
+  max-height: 55vh;
+  margin-bottom: 0.8rem;
+}
+
+.voice-status {
+  min-height: 1.5em;
+  margin: 0 0 0.4em;
+  font-weight: 700;
+}
+
+.voice-interim {
+  margin: 0 0 0.6em;
+  color: var(--fg-2);
+  font-style: italic;
+}
+
+.talk-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.6rem 1rem;
+  margin-bottom: 1rem;
+}
+
+.btn-talk {
+  min-height: 5rem !important;
+  min-width: 12rem;
+  font-size: 1.25em;
+  font-weight: 850;
+  border-width: 0.1875rem;
+}
+
+.btn-talk .icon {
+  width: 1.3em;
+  height: 1.3em;
+}
+
+.btn-talk.is-listening {
+  background: var(--danger-bg);
+  border-color: var(--fg);
+  color: var(--danger-bg-fg);
+  animation: listening 1.4s ease-in-out infinite;
+}
+
+@keyframes listening {
+  50% { box-shadow: 0 0 0 0.4rem var(--focus); }
+}
+
+.talk-row .field-hint {
+  flex: 1 1 14rem;
+}
+
+.chat-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3em;
+  margin-bottom: 0.8rem;
+}
+
+.chat-input-row {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.chat-input-row input {
+  flex: 1;
+  min-width: 0;
+}
+
+.assistant-tools .btn {
+  font-size: 0.85em;
+}
+
+/* ------------------------------------------------------------------ schedule, history, reports */
+
+.day-nav {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 0.8rem;
+  margin-bottom: 0.8rem;
+}
+
+.day-title {
+  margin: 0;
+  flex: 1 1 100%;
+  order: -1;
+}
+
+.dose-time {
+  font-weight: 850;
+  min-width: 5.5em;
+}
+
+.patient .item-title {
+  font-size: 1em;
+}
+
+.patient .badge {
+  font-size: 0.8em;
+}
+
+/* ------------------------------------------------------------------ care team codes */
+
+.share-codes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem 2rem;
+  margin: 0.5rem 0 1rem;
+}
+
+.share-code dt {
+  font-weight: 750;
+  color: var(--fg-2);
+  margin-bottom: 0.2em;
+}
+
+.share-code dd {
+  margin: 0;
+}
+
+.patient .code-box {
+  font-size: 1.6em;
+}
+
+/* ------------------------------------------------------------------ narrow phones */
+
+@media (max-width: 30rem) {
+  .patient {
+    font-size: 1.5rem;
+  }
+
+  .patient .header-tools {
+    width: 100%;
+    margin-left: 0;
+  }
+
+  .patient .header-tools .btn {
+    flex: 1 1 auto;
+  }
+
+  .views-nav ul {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .btn-talk {
+    width: 100%;
+  }
+
+  .chat-input-row {
+    flex-direction: column;
+  }
+}
+
+/* Toasts are a secondary channel here (results are also announced and shown on Home). */
+.patient .toast {
+  font-size: 0.8em;
+}

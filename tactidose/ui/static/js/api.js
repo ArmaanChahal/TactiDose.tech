@@ -1,24 +1,22 @@
 /**
- * Fetch wrapper for the TactiDose HTTP API (docs/API.md is the contract).
+ * Fetch wrapper for the TactiDose HTTP API v2 (docs/API.md is the contract).
  *
- * - JSON request/response bodies; FormData is sent as multipart unchanged.
- * - Errors are thrown as ApiError carrying the HTTP status and the server's
- *   `detail` (FastAPI returns a string, or a list of validation errors for 422).
- * - Caregiver PIN: the `X-Caregiver-Pin` header is added from localStorage when
- *   a PIN is stored. On 401 the user is asked for the PIN once and the request
- *   is retried once; a second 401 forgets the stored PIN.
+ * - Cookie session: every request is sent with credentials 'same-origin', so the
+ *   HttpOnly `td_session` cookie set by POST /api/auth/login travels with it.
+ * - JSON request/response bodies. FormData (label photos) and raw bytes (microphone
+ *   PCM for /api/agent/transcribe) are sent unchanged.
+ * - Errors are thrown as ApiError carrying the HTTP status and the server's `detail`
+ *   (FastAPI sends a string, or a list of validation errors for 422).
+ * - 401 means "not signed in / session expired": the browser goes to
+ *   /login?next=<this page> unless the caller passes {redirectOn401: false}
+ *   (the sign-in form itself, session probes).
  *
- * Dependencies (fetch, storage, PIN prompt) can be swapped with configureApi()
- * so the logic is unit-testable outside a browser.
+ * fetch and location can be swapped with configureApi() for unit tests.
  */
 
-import { promptDialog } from './dom.js';
-import { icon } from './icons.js';
-
-export const PIN_STORAGE_KEY = 'tactidose.caregiverPin';
 export const DEFAULT_TIMEOUT_MS = 30000;
-/** POST /api/intents waits until the assistant handled the intent (≤ 60 s server-side). */
-export const INTENT_TIMEOUT_MS = 75000;
+/** Agent replies (Gemini), report generation and label scans can take a while. */
+export const LONG_TIMEOUT_MS = 90000;
 
 export class ApiError extends Error {
   constructor(message, { status = 0, detail = null, method = 'GET', path = '', network = false, timeout = false } = {}) {
@@ -33,61 +31,45 @@ export class ApiError extends Error {
   }
 }
 
-const deps = {
-  fetch: null,
-  storage: null,
-  promptPin: null,
-};
+const deps = { fetch: null, location: null };
+let redirecting = false;
 
-/** Override dependencies (tests): {fetch, storage, promptPin}. */
+/** Override dependencies (tests): {fetch, location}. */
 export function configureApi(overrides = {}) {
   Object.assign(deps, overrides);
+  redirecting = false;
 }
 
-function storage() {
-  if (deps.storage) return deps.storage;
-  try {
-    return globalThis.localStorage || null;
-  } catch {
-    return null;
-  }
+function currentLocation() {
+  return deps.location || globalThis.location || null;
 }
 
-export function getPin() {
-  try {
-    return storage()?.getItem(PIN_STORAGE_KEY) || null;
-  } catch {
-    return null;
-  }
+/**
+ * A same-origin page path that is safe to return to after signing in, or null.
+ * Rejects absolute/protocol-relative URLs (open redirect), API paths and the login page.
+ */
+export function safeNext(value) {
+  if (typeof value !== 'string') return null;
+  const v = value.trim();
+  if (!v.startsWith('/') || v.startsWith('//') || v.startsWith('/\\')) return null;
+  // eslint-disable-next-line no-control-regex
+  if (/[\u0000-\u001f\\]/.test(v)) return null;
+  if (v === '/api' || v.startsWith('/api/') || v === '/login' || v.startsWith('/login?') || v.startsWith('/login#')) return null;
+  return v;
 }
 
-/** Lets pages show/hide a "Forget PIN" control (no-op outside a browser). */
-function pinChanged() {
-  if (typeof globalThis.dispatchEvent === 'function' && typeof Event === 'function') {
-    globalThis.dispatchEvent(new Event('tactidose:pin'));
-  }
+export function loginUrl(next = null) {
+  const target = safeNext(next);
+  return target && target !== '/' ? `/login?next=${encodeURIComponent(target)}` : '/login';
 }
 
-export function setPin(pin) {
-  try {
-    storage()?.setItem(PIN_STORAGE_KEY, pin);
-  } catch {
-    /* storage unavailable: the PIN is used for this request only */
-  }
-  pinChanged();
-}
-
-export function clearPin() {
-  try {
-    storage()?.removeItem(PIN_STORAGE_KEY);
-  } catch {
-    /* ignore */
-  }
-  pinChanged();
-}
-
-export function hasPin() {
-  return Boolean(getPin());
+/** Leave the page for the sign-in form, remembering where we were. Runs once per page. */
+export function redirectToLogin() {
+  const loc = currentLocation();
+  if (!loc || redirecting) return;
+  if (String(loc.pathname || '').startsWith('/login')) return;
+  redirecting = true;
+  loc.assign(loginUrl(`${loc.pathname || '/'}${loc.search || ''}${loc.hash || ''}`));
 }
 
 function locText(loc) {
@@ -114,28 +96,6 @@ export function detailToMessage(detail, fallback = 'Request failed') {
   return String(detail);
 }
 
-let pinRequest = null;
-
-function askForPin(reason) {
-  if (deps.promptPin) return Promise.resolve(deps.promptPin(reason));
-  // Concurrent 401s share one prompt.
-  if (!pinRequest) {
-    const generic = !reason || /^caregiver pin required\.?$/i.test(String(reason).trim());
-    pinRequest = promptDialog({
-      title: 'Caregiver PIN required',
-      message: generic ? 'Enter the caregiver PIN to make changes.' : reason,
-      label: 'Caregiver PIN',
-      type: 'password',
-      inputmode: 'numeric',
-      confirmLabel: 'Unlock',
-      iconEl: icon('lock'),
-    }).finally(() => {
-      pinRequest = null;
-    });
-  }
-  return pinRequest;
-}
-
 async function parseBody(res) {
   const text = await res.text();
   if (!text) return null;
@@ -147,21 +107,31 @@ async function parseBody(res) {
 }
 
 /**
- * Perform one API request. Options: {body, form, timeoutMs, signal, auth}.
- * Resolves the parsed JSON (or null for an empty body); rejects with ApiError.
+ * Perform one API request.
+ * Options: {body, form, raw, contentType, timeoutMs, signal, redirectOn401}.
+ * Resolves the parsed JSON (null for an empty body); rejects with ApiError.
  */
 export async function request(method, path, opts = {}) {
-  const { body, form, timeoutMs = DEFAULT_TIMEOUT_MS, signal = null, auth = true, retried = false } = opts;
+  const {
+    body,
+    form,
+    raw,
+    contentType = 'application/octet-stream',
+    timeoutMs = DEFAULT_TIMEOUT_MS,
+    signal = null,
+    redirectOn401 = true,
+  } = opts;
   const headers = { Accept: 'application/json' };
   let payload;
   if (form !== undefined) {
     payload = form;
+  } else if (raw !== undefined) {
+    headers['Content-Type'] = contentType;
+    payload = raw;
   } else if (body !== undefined) {
     headers['Content-Type'] = 'application/json';
     payload = JSON.stringify(body);
   }
-  const pin = auth ? getPin() : null;
-  if (pin) headers['X-Caregiver-Pin'] = pin;
 
   const controller = new AbortController();
   let timedOut = false;
@@ -192,18 +162,9 @@ export async function request(method, path, opts = {}) {
 
   const detail = data && typeof data === 'object' && 'detail' in data ? data.detail : data;
   const message = detailToMessage(detail, `${res.status} ${res.statusText || 'error'}`.trim());
-
-  if (res.status === 401 && auth) {
-    if (!retried) {
-      const entered = await askForPin(message);
-      if (entered) {
-        setPin(entered);
-        return request(method, path, { ...opts, retried: true });
-      }
-      throw new ApiError(`Caregiver PIN required: ${message}`, { status: 401, detail, method, path });
-    }
-    clearPin();
-    throw new ApiError('The caregiver PIN was not accepted. Please try again.', { status: 401, detail, method, path });
+  if (res.status === 401 && redirectOn401) {
+    redirectToLogin();
+    throw new ApiError('Your session has ended. Please sign in again.', { status: 401, detail, method, path });
   }
   throw new ApiError(message, { status: res.status, detail, method, path });
 }
@@ -213,15 +174,7 @@ export const post = (path, body = {}, opts = {}) => request('POST', path, { ...o
 export const put = (path, body = {}, opts = {}) => request('PUT', path, { ...opts, body });
 export const patch = (path, body = {}, opts = {}) => request('PATCH', path, { ...opts, body });
 export const del = (path, opts) => request('DELETE', path, opts);
-/** Multipart POST (label scans). */
-export const upload = (path, formData, opts = {}) => request('POST', path, { timeoutMs: 90000, ...opts, form: formData });
-
-/** Kiosk buttons / shortcuts: POST /api/intents {intent, source}. */
-export function postIntent(intent, source = 'ui') {
-  return post('/api/intents', { intent, source }, { timeoutMs: INTENT_TIMEOUT_MS });
-}
-
-/** Demo panel simulated voice: POST /api/intents {text, source}. */
-export function postText(text, source = 'keyboard') {
-  return post('/api/intents', { text, source }, { timeoutMs: INTENT_TIMEOUT_MS });
-}
+/** Multipart POST (label photos). */
+export const upload = (path, formData, opts = {}) => request('POST', path, { timeoutMs: LONG_TIMEOUT_MS, ...opts, form: formData });
+/** Raw bytes POST (16 kHz PCM16 audio). */
+export const postRaw = (path, bytes, opts = {}) => request('POST', path, { timeoutMs: LONG_TIMEOUT_MS, ...opts, raw: bytes });

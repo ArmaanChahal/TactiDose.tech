@@ -16,6 +16,28 @@
 #define ALLOW_STRAPPING_PINS 0
 #endif
 
+#if MECHANISM == MECHANISM_PER_CONTAINER_SERVO
+namespace {
+constexpr int kReleasePins[] = {PIN_RELEASE_SERVOS};
+constexpr int kReleasePinCount = static_cast<int>(sizeof(kReleasePins) / sizeof(kReleasePins[0]));
+constexpr int kServoTrim[] = {SERVO_TRIM_DEG};
+
+/* Logical angle of the core + this container's trim, clamped to the servo range. */
+int trimmed(uint8_t gate, uint8_t degrees) {
+  const int deg = static_cast<int>(degrees) + kServoTrim[gate];
+  return deg < 0 ? 0 : (deg > 180 ? 180 : deg);
+}
+}  // namespace
+#endif
+
+#if HAS_DROP_SENSOR
+namespace {
+/* Set by the pin interrupt when the beam becomes interrupted; read and cleared by dropSensorActive(). */
+volatile bool gDropLatched = false;
+void IRAM_ATTR onDropSensorEdge() { gDropLatched = true; }
+}  // namespace
+#endif
+
 /* ------------------------------------------------------------------ compile-time pin checks */
 
 #if defined(CONFIG_IDF_TARGET_ESP32) /* classic ESP32 (ESP32-WROOM/WROVER, "ESP32 Dev Module") */
@@ -31,8 +53,17 @@ constexpr bool okCriticalOutput(int p) {
 constexpr bool okInput(int p, bool pullup) {
   return p < 0 || (p <= 39 && !isFlashPin(p) && !isUart0(p) && !(pullup && isInputOnly(p)));
 }
+#if MECHANISM == MECHANISM_PER_CONTAINER_SERVO
+/* GPIO 14 is also excluded: it outputs PWM while the ESP32 boots and would twitch a release servo. */
+constexpr bool releasePinsOk(int i) {
+  return i >= kReleasePinCount ? true
+                               : (kReleasePins[i] >= 0 && okCriticalOutput(kReleasePins[i]) && kReleasePins[i] != 14 &&
+                                  releasePinsOk(i + 1));
+}
+#endif
 
 constexpr int kUsedPins[] = {
+#if MECHANISM == MECHANISM_CAROUSEL
 #if DRIVER_TYPE == DRIVER_STEP_DIR
     PIN_STEP, PIN_DIR, PIN_ENABLE,
 #else
@@ -41,6 +72,12 @@ constexpr int kUsedPins[] = {
     PIN_SERVO,
 #if HAS_HOME_SENSOR
     PIN_HOME_SENSOR,
+#endif
+#else
+    PIN_RELEASE_SERVOS,
+#endif
+#if HAS_DROP_SENSOR
+    PIN_DROP_SENSOR,
 #endif
     PIN_CONFIRM_BUTTON, PIN_CANCEL_BUTTON, PIN_STATUS_LED};
 constexpr int kUsedPinCount = static_cast<int>(sizeof(kUsedPins) / sizeof(kUsedPins[0]));
@@ -52,6 +89,7 @@ constexpr bool pinsDistinct(int i, int j) {
 }
 }  // namespace
 
+#if MECHANISM == MECHANISM_CAROUSEL
 #if DRIVER_TYPE == DRIVER_STEP_DIR
 static_assert(PIN_STEP >= 0 && PIN_DIR >= 0, "PIN_STEP and PIN_DIR are required");
 static_assert(okCriticalOutput(PIN_STEP) && okCriticalOutput(PIN_DIR) && okCriticalOutput(PIN_ENABLE),
@@ -66,12 +104,22 @@ static_assert(okCriticalOutput(PIN_IN1) && okCriticalOutput(PIN_IN2) && okCritic
 #endif
 static_assert(PIN_SERVO >= 0 && okCriticalOutput(PIN_SERVO),
               "PIN_SERVO: not 6-11, 34-39, 1/3 or a strapping pin (the gate could twitch open during boot)");
-static_assert(okOutput(PIN_STATUS_LED), "PIN_STATUS_LED: not 6-11 (flash), 34-39 (input-only) or 1/3");
 #if HAS_HOME_SENSOR
 static_assert(PIN_HOME_SENSOR >= 0 && okInput(PIN_HOME_SENSOR, HOME_SENSOR_PULLUP != 0),
               "PIN_HOME_SENSOR: not 6-11 or 1/3; GPIO 34-39 have no internal pull-up (set HOME_SENSOR_PULLUP 0 "
               "and fit an external 10k pull-up)");
 #endif
+#else
+static_assert(releasePinsOk(0),
+              "PIN_RELEASE_SERVOS: every pin must be an output-capable GPIO, not 6-11 (flash), 34-39 (input-only), "
+              "1/3 (USB serial), 14 or a strapping pin 0/2/5/12/15 (a release servo could twitch during boot)");
+#endif
+#if HAS_DROP_SENSOR
+static_assert(PIN_DROP_SENSOR >= 0 && okInput(PIN_DROP_SENSOR, DROP_SENSOR_PULLUP != 0),
+              "PIN_DROP_SENSOR: not 6-11 or 1/3; GPIO 34-39 have no internal pull-up (set DROP_SENSOR_PULLUP 0 "
+              "and fit an external 10k pull-up to 3.3 V)");
+#endif
+static_assert(okOutput(PIN_STATUS_LED), "PIN_STATUS_LED: not 6-11 (flash), 34-39 (input-only) or 1/3");
 static_assert(PIN_CONFIRM_BUTTON >= 0 && okInput(PIN_CONFIRM_BUTTON, BUTTON_PULLUP != 0),
               "PIN_CONFIRM_BUTTON: required; not 6-11 or 1/3; GPIO 34-39 need BUTTON_PULLUP 0 + external pull-up");
 static_assert(okInput(PIN_CANCEL_BUTTON, BUTTON_PULLUP != 0),
@@ -81,7 +129,9 @@ static_assert(pinsDistinct(0, 1), "two functions share one GPIO in config.h");
 
 /* ------------------------------------------------------------------ construction */
 
-#if DRIVER_TYPE == DRIVER_STEP_DIR
+#if MECHANISM == MECHANISM_PER_CONTAINER_SERVO
+ArduinoHal::ArduinoHal() : ledOn_(false) {}
+#elif DRIVER_TYPE == DRIVER_STEP_DIR
 ArduinoHal::ArduinoHal() : stepper_(AccelStepper::DRIVER, PIN_STEP, PIN_DIR, 0xff, 0xff, false), ledOn_(false) {}
 #elif DIR_INVERT
 /* Reversed coil order = reversed rotation. */
@@ -95,6 +145,7 @@ ArduinoHal::ArduinoHal()
 
 void ArduinoHal::begin() {
   /* 1. Motor outputs to a defined, released state before anything else. */
+#if MECHANISM == MECHANISM_CAROUSEL
 #if DRIVER_TYPE == DRIVER_STEP_DIR
 #if PIN_ENABLE >= 0
   /* EN is driven here, not through AccelStepper::setEnablePin(), which briefly writes the
@@ -117,16 +168,33 @@ void ArduinoHal::begin() {
   }
   stepper_.disableOutputs(); /* all coils off */
 #endif
+#endif
 
-  /* 2. Gate servo: command CLOSED right away; the core waits GATE_TRAVEL_MS before EVENT BOOT. */
+  /* 2. Release servo(s): command CLOSED right away; the core waits GATE_TRAVEL_MS before EVENT BOOT. */
+#if MECHANISM == MECHANISM_CAROUSEL
   ESP32PWM::allocateTimer(0);
   servo_.setPeriodHertz(50);
   servo_.attach(PIN_SERVO, SERVO_MIN_PULSE_US, SERVO_MAX_PULSE_US);
   servo_.write(SERVO_CLOSED_DEG);
+#else
+  for (int timer = 0; timer < (NUM_SLOTS + 3) / 4; ++timer) {
+    ESP32PWM::allocateTimer(timer); /* up to 4 servo channels share one 50 Hz timer */
+  }
+  for (uint8_t i = 0; i < NUM_SLOTS; ++i) {
+    servos_[i].setPeriodHertz(50);
+    servos_[i].attach(kReleasePins[i], SERVO_MIN_PULSE_US, SERVO_MAX_PULSE_US);
+    servos_[i].write(trimmed(i, SERVO_CLOSED_DEG));
+  }
+#endif
 
   /* 3. Inputs. */
-#if HAS_HOME_SENSOR
+#if MECHANISM == MECHANISM_CAROUSEL && HAS_HOME_SENSOR
   pinMode(PIN_HOME_SENSOR, HOME_SENSOR_PULLUP ? INPUT_PULLUP : INPUT);
+#endif
+#if HAS_DROP_SENSOR
+  pinMode(PIN_DROP_SENSOR, DROP_SENSOR_PULLUP ? INPUT_PULLUP : INPUT);
+  attachInterrupt(digitalPinToInterrupt(PIN_DROP_SENSOR), onDropSensorEdge,
+                  DROP_SENSOR_ACTIVE_LOW ? FALLING : RISING);
 #endif
   pinMode(PIN_CONFIRM_BUTTON, BUTTON_PULLUP ? INPUT_PULLUP : INPUT);
 #if PIN_CANCEL_BUTTON >= 0
@@ -178,6 +246,8 @@ void ArduinoHal::showState(tactidose::DeviceState state) {
 
 uint32_t ArduinoHal::millis() { return static_cast<uint32_t>(::millis()); }
 
+#if MECHANISM == MECHANISM_CAROUSEL
+
 void ArduinoHal::stepperSetMaxSpeed(float stepsPerSecond) { stepper_.setMaxSpeed(stepsPerSecond); }
 
 void ArduinoHal::stepperSetAcceleration(float stepsPerSecondSquared) {
@@ -213,7 +283,10 @@ void ArduinoHal::stepperEnable(bool on) {
 #endif
 }
 
-void ArduinoHal::servoWrite(uint8_t degrees) { servo_.write(degrees); }
+void ArduinoHal::servoWrite(uint8_t gate, uint8_t degrees) {
+  (void)gate; /* one release servo: gate 0 */
+  servo_.write(degrees);
+}
 
 bool ArduinoHal::homeSensorActive() {
 #if HAS_HOME_SENSOR
@@ -224,11 +297,44 @@ bool ArduinoHal::homeSensorActive() {
 #endif
 }
 
+#else  // MECHANISM_PER_CONTAINER_SERVO: no stepper, no home sensor (the core never uses them)
+
+void ArduinoHal::stepperSetMaxSpeed(float) {}
+void ArduinoHal::stepperSetAcceleration(float) {}
+void ArduinoHal::stepperMoveTo(long) {}
+bool ArduinoHal::stepperRun() { return false; }
+long ArduinoHal::stepperDistanceToGo() { return 0; }
+void ArduinoHal::stepperStop() {}
+long ArduinoHal::stepperCurrentPosition() { return 0; }
+void ArduinoHal::stepperSetCurrentPosition(long) {}
+void ArduinoHal::stepperEnable(bool) {}
+
+void ArduinoHal::servoWrite(uint8_t gate, uint8_t degrees) {
+  if (gate < NUM_SLOTS) servos_[gate].write(trimmed(gate, degrees));
+}
+
+bool ArduinoHal::homeSensorActive() { return false; }
+
+#endif  // MECHANISM
+
 bool ArduinoHal::buttonPressed(tactidose::Button button) {
   const int pin = button == tactidose::Button::kConfirm ? PIN_CONFIRM_BUTTON : PIN_CANCEL_BUTTON;
   if (pin < 0) return false;
   const int level = digitalRead(pin);
   return BUTTON_ACTIVE_LOW ? level == LOW : level == HIGH;
+}
+
+bool ArduinoHal::dropSensorActive() {
+#if HAS_DROP_SENSOR
+  const int level = digitalRead(PIN_DROP_SENSOR);
+  if (gDropLatched) {
+    gDropLatched = false; /* interrupted at least once since the previous call */
+    return true;
+  }
+  return DROP_SENSOR_ACTIVE_LOW ? level == LOW : level == HIGH;
+#else
+  return false;
+#endif
 }
 
 int ArduinoHal::serialRead() { return Serial.read(); /* -1 when nothing is waiting */ }

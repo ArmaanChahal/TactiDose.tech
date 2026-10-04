@@ -1,25 +1,27 @@
 /*
- * config.h -- ALL tunables of the TactiDose REFERENCE firmware (pins, mechanics, motion, gate, timing).
+ * config.h -- ALL tunables of the TactiDose REFERENCE firmware (mechanism, pins, motion, release,
+ * drop sensor, timing).
  *
  * Hackathon prototype, NOT a medical device: demo with candy / tokens only.
  *
- * >>> PINS ARE PLACEHOLDERS <<< until the hardware questions of the handoff (§34) are answered:
- *     exact ESP32 board, stepper + driver, servo, touchscreen (and which pins it needs), power
- *     supply, home-sensor type, direct drive or belt/gears. Wiring templates, the pin plan and the
- *     calibration procedure are in docs/HARDWARE_INTEGRATION.md.
+ * >>> PINS ARE PLACEHOLDERS <<< until the hardware questions are answered (handoff §34 and
+ *     docs/HARDWARE_INTEGRATION.md §2): exact ESP32 board, which pill mechanism (carousel or one
+ *     servo per container), stepper + driver, servo(s), drop sensor, power supplies, home-sensor
+ *     type, direct drive or belt/gears. Wiring templates, the pin plan and the calibration
+ *     procedure are in docs/HARDWARE_INTEGRATION.md.
  *
  * Classic ESP32 (ESP32-WROOM-32 DevKit) pin rules -- ArduinoHal.cpp enforces the hard ones at
  * compile time:
  *   - NEVER use GPIO 6-11: they are wired to the SPI flash (the board stops booting).
  *   - GPIO 34-39 are INPUT-ONLY and have NO internal pull-ups: never outputs; inputs need an
  *     external pull-up (10 kOhm to 3.3 V) unless the sensor drives the line itself.
- *   - Avoid the strapping pins 0, 2, 5, 12, 15 for critical outputs (STEP/DIR/ENABLE/coils/servo):
+ *   - Avoid the strapping pins 0, 2, 5, 12, 15 for critical outputs (STEP/DIR/ENABLE/coils/servos):
  *     they are sampled at reset and some toggle during boot (motor twitch, failed boot; GPIO 12
  *     pulled HIGH at reset selects 1.8 V flash and the board will not boot).
  *   - GPIO 1/3 are the USB serial port (TX0/RX0) used by the host link: never use them.
- *   - GPIO 14/15 output a PWM signal while booting: do not use them for motor signals.
+ *   - GPIO 14/15 output a PWM signal while booting: do not use them for motor or servo signals.
  *   - GPIO 16/17 do not exist on WROVER modules (PSRAM). 18/19/23 (+5) are the default SPI and
- *     21/22 the default I2C pins: keep them free if the touchscreen needs them.
+ *     21/22 the default I2C pins: keep them free if a touchscreen needs them.
  *   - Other variants (ESP32-S3/C3/C6...) have different rules -- re-check the pin plan.
  *
  * Tunables marked [host] must match the host settings (tactidose/config.py, .env).
@@ -29,8 +31,9 @@
 
 /* ================================================================ identity */
 
-/* Reported in "EVENT BOOT <fw>" and "STATUS ... fw=<fw>". No spaces. Bump when behaviour changes. */
-#define FW_VERSION "1.0.0-ref"
+/* Reported in "EVENT BOOT <fw>" and "STATUS ... fw=<fw>". No spaces. Bump when behaviour changes.
+ * The protocol version (STATUS proto=1.1) is fixed by the core, not configured here. */
+#define FW_VERSION "1.1.0-ref"
 
 /* USB serial link: 115200 8N1 (SERIAL_PROTOCOL.md §1). [host] TACTIDOSE_SERIAL_BAUD */
 #define SERIAL_BAUD 115200
@@ -42,12 +45,25 @@
  * there is no alternative and you have checked the pin's boot-time behaviour on your board. */
 #define ALLOW_STRAPPING_PINS 0
 
-/* ================================================================ carousel */
+/* ================================================================ mechanism (SERIAL_PROTOCOL.md §12.6) */
 
-/* Number of compartments, 2..12. [host] TACTIDOSE_NUM_SLOTS (the device reports it in STATUS). */
-#define NUM_SLOTS 6
+/* MECHANISM_CAROUSEL: a stepper turns container n over ONE output chute; one servo opens the
+ *   trapdoor/gate there ("release"). Needs the stepper driver, a home sensor (recommended) and
+ *   PIN_SERVO.
+ * MECHANISM_PER_CONTAINER_SERVO: NUM_SLOTS fixed containers, each with its own servo (dispensing
+ *   wheel or flap) on PIN_RELEASE_SERVOS; no stepper, no home sensor. HOME and moves complete at
+ *   once with the same serial messages, so the host cannot tell the difference. */
+#define MECHANISM_CAROUSEL 1
+#define MECHANISM_PER_CONTAINER_SERVO 2
+#ifndef MECHANISM /* can be overridden from the build: -DMECHANISM=2 */
+#define MECHANISM MECHANISM_CAROUSEL
+#endif
 
-/* ================================================================ stepper driver */
+/* Number of pill containers, 2..12 (v2 hardware: 3). [host] TACTIDOSE_NUM_SLOTS; the device reports
+ * it in STATUS slots=<n>. Containers are 0-based on the wire; people hear "container n+1". */
+#define NUM_SLOTS 3
+
+/* ================================================================ stepper driver (MECHANISM_CAROUSEL) */
 
 #define DRIVER_STEP_DIR 1 /* A4988 / DRV8825 / TMC2208 / TMC2209 (standalone STEP/DIR) + bipolar NEMA17 */
 #define DRIVER_ULN2003 2  /* ULN2003 board + 28BYJ-48 (5 V unipolar), 4-wire half-step */
@@ -71,7 +87,7 @@
 #define PIN_IN4 33
 
 /* 1 = reverse the rotation direction. This also reverses the homing direction and the direction
- * in which compartments 1..N are counted, so re-check both after changing it. */
+ * in which containers 1..N are counted, so re-check both after changing it. */
 #define DIR_INVERT 0
 
 /* ================================================================ steps per carousel revolution */
@@ -116,14 +132,14 @@
 #define MOTION_TIMEOUT_MARGIN_MS 2000UL
 
 /* 1 = keep the motor energised while idle (READY / SAFE_STOP) so the carousel cannot be pushed
- * out of position while someone reaches into the opening. 0 = release the coils when idle (cooler,
- * esp. 28BYJ-48) -- position may then drift; re-home more often. The motor is always energised
- * while moving and while the gate is open, and released in FAULT. */
+ * out of position. 0 = release the coils when idle (cooler, esp. 28BYJ-48) -- position may then
+ * drift; re-home more often. The motor is always energised while moving and while the release is
+ * open, and released in FAULT. */
 #define STEPPER_HOLD_WHEN_IDLE 1
 
-/* ================================================================ homing (rule 8.5) */
+/* ================================================================ homing (rule 8.5, MECHANISM_CAROUSEL) */
 
-/* 0 = no home sensor (MVP fallback): align compartment 1 (slot 0) with the opening by hand before
+/* 0 = no home sensor (MVP fallback): align container 1 (slot 0) with the chute by hand before
  * power-on; HOME then just returns to step 0. Re-align and power-cycle if the carousel slips. */
 #define HAS_HOME_SENSOR 1
 /* Hall sensor (A3144 / KY-003, magnet on the carousel), lever micro-switch, or slotted optical
@@ -147,7 +163,7 @@
 /* If the sensor is already active when homing starts, move away at most this far to release it;
  * a sensor that never releases is treated as broken (ERR HOME_TIMEOUT, FAULT). */
 #define HOME_RELEASE_MAX_REVS 0.25f
-/* Calibration: where the centre of compartment 1 (slot 0) is relative to the sensor edge, in
+/* Calibration: where the centre of container 1 (slot 0) is relative to the sensor edge, in
  * steps in the + direction. Found with MOVE_SLOT 0 + a ruler, see HARDWARE_INTEGRATION.md. */
 #define HOME_OFFSET_STEPS 0
 /* Sensor reading must be stable this long to count as an edge (hall/optical: a few ms; a
@@ -157,23 +173,53 @@
  * (catches lost steps). Enable only after calibration, when slot 0 sits inside the sensor zone. */
 #define VERIFY_SLOT_WITH_HOME_SENSOR 0
 
-/* ================================================================ gate servo */
+/* ================================================================ release servo(s) ("gate") */
 
+/* MECHANISM_CAROUSEL: the one trapdoor/gate servo at the output chute. */
 #define PIN_SERVO 13
-/* Calibrate mechanically (handoff §11). Closed must fully block the opening, open must not touch
- * the carousel. Keep them apart by at least ~30 deg. */
+/* MECHANISM_PER_CONTAINER_SERVO: one servo per container, container 1 first. Exactly NUM_SLOTS
+ * GPIOs, comma-separated, without braces. */
+#define PIN_RELEASE_SERVOS 25, 26, 27
+/* MECHANISM_PER_CONTAINER_SERVO: per-servo trim in degrees, added to SERVO_CLOSED_DEG and
+ * SERVO_OPEN_DEG for that container (horn mounting differences). Same order, NUM_SLOTS entries. */
+#define SERVO_TRIM_DEG 0, 0, 0
+/* Calibrate mechanically (HARDWARE_INTEGRATION.md). CLOSED must hold every pill back (trapdoor
+ * shut / wheel pocket under the container); OPEN must let exactly one pill go (trapdoor open /
+ * pocket over the chute). Keep them apart by at least ~30 deg. */
 #define SERVO_CLOSED_DEG 20
 #define SERVO_OPEN_DEG 90
 /* Pulse range for 0..180 deg. SG90/MG90S: ~500-2400 us. Narrow it if the servo buzzes at the ends. */
 #define SERVO_MIN_PULSE_US 500
 #define SERVO_MAX_PULSE_US 2400
-/* Time the servo needs to travel between closed and open (rule 8.2: <= 600 ms). OK GATE_OPEN /
+/* Time a servo needs to travel between closed and open (rule 8.2: <= 600 ms). OK GATE_OPEN /
  * OK GATE_CLOSED are sent only after this time; measure it and add a margin. */
 #define GATE_TRAVEL_MS 400
-/* DISPENSE_SLOT: wait this long after the carousel stops before opening the gate (rule 8.4). */
+/* DISPENSE_SLOT / DROP_SLOT: wait this long after the carousel stops before opening (rule 8.4). */
 #define SETTLE_MS 300
-/* Safety net (rule 8.7): the device closes the gate itself after this long (host closes it sooner). */
+/* DROP_SLOT: hold the release open this long between OK GATE_OPEN and closing (§12.1), so that
+ * exactly one pill leaves and passes the drop sensor. 50..1000 ms; calibrate it
+ * (HARDWARE_INTEGRATION.md). The whole release takes 2 x GATE_TRAVEL_MS + DROP_OPEN_MS (default
+ * 1.3 s); serial input, including STOP, waits for it. */
+#define DROP_OPEN_MS 500
+/* Safety net (rule 8.7): the device closes an open gate itself after this long (OPEN_GATE /
+ * DISPENSE_SLOT; the host closes it much sooner). */
 #define GATE_MAX_OPEN_MS 120000UL
+
+/* ================================================================ drop sensor (optional, recommended) */
+
+/* 1 = IR break-beam across the output chute, below the release: DROP_SLOT answers ERR NO_PILL when
+ * no pill passed it during the release (container empty or jammed), and STATUS reports
+ * drop_sensor=1. 0 = no sensor: OK DROPPED only means "release cycle completed". Set 1 once the
+ * sensor is wired, then check the "# drop sensor: beam clear" boot line (HARDWARE_INTEGRATION.md 9.4). */
+#define HAS_DROP_SENSOR 0
+/* Receiver output. GPIO 34-39 are input-only WITHOUT internal pull-up: fit 10 kOhm pin -> 3.3 V
+ * (or move it to a GPIO with a pull-up and set DROP_SENSOR_PULLUP 1). */
+#define PIN_DROP_SENSOR 34
+/* 1: LOW = beam interrupted (open-collector receivers such as Adafruit 2167/2168 with a pull-up).
+ * 0: HIGH = interrupted. Check it: the boot debug line must say "beam clear" with the chute empty. */
+#define DROP_SENSOR_ACTIVE_LOW 1
+/* Internal pull-up on the receiver pin (not available on GPIO 34-39). */
+#define DROP_SENSOR_PULLUP 0
 
 /* ================================================================ buttons (rule 8.8) */
 
@@ -192,10 +238,12 @@
 
 /* ================================================================ host timeouts (checked at compile time) */
 
-/* [host] TACTIDOSE_TIMEOUT_MOVE_S / TACTIDOSE_TIMEOUT_HOME_S in ms. The firmware must report
- * ERR MOTOR_FAULT / ERR HOME_TIMEOUT before the host gives up, otherwise the host only sees a
- * TIMEOUT (outcome uncertain -> caregiver review). ConfigCheck.h verifies this. */
+/* [host] TACTIDOSE_TIMEOUT_MOVE_S / TACTIDOSE_TIMEOUT_HOME_S / TACTIDOSE_TIMEOUT_DROP_S in ms. The
+ * firmware must answer (ERR MOTOR_FAULT, ERR HOME_TIMEOUT, OK DROPPED ...) before the host gives up,
+ * otherwise the host only sees a TIMEOUT (outcome uncertain -> caregiver review). ConfigCheck.h
+ * verifies this. */
 #define HOST_MOVE_TIMEOUT_MS 20000UL
 #define HOST_HOME_TIMEOUT_MS 45000UL
+#define HOST_DROP_TIMEOUT_MS 30000UL
 
 #endif  // TACTIDOSE_CONFIG_H

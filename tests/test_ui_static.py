@@ -1,24 +1,27 @@
-"""Static checks for the web UI in ``tactidose/ui/static`` (no browser needed).
+"""Static checks for the v2 web UI in ``tactidose/ui/static`` (no browser needed).
 
-* Every JS file passes ``node --check`` as an ES module, and relative imports resolve.
-* Every ``/api/...`` path (and query parameter) used in JS exists in ``docs/API.md``;
-  helper calls (get/post/put/patch/del/upload) use the documented HTTP method.
-* Every HTML page has ``lang``, one ``<main>``, a ``<title>``, references only existing
-  local assets, has no external URLs, no inline handlers or inline scripts, and valid
-  id references (labels, ARIA).
-* No ``innerHTML``-style injection of non-literal values, no eval.
-* Accessibility contracts: kiosk sizes (>= 32px text, >= 56px status, >= 96px buttons),
-  theme token contrast (>= 7:1 for text in both themes), ARIA tabs structure,
-  explicit confirmation checkboxes, kiosk intents and demo fault names match the API.
-* Pure JS logic (formatting, kiosk banner derivation, API client, SSE client, chart and
-  carousel geometry, form validation) is unit-tested under Node with fakes.
+* Every JS file passes ``node --check`` as an ES module; relative imports resolve and every
+  named import is exported by its module.
+* Every ``/api/...`` path (and query parameter) used in JS exists in ``docs/API.md`` (v2, with
+  its ``…/x`` shorthand expanded); helper calls (get/post/put/patch/del/upload/postRaw) use the
+  documented HTTP method; the main v2 endpoints are all used.
+* Every SSE topic the UI listens to exists in ``tactidose/core/bus.py`` ``Topic``.
+* Every HTML page has ``lang``, one ``<main>``, a ``<title>``, a skip link, references only
+  existing local assets, has no external URLs, no inline handlers / scripts / styles, and
+  valid id references (labels, ARIA); ids used by the page's scripts exist.
+* No ``innerHTML``-style injection of non-literal values, no eval, no on* handler properties.
+* Accessibility contracts: three themes with >= 7:1 text contrast, rem-based font sizes,
+  patient (>= 24px body, >= 5rem drop/talk buttons) and kiosk size minimums, reduced motion /
+  contrast / forced colours / visible focus, no long ALL-CAPS text, ARIA tabs, explicit
+  medication confirmation, plain words for every status/reason enum value in db/models.py.
+* Pure JS logic (formatting, status view models, API client, SSE client, PCM audio, forms,
+  notifications, chat, history, reports, demo checklist helpers) is unit-tested under Node.
 
 Node-based tests are skipped (not failed) when ``node`` is not installed.
 """
 
 from __future__ import annotations
 
-import json
 import re
 import shutil
 import subprocess
@@ -31,10 +34,20 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 STATIC = ROOT / "tactidose" / "ui" / "static"
 API_MD = ROOT / "docs" / "API.md"
+BUS_PY = ROOT / "tactidose" / "core" / "bus.py"
+MODELS_PY = ROOT / "tactidose" / "db" / "models.py"
+PROTOCOL_PY = ROOT / "tactidose" / "hardware" / "protocol.py"
 NODE = shutil.which("node")
 
-PAGES = {"/": "index.html", "/caregiver": "caregiver.html", "/demo": "demo.html"}
-PAGE_ENTRY = {"index.html": "js/kiosk.js", "caregiver.html": "js/caregiver.js", "demo.html": "js/demo.js"}
+#: Pages served by the API (docs/API.md "Pages") -> static file.
+PAGES = {"/login": "login.html", "/patient": "patient.html", "/care": "care.html", "/kiosk": "kiosk.html", "/demo": "demo.html"}
+PAGE_ENTRY = {
+    "login.html": "js/login.js",
+    "patient.html": "js/patient.js",
+    "care.html": "js/care.js",
+    "kiosk.html": "js/kiosk.js",
+    "demo.html": "js/demo.js",
+}
 JS_FILES = sorted(STATIC.rglob("*.js"))
 HTML_FILES = sorted(STATIC.glob("*.html"))
 CSS_FILES = sorted(STATIC.rglob("*.css"))
@@ -99,8 +112,44 @@ def _read_template(src: str, i: int) -> tuple[str, int]:
     return "".join(out), i
 
 
+def _regex_may_start(src: str, i: int) -> bool:
+    """True when a '/' at ``src[i]`` starts a regex literal (not a division)."""
+    j = i - 1
+    while j >= 0 and src[j] in " \t\r\n":
+        j -= 1
+    if j < 0:
+        return True
+    if src[j] in "(,=:[!&|?{};+-*%<>~^":
+        return True
+    word = re.search(r"([A-Za-z_$][\w$]*)$", src[:j + 1])
+    return bool(word and word.group(1) in {"return", "typeof", "case", "of", "in", "new", "delete", "void", "throw"})
+
+
+def _skip_regex(src: str, i: int) -> int:
+    i += 1
+    in_class = False
+    while i < len(src):
+        c = src[i]
+        if c == "\\":
+            i += 2
+            continue
+        if c == "\n":
+            return i
+        if c == "[":
+            in_class = True
+        elif c == "]":
+            in_class = False
+        elif c == "/" and not in_class:
+            i += 1
+            while i < len(src) and src[i].isalpha():
+                i += 1
+            return i
+        i += 1
+    return i
+
+
 def js_literals(src: str) -> list[tuple[int, str]]:
-    """(offset, text) of every string/template literal; comments are skipped."""
+    """(offset, text) of every string/template literal; comments and regexes are skipped."""
     found: list[tuple[int, str]] = []
     i, n = 0, len(src)
     while i < n:
@@ -110,6 +159,8 @@ def js_literals(src: str) -> list[tuple[int, str]]:
         elif src.startswith("/*", i):
             j = src.find("*/", i + 2)
             i = n if j < 0 else j + 2
+        elif src[i] == "/" and _regex_may_start(src, i):
+            i = _skip_regex(src, i)
         elif src[i] in "'\"":
             end = _skip_string(src, i)
             found.append((i, src[i + 1:end - 1]))
@@ -134,6 +185,10 @@ def strip_js_comments(src: str) -> str:
         elif src.startswith("/*", i):
             j = src.find("*/", i + 2)
             i = n if j < 0 else j + 2
+        elif src[i] == "/" and _regex_may_start(src, i):
+            end = _skip_regex(src, i)
+            out.append(src[i:end])
+            i = end
         elif src[i] in "'\"":
             end = _skip_string(src, i)
             out.append(src[i:end])
@@ -148,9 +203,10 @@ def strip_js_comments(src: str) -> str:
     return "".join(out)
 
 
-# --------------------------------------------------------------------------- API.md parsing
+# --------------------------------------------------------------------------- API.md (v2) parsing
 
-_ROUTE_RE = re.compile(r"`(GET|POST|PUT|PATCH|DELETE) (/api/[^`\s]*)`")
+_SEGMENT_RE = re.compile(r"`((?:GET|POST|PUT|PATCH|DELETE)(?:/(?:GET|POST|PUT|PATCH|DELETE))*)?\s*([/…][^`\s]*)`")
+_SECTION_PREFIX_RE = re.compile(r"\(`(/api/[^`]*?)/…`\)")
 
 
 def _norm_path(path: str) -> str:
@@ -158,39 +214,78 @@ def _norm_path(path: str) -> str:
 
 
 def documented_routes() -> dict[tuple[str, str], set[str]]:
-    """{(METHOD, normalised path): {documented query parameter names}}."""
+    """{(METHOD, normalised path): {documented query parameter names}} from docs/API.md.
+
+    Handles the v2 shorthands: ``…/status`` under "## Patient data (`/api/patients/{pid}/…`)",
+    ``GET/POST`` (two methods), ``… / `…/reject``` (a further path in the same cell, read as a
+    sibling or a child of the previous one) and ``?download=1`` mentioned later in the row.
+    """
     routes: dict[tuple[str, str], set[str]] = {}
-    for method, full in _ROUTE_RE.findall(_read(API_MD)):
-        path, _, query = full.partition("?")
-        params = {kv.split("=", 1)[0] for kv in query.split("&") if kv}
-        routes.setdefault((method, _norm_path(path)), set()).update(params)
+    prefix = None
+    for line in _read(API_MD).splitlines():
+        if line.startswith("#"):
+            m = _SECTION_PREFIX_RE.search(line)
+            prefix = m.group(1) if m else None
+            continue
+        if not line.startswith("| `"):
+            continue
+        cells = line.split("|")
+        row_keys: list[tuple[str, str]] = []
+        prev_path, prev_methods = None, None
+        for methods_text, raw in _SEGMENT_RE.findall(cells[1]):
+            methods = methods_text.split("/") if methods_text else (prev_methods or [])
+            path, _, query = raw.partition("?")
+            if path.startswith("…"):
+                rest = path[1:]
+                if prev_path:
+                    candidates = [prev_path.rsplit("/", 1)[0] + rest, prev_path + rest]
+                elif prefix:
+                    candidates = [prefix + rest]
+                else:
+                    continue
+            else:
+                candidates = [path]
+            params = {kv.split("=", 1)[0] for kv in query.split("&") if kv}
+            for method in methods:
+                for cand in candidates:
+                    key = (method, _norm_path(cand))
+                    routes.setdefault(key, set()).update(params)
+                    row_keys.append(key)
+            prev_path, prev_methods = candidates[-1] if len(candidates) == 1 else candidates[0], methods
+        for q in re.findall(r"`\?([^`\s]+)`", line):
+            for key in row_keys:
+                routes[key].update(kv.split("=", 1)[0] for kv in q.split("&") if kv)
     return routes
-
-
-def documented_intents() -> set[str]:
-    row = next(line for line in _read(API_MD).splitlines() if line.startswith("| `POST /api/intents`"))
-    return set(re.findall(r'"([A-Z_]{3,})"', row))
-
-
-def documented_faults() -> set[str]:
-    m = re.search(r"faults:\{([^}]*)\}", _read(API_MD))
-    assert m, "fault list not found in API.md"
-    return {f.strip() for f in m.group(1).split(",")}
 
 
 def _api_literals() -> list[tuple[Path, str]]:
     out = []
     for path in JS_FILES:
         for _, text in js_literals(_read(path)):
-            if text.startswith("/api/"):
+            if re.match(r"^/api/[a-z]", text):
                 out.append((path, text))
     return out
+
+
+def bus_topics() -> set[str]:
+    src = _read(BUS_PY)
+    body = src[src.index("class Topic"):src.index("@dataclass")]
+    return set(re.findall(r'^\s+[A-Z_]+\s*=\s*"([^"]+)"', body, re.M))
+
+
+def enum_values(path: Path, name: str) -> set[str]:
+    src = _read(path)
+    m = re.search(rf"class {name}\(str, Enum\):(.*?)(?=\n\n\n|\nclass |\n[A-Z_]+ = )", src, re.S)
+    assert m, f"enum {name} not found in {path.name}"
+    return set(re.findall(r'^\s+[A-Z_]+\s*=\s*"([^"]+)"', m.group(1), re.M))
 
 
 # --------------------------------------------------------------------------- HTML parsing
 
 
 class PageParser(HTMLParser):
+    SKIP_TEXT_TAGS = {"kbd", "code", "option", "datalist", "script", "style", "title"}
+
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self.tags: list[tuple[str, dict[str, str | None], int]] = []
@@ -200,6 +295,8 @@ class PageParser(HTMLParser):
         self.script_text: list[str] = []
         self._in_script = False
         self.labels_for: set[str] = set()
+        self.texts: list[str] = []
+        self._stack: list[tuple[str, bool]] = []
 
     def handle_starttag(self, tag, attrs):
         a = dict(attrs)
@@ -212,21 +309,32 @@ class PageParser(HTMLParser):
             self._in_script = True
         if tag == "label" and a.get("for"):
             self.labels_for.add(a["for"])
+        if tag not in {"meta", "link", "input", "br", "img", "hr", "source"}:
+            skip = tag in self.SKIP_TEXT_TAGS or "mono" in (a.get("class") or "").split()
+            self._stack.append((tag, skip))
 
     def handle_startendtag(self, tag, attrs):
         self.handle_starttag(tag, attrs)
+        if self._stack and self._stack[-1][0] == tag:
+            self._stack.pop()
 
     def handle_endtag(self, tag):
         if tag == "title":
             self._in_title = False
         if tag == "script":
             self._in_script = False
+        for i in range(len(self._stack) - 1, -1, -1):
+            if self._stack[i][0] == tag:
+                del self._stack[i:]
+                break
 
     def handle_data(self, data):
         if self._in_title:
             self.title += data
         if self._in_script and data.strip():
             self.script_text.append(data)
+        if data.strip() and not any(skip for _, skip in self._stack):
+            self.texts.append(data.strip())
 
     def find(self, tag: str) -> list[dict[str, str | None]]:
         return [a for t, a, _ in self.tags if t == tag]
@@ -244,11 +352,20 @@ def parse_page(name: str) -> PageParser:
 
 _IMPORT_RE = re.compile(r"""(?:^|[\s;])(?:import|export)\s+(?:[^'";]*?\s+from\s+)?(['"])([^'"]+)\1""", re.M)
 _DYNAMIC_IMPORT_RE = re.compile(r"""\bimport\(\s*(['"])([^'"]+)\1\s*\)""")
+_NAMED_IMPORT_RE = re.compile(r"""import\s*\{([^}]*)\}\s*from\s*'([^']+)'""")
 
 
 def imports_of(path: Path) -> list[str]:
     src = strip_js_comments(_read(path))
     return [m.group(2) for m in _IMPORT_RE.finditer(src)] + [m.group(2) for m in _DYNAMIC_IMPORT_RE.finditer(src)]
+
+
+def exports_of(path: Path) -> set[str]:
+    src = strip_js_comments(_read(path))
+    names = set(re.findall(r"export\s+(?:async\s+)?(?:function\*?|const|let|class)\s+([A-Za-z0-9_$]+)", src))
+    for group in re.findall(r"export\s*\{([^}]*)\}", src):
+        names.update(part.strip().split(" as ")[-1].strip() for part in group.split(",") if part.strip())
+    return names
 
 
 def module_closure(entry: Path) -> set[Path]:
@@ -269,10 +386,13 @@ def module_closure(entry: Path) -> set[Path]:
 
 
 def test_expected_files_exist():
-    for rel in ("index.html", "caregiver.html", "demo.html", "css/base.css", "css/kiosk.css",
-                "css/caregiver.css", "css/demo.css", "js/api.js", "js/events.js", "js/dom.js",
-                "js/kiosk.js", "js/caregiver.js", "js/demo.js", "js/chart.js", "js/carousel.js"):
+    for rel in (*PAGES.values(), *PAGE_ENTRY.values(), "css/base.css", "css/login.css", "css/patient.css", "css/care.css",
+                "css/demo.css", "css/kiosk.css", "js/api.js", "js/events.js", "js/session.js", "js/notifications.js",
+                "js/theme.js", "js/theme-init.js", "js/voice.js", "js/pcm.js", "js/pcm-worklet.js", "js/reports.js",
+                "js/status.js", "js/words.js", "img/favicon.svg"):
         assert (STATIC / rel).is_file(), rel
+    for old in ("index.html", "caregiver.html", "js/caregiver.js", "js/kiosk-state.js"):
+        assert not (STATIC / old).exists(), f"v1 file {old} should be gone"
 
 
 @pytest.fixture(scope="module")
@@ -300,16 +420,37 @@ def test_js_imports_resolve_locally(path: Path):
         assert (path.parent / spec).resolve().is_file(), f"{_rel(path)}: missing module {spec!r}"
 
 
+def test_named_imports_are_exported():
+    problems = []
+    for path in JS_FILES:
+        for names, spec in _NAMED_IMPORT_RE.findall(strip_js_comments(_read(path))):
+            exported = exports_of((path.parent / spec).resolve())
+            for name in (n.strip().split(" as ")[0].strip() for n in names.split(",")):
+                if name and name not in exported:
+                    problems.append(f"{_rel(path)}: {name!r} is not exported by {spec}")
+    assert not problems, "\n".join(problems)
+
+
 # =========================================================================== API contract
 
 
-def test_every_api_path_in_js_is_documented():
+def test_api_md_parser_understands_the_v2_shorthands():
     routes = documented_routes()
+    for key in [("POST", "/api/patients/{}/drops"), ("GET", "/api/patients/{}/status"), ("GET", "/api/demo/clock"),
+                ("POST", "/api/demo/clock"), ("POST", "/api/patients/{}/scans/{}/reject"), ("GET", "/api/events"),
+                ("POST", "/api/agent/transcribe"), ("DELETE", "/api/care/links/{}")]:
+        assert key in routes, key
+    assert {"days", "status"} <= routes[("GET", "/api/patients/{}/drops")]
+    assert "download" in routes[("GET", "/api/reports/{}/pdf")]
+    assert {"unread", "limit"} <= routes[("GET", "/api/notifications")]
+
+
+def test_every_api_path_in_js_is_documented():
     by_path: dict[str, set[str]] = {}
-    for (_method, path), params in routes.items():
+    for (_method, path), params in documented_routes().items():
         by_path.setdefault(path, set()).update(params)
     used = _api_literals()
-    assert len(used) > 30, "expected the UI to use most of the API"
+    assert len(used) > 40, "expected the UI to use most of the API"
     problems = []
     for path, text in used:
         route, _, query = text.partition("?")
@@ -324,8 +465,8 @@ def test_every_api_path_in_js_is_documented():
     assert not problems, "\n".join(problems)
 
 
-_CALL_RE = re.compile(r"\b(get|post|put|patch|del|upload)\(\s*(?=['\"`])")
-_METHODS = {"get": "GET", "post": "POST", "put": "PUT", "patch": "PATCH", "del": "DELETE", "upload": "POST"}
+_CALL_RE = re.compile(r"\b(get|post|put|patch|del|upload|postRaw)\(\s*(?=['\"`])")
+_METHODS = {"get": "GET", "post": "POST", "put": "PUT", "patch": "PATCH", "del": "DELETE", "upload": "POST", "postRaw": "POST"}
 
 
 def test_api_helper_calls_use_documented_methods():
@@ -343,40 +484,70 @@ def test_api_helper_calls_use_documented_methods():
             key = (_METHODS[m.group(1)], _norm_path(text.partition("?")[0]))
             if key not in routes:
                 problems.append(f"{_rel(path)}: {key[0]} {text} is not a documented route")
-    assert checked > 30
+    assert checked > 40
     assert not problems, "\n".join(problems)
 
 
-def test_ui_covers_the_documented_api():
-    """Every documented endpoint is reachable from at least one page."""
+#: The main v2 flow must be reachable from the UI (optional extras are not required).
+MAIN_ENDPOINTS = [
+    "/api/auth/register", "/api/auth/login", "/api/auth/logout", "/api/auth/me", "/api/care/patients", "/api/care/links",
+    "/api/care/links/{}", "/api/patients/{}/status", "/api/patients/{}/containers", "/api/patients/{}/containers/{}",
+    "/api/patients/{}/containers/{}/refill", "/api/patients/{}/medications", "/api/patients/{}/medications/{}",
+    "/api/patients/{}/schedules", "/api/patients/{}/schedules/{}", "/api/patients/{}/settings", "/api/patients/{}/drops",
+    "/api/patients/{}/drops/{}/resolve", "/api/patients/{}/doses", "/api/patients/{}/doses/{}/skip",
+    "/api/patients/{}/conversations", "/api/patients/{}/conversations/{}/messages", "/api/patients/{}/reports",
+    "/api/agent/chat", "/api/agent/transcribe", "/api/reports/{}", "/api/reports/{}/pdf", "/api/reports/{}/send",
+    "/api/notifications", "/api/notifications/read", "/api/device", "/api/device/home", "/api/device/stop",
+    "/api/device/reconnect", "/api/demo/command", "/api/demo/clock", "/api/demo/jump-to-next-dose", "/api/demo/simulator",
+    "/api/demo/reset", "/api/patients/{}/scans", "/api/patients/{}/scans/{}/confirm", "/api/patients/{}/scans/{}/reject",
+    "/api/health",
+]
+
+
+def test_ui_uses_the_main_v2_endpoints():
     used = {_norm_path(text.partition("?")[0]) for _, text in _api_literals()}
-    documented = {path for _, path in documented_routes()}
-    missing = sorted(documented - used)
+    assert "/api/events" in {lit for p in JS_FILES for _, lit in js_literals(_read(p))}, "SSE endpoint"
+    missing = [p for p in MAIN_ENDPOINTS if p not in used]
     assert not missing, f"endpoints never used by the UI: {missing}"
 
 
-def test_kiosk_intents_match_api():
-    allowed = documented_intents()
-    assert {"CHECK_DUE", "DISPENSE", "CONFIRM_TAKEN", "REPEAT", "CANCEL", "HELP", "PRIMARY_ACTION"} <= allowed
-    page = parse_page("index.html")
-    used = {a["data-intent"] for a in page.find("button") if a.get("data-intent")}
-    assert used == {"CHECK_DUE", "DISPENSE", "CONFIRM_TAKEN", "REPEAT", "HELP", "CANCEL"}
-    src = _read(STATIC / "js" / "kiosk-state.js")
-    m = re.search(r"KIOSK_INTENTS = Object\.freeze\(\[([^\]]*)\]", src)
-    assert m
-    assert set(re.findall(r"'([A-Z_]+)'", m.group(1))) <= allowed
-    assert "postIntent(intent, 'ui')" in _read(STATIC / "js" / "kiosk.js")
+def test_page_routes_match_api_md():
+    md = _read(API_MD)
+    for route in PAGES:
+        assert f"| `{route}` |" in md, f"{route} is not a documented page"
 
 
-def test_demo_faults_and_phrases_match_spec():
-    src = _read(STATIC / "js" / "demo.js")
-    m = re.search(r"FAULTS = Object\.freeze\(\[(.*?)\]\);", src, re.S)
-    assert m
-    names = set(re.findall(r"\['([a-z_]+)'", m.group(1)))
-    assert names == documented_faults()
-    phrases = {a["data-phrase"] for a in parse_page("demo.html").find("button") if a.get("data-phrase")}
-    assert phrases >= {"What do I take now?", "Dispense", "Taken", "Repeat", "Cancel", "Help", "I haven't taken it"}
-    assert "postText(text, 'keyboard')" in src
+# =========================================================================== live events (SSE topics)
+
+
+def _js_topics() -> dict[str, set[str]]:
+    used: dict[str, set[str]] = {}
+    for path in JS_FILES:
+        src = strip_js_comments(_read(path))
+        for topic in re.findall(r"\.on\(\s*'([^']+)'", src):
+            used.setdefault(topic, set()).add(_rel(path))
+        for arr in re.findall(r"[A-Z_]*TOPICS\s*=\s*Object\.freeze\(\[(.*?)\]\)", src, re.S):
+            for topic in re.findall(r"'([^']+)'", arr):
+                used.setdefault(topic, set()).add(_rel(path))
+    return used
+
+
+def test_every_sse_topic_used_exists_in_bus_topic():
+    topics = bus_topics()
+    assert {"notification", "drop.updated", "patient.status", "agent.message", "report.updated", "device.state"} <= topics
+    used = _js_topics()
+    assert len(used) >= 10
+    unknown = {t: sorted(files) for t, files in used.items() if t != "*" and t not in topics}
+    assert not unknown, f"SSE topics not in core/bus.py Topic: {unknown}"
+
+
+def test_portal_topics_cover_the_api_md_event_list():
+    md = _read(API_MD)
+    row = next(line for line in md.splitlines() if line.startswith("| `GET /api/events`"))
+    listed = set(re.findall(r"`([a-z]+(?:\.[a-z]+)?)`", row)) & bus_topics()
+    src = _read(STATIC / "js" / "events.js")
+    known = set(re.findall(r"'([a-z.]+)'", src[src.index("PORTAL_TOPICS"):src.index("KNOWN_TOPICS =")]))
+    assert listed and listed <= known, f"events.js does not subscribe to {sorted(listed - known)}"
 
 
 # =========================================================================== HTML pages
@@ -394,6 +565,11 @@ def test_page_basics(name: str):
     assert page.find("header") and page.find("footer"), "header/footer landmarks"
     dupes = {i for i in page.ids if page.ids.count(i) > 1}
     assert not dupes, f"duplicate ids: {dupes}"
+    first_link = page.find("a")[0]
+    assert first_link.get("href") == "#main" and "skip-link" in (first_link.get("class") or ""), "skip link first"
+    main = page.find("main")[0]
+    assert main.get("id") == "main"
+    assert page.find("h1"), "a page heading (h1)"
 
 
 @pytest.mark.parametrize("name", list(PAGES.values()))
@@ -403,7 +579,7 @@ def test_page_references_only_existing_local_assets(name: str):
     for tag, attrs, line in page.tags:
         for attr in ("src", "href", "poster", "data", "action", "formaction"):
             value = attrs.get(attr)
-            if value is None or (tag == "html"):
+            if value is None:
                 continue
             if re.match(r"^(https?:)?//", value, re.I):
                 problems.append(f"line {line}: external URL {value}")
@@ -421,8 +597,11 @@ def test_page_references_only_existing_local_assets(name: str):
     assert not page.script_text
     entry = "/static/" + PAGE_ENTRY[name]
     assert any(s.get("src") == entry and s.get("type") == "module" for s in scripts)
-    assert any(s.get("src") == "/static/js/theme-init.js" for s in scripts), "theme must be applied before paint"
-    assert any(a.get("href") == "/static/css/base.css" for a in page.find("link"))
+    order = [(t, a) for t, a, _ in page.tags if t in ("script", "link")]
+    init = next(i for i, (t, a) in enumerate(order) if a.get("src") == "/static/js/theme-init.js")
+    css = next(i for i, (t, a) in enumerate(order) if a.get("href") == "/static/css/base.css")
+    assert init < css, "theme-init.js must run before the stylesheets (no flash of the wrong theme)"
+    assert order[init][1].get("type") is None, "theme-init.js is a classic script"
 
 
 @pytest.mark.parametrize("name", list(PAGES.values()))
@@ -433,6 +612,7 @@ def test_page_has_no_inline_handlers_or_styles(name: str):
         assert not handlers, f"line {line}: inline handler {handlers} on <{tag}>"
         assert "style" not in attrs, f"line {line}: inline style on <{tag}>"
         assert not str(attrs.get("href") or "").lower().startswith("javascript:")
+    assert not page.find("style"), "no <style> blocks"
 
 
 @pytest.mark.parametrize("name", list(PAGES.values()))
@@ -496,18 +676,39 @@ def test_no_html_injection_sinks(path: Path):
         rhs = m.group(3).strip()
         literal = re.fullmatch(r"""(['"])[^'"\\]*\1|`[^`$\\]*`""", rhs)
         assert literal and m.group(2) == "=", f"{_rel(path)}: {m.group(0)!r} assigns a non-literal value"
-    for sink in ("insertAdjacentHTML", "document.write", "createContextualFragment", "DOMParser", "eval(", "new Function"):
+    for sink in ("insertAdjacentHTML", "document.write", "createContextualFragment", "DOMParser", "eval(", "new Function", "srcdoc"):
         assert sink not in src, f"{_rel(path)} uses {sink}"
+
+
+_HANDLER_PROPERTY_RE = re.compile(
+    r"\.on(?:click|dblclick|change|input|submit|reset|key\w+|load\w*|error|message\w*|open|close|cancel|result|end|start|"
+    r"audio\w+|ended|play\w*|pause|focus\w*|blur|mouse\w+|pointer\w+|touch\w+|resize|scroll|abort|timeout|progress|"
+    r"beforeunload|unload|hashchange|popstate|visibilitychange|speech\w+|nomatch|sound\w+|statechange|dataavailable|stop|"
+    r"processorerror|toggle)\s*=(?!=)"
+)
 
 
 @pytest.mark.parametrize("path", JS_FILES, ids=_rel)
 def test_no_inline_handlers_created_from_js(path: Path):
     src = strip_js_comments(_read(path))
     assert not re.search(r"setAttribute\(\s*['\"]on", src), f"{_rel(path)} sets an on* attribute"
-    assert not re.search(r"\.on[a-z]+\s*=(?!=)", src), f"{_rel(path)} assigns an on* handler property"
+    assert not _HANDLER_PROPERTY_RE.search(src), f"{_rel(path)} assigns an on* handler property (use addEventListener)"
+
+
+def test_fetch_uses_same_origin_credentials():
+    api = strip_js_comments(_read(STATIC / "js" / "api.js"))
+    assert "credentials: 'same-origin'" in api
+    others = [p for p in JS_FILES if p.name != "api.js" and re.search(r"\bfetch\(", strip_js_comments(_read(p)))]
+    assert not others, f"use api.js instead of fetch(): {[_rel(p) for p in others]}"
 
 
 # =========================================================================== accessibility contracts
+
+
+def _block(css: str, selector: str) -> str:
+    m = re.search(re.escape(selector) + r"\s*\{(.*?)\n\}", css, re.S)
+    assert m, f"{selector} block not found"
+    return m.group(1)
 
 
 def _hex_tokens(block: str) -> dict[str, str]:
@@ -516,11 +717,12 @@ def _hex_tokens(block: str) -> dict[str, str]:
 
 def theme_tokens() -> dict[str, dict[str, str]]:
     css = _read(STATIC / "css" / "base.css")
-    dark = re.search(r":root\s*\{(.*?)\n\}", css, re.S)
-    light = re.search(r':root\[data-theme="light"\]\s*\{(.*?)\n\}', css, re.S)
-    assert dark and light
-    dark_tokens = _hex_tokens(dark.group(1))
-    return {"dark": dark_tokens, "light": {**dark_tokens, **_hex_tokens(light.group(1))}}
+    dark = _hex_tokens(_block(css, ":root"))
+    return {
+        "dark": dark,
+        "light": {**dark, **_hex_tokens(_block(css, ':root[data-theme="light"]'))},
+        "yellow": {**dark, **_hex_tokens(_block(css, ':root[data-theme="yellow"]'))},
+    }
 
 
 def _luminance(hex_color: str) -> float:
@@ -537,18 +739,20 @@ def contrast(a: str, b: str) -> float:
 
 
 TEXT_PAIRS = [
-    ("fg", "bg"), ("fg", "surface"), ("fg", "surface-2"), ("fg-2", "bg"), ("fg-2", "surface"), ("fg-2", "surface-2"),
-    ("fg-3", "bg"), ("fg-3", "surface"), ("fg-3", "surface-2"), ("link", "bg"), ("link", "surface"),
-    ("accent", "bg"), ("accent-fg", "accent"), ("ok-fg", "bg"), ("ok-fg", "surface"), ("ok-fg", "surface-2"),
-    ("warn-fg", "bg"), ("warn-fg", "surface"), ("warn-fg", "surface-2"), ("danger-fg", "bg"), ("danger-fg", "surface"),
-    ("danger-fg", "surface-2"), ("info-fg", "surface"), ("info-fg", "surface-2"), ("danger-bg-fg", "danger-bg"),
-    ("caution-fg", "caution-bg"), ("due-fg", "due-bg"), ("invert-fg", "invert-bg"), ("offline-fg", "offline-bg"),
+    ("fg", "bg"), ("fg", "surface"), ("fg", "surface-2"), ("fg", "surface-3"),
+    ("fg-2", "bg"), ("fg-2", "surface"), ("fg-2", "surface-2"), ("fg-2", "surface-3"),
+    ("fg-3", "bg"), ("fg-3", "surface"), ("fg-3", "surface-2"),
+    ("link", "bg"), ("link", "surface"), ("link", "surface-2"), ("accent-fg", "accent"),
+    ("ok-fg", "bg"), ("ok-fg", "surface"), ("ok-fg", "surface-2"),
+    ("warn-fg", "bg"), ("warn-fg", "surface"), ("warn-fg", "surface-2"),
+    ("danger-fg", "bg"), ("danger-fg", "surface"), ("danger-fg", "surface-2"),
+    ("info-fg", "bg"), ("info-fg", "surface"), ("info-fg", "surface-2"),
+    ("danger-bg-fg", "danger-bg"), ("caution-fg", "caution-bg"), ("invert-fg", "invert-bg"), ("good-bg-fg", "good-bg"),
 ]
-NON_TEXT_PAIRS = [("border", "bg"), ("border", "surface"), ("focus", "bg"), ("focus", "surface"),
-                  ("chart-1", "surface"), ("chart-axis", "surface")]
+NON_TEXT_PAIRS = [("border", "bg"), ("border", "surface"), ("focus", "bg"), ("focus", "surface"), ("focus", "surface-2")]
 
 
-@pytest.mark.parametrize("theme", ["dark", "light"])
+@pytest.mark.parametrize("theme", ["dark", "light", "yellow"])
 def test_theme_contrast(theme: str):
     tokens = theme_tokens()[theme]
     low = [f"--{fg} on --{bg}: {contrast(tokens[fg], tokens[bg]):.2f}" for fg, bg in TEXT_PAIRS
@@ -559,49 +763,104 @@ def test_theme_contrast(theme: str):
     assert not low, "non-text below 3:1 — " + "; ".join(low)
 
 
-def _min_px(value: str) -> float:
-    m = re.search(r"(\d+(?:\.\d+)?)px", value)
+def test_three_themes_and_text_sizes_are_wired():
+    init = _read(STATIC / "js" / "theme-init.js")
+    for theme in ("light", "dark", "yellow"):
+        assert f"'{theme}'" in init
+    for size in ("large", "xlarge"):
+        assert f"'{size}'" in init
+    theme_js = _read(STATIC / "js" / "theme.js")
+    assert re.findall(r"\{ id: '([a-z]+)'", theme_js)[:3] == ["dark", "light", "yellow"], "dark (white on black) is the default"
+    css = _read(STATIC / "css" / "base.css")
+    assert ':root[data-text-size="large"]' in css and ':root[data-text-size="xlarge"]' in css
+
+
+def _rem(value: str) -> float:
+    m = re.search(r"(\d+(?:\.\d+)?)rem", value)
     assert m, value
     return float(m.group(1))
 
 
+def test_font_sizes_are_relative():
+    problems = []
+    for path in CSS_FILES:
+        for value in re.findall(r"font-size:\s*([^;]+);", _read(path)):
+            if re.search(r"\d(px|pt)\b", value):
+                problems.append(f"{_rel(path)}: font-size {value}")
+        if "text-transform: uppercase" in _read(path):
+            problems.append(f"{_rel(path)}: text-transform: uppercase (no shouting text)")
+    assert not problems, "\n".join(problems)
+
+
+def test_patient_portal_size_minimums():
+    css = _read(STATIC / "css" / "patient.css")
+    assert _rem(_block(css, ".patient")) >= 1.5, "patient body text >= 24px"
+    assert _rem(re.search(r"\.btn-drop\s*\{[^}]*min-height:\s*([^;]+);", css).group(1)) >= 5
+    assert _rem(re.search(r"\.btn-talk\s*\{[^}]*min-height:\s*([^;]+);", css).group(1)) >= 5
+    assert _rem(re.search(r"\.patient \.btn\s*\{[^}]*min-height:\s*([^;]+);", css).group(1)) >= 3
+    assert _rem(re.search(r"\.view-title\s*\{[^}]*font-size:\s*([^;]+);", css).group(1).replace("em", "rem")) >= 1.5
+
+
 def test_kiosk_size_minimums():
     css = _read(STATIC / "css" / "kiosk.css")
-    for prop, minimum in (("--k-font-base", 32), ("--k-font-status", 56), ("--k-btn-min-h", 96)):
+    for prop, minimum in (("--k-font-base", 2.0), ("--k-font-status", 3.5), ("--k-btn-min-h", 6.0)):
         values = re.findall(rf"{prop}:\s*([^;]+);", css)
         assert values, prop
         for value in values:  # every (media-query) definition keeps the minimum
-            assert _min_px(value) >= minimum, f"{prop}: {value}"
+            assert _rem(value) >= minimum, f"{prop}: {value}"
     assert re.search(r"\.k-btn\s*\{[^}]*min-height:\s*var\(--k-btn-min-h\)", css)
     assert re.search(r"\.status-word\s*\{[^}]*font-size:\s*var\(--k-font-status\)", css)
-    assert "prefers-reduced-motion" in _read(STATIC / "css" / "base.css")
-    assert ":focus-visible" in _read(STATIC / "css" / "base.css")
 
 
-def test_kiosk_page_contract():
-    page = parse_page("index.html")
-    live = {(a.get("id"), a.get("aria-live")) for _, a, _ in page.tags if a.get("aria-live")}
-    assert ("caption", "polite") in live and ("caption-alert", "assertive") in live
-    banner = next(a for _, a, _ in page.tags if a.get("id") == "status-banner")
-    assert banner.get("role") == "status"
-    assert any(a.get("href") == "/caregiver" for a in page.find("a"))
-    cancel = next(a for a in page.find("button") if a.get("data-intent") == "CANCEL")
-    assert "k-btn-cancel" in (cancel.get("class") or "")
-    assert any(a.get("id") == "theme-toggle" for a in page.find("button"))
-    html = _read(STATIC / "index.html")
-    for key in ("SPACE", "ENTER", "ESC", ">R<", ">H<"):
-        assert key in html, f"shortcut {key} not mentioned on screen"
-    words = _read(STATIC / "js" / "kiosk-state.js")
-    for text in ("DEVICE READY", "PREPARING", "KEEP HANDS CLEAR", "DOSE READY", "SAY 'TAKEN'", "NEEDS ASSISTANCE", "DEVICE OFFLINE"):
-        assert text in words, text
+def test_motion_contrast_forced_colors_and_focus():
+    css = _read(STATIC / "css" / "base.css")
+    for feature in ("prefers-reduced-motion: reduce", "prefers-contrast: more", "forced-colors: active", ":focus-visible", ".skip-link:focus"):
+        assert feature in css, feature
 
 
-def test_caregiver_tabs_structure():
-    page = parse_page("caregiver.html")
+_ALLOWED_CAPS = {"OK", "AM", "PM", "ID", "PDF", "SMTP", "USB", "STOP", "ESP"}
+
+
+def _shouting(text: str) -> list[str]:
+    """Runs of two or more ALL-CAPS words (letters only), e.g. 'DEVICE READY'."""
+    runs = []
+    for m in re.finditer(r"\b(?:[A-Z]{2,}\b[ \t]+){1,}[A-Z]{2,}\b", text):
+        words = [w for w in m.group(0).split() if w not in _ALLOWED_CAPS]
+        if len(words) >= 2:
+            runs.append(m.group(0))
+    single = [w for w in re.findall(r"\b[A-Z]{5,}\b", text) if w not in _ALLOWED_CAPS]
+    return runs + single
+
+
+@pytest.mark.parametrize("name", list(PAGES.values()))
+def test_no_long_all_caps_text_in_pages(name: str):
+    page = parse_page(name)
+    found = [t for t in page.texts if _shouting(t)]
+    assert not found, f"ALL-CAPS text (hard to read): {found}"
+
+
+def test_no_long_all_caps_text_in_ui_strings():
+    found = []
+    for path in JS_FILES:
+        for _, text in js_literals(strip_js_comments(_read(path))):
+            if " " not in text or "_" in text:  # codes like 'DROP_SLOT 0' / single tokens are not prose
+                continue
+            if re.search(r"[a-z]", text) is None and len(text) < 12:
+                continue  # short codes such as 'OK DROPPED'
+            runs = [r for r in re.findall(r"\b(?:[A-Z]{2,}\b[ \t]+){1,}[A-Z]{2,}\b", text)
+                    if len([w for w in r.split() if w not in _ALLOWED_CAPS]) >= 2]
+            if runs:
+                found.append(f"{_rel(path)}: {text!r}")
+    assert not found, "\n".join(found)
+
+
+def test_care_tabs_structure():
+    page = parse_page("care.html")
     tablists = [a for _, a, _ in page.tags if a.get("role") == "tablist"]
     assert len(tablists) == 1 and tablists[0].get("aria-label")
     tabs = [a for _, a, _ in page.tags if a.get("role") == "tab"]
-    assert [t["data-tab"] for t in tabs] == ["today", "medications", "scan", "compartments", "schedules", "device", "analytics"]
+    assert [t["data-tab"] for t in tabs] == ["overview", "schedule", "containers", "settings", "medications",
+                                             "conversations", "history", "reports", "notifications", "device"]
     panels = {a["id"]: a for _, a, _ in page.tags if a.get("role") == "tabpanel"}
     assert sum(t.get("aria-selected") == "true" for t in tabs) == 1
     for tab in tabs:
@@ -611,36 +870,77 @@ def test_caregiver_tabs_structure():
             assert "hidden" not in panel
         else:
             assert tab.get("tabindex") == "-1" and "hidden" in panel
+    for key in ("overview", "schedule", "containers", "settings", "medications", "conversations", "history", "reports", "notifications", "device"):
+        assert re.search(rf"\b{key}: create\w*\(|\b{key}: \{{", _read(STATIC / "js" / "care.js")), f"care.js wires the {key} tab"
 
 
-def test_confirmation_is_explicit_everywhere():
-    html = _read(STATIC / "caregiver.html")
-    page = parse_page("caregiver.html")
+def test_medication_confirmation_is_explicit():
+    html = _read(STATIC / "care.html")
+    page = parse_page("care.html")
     for form_id, box_id in (("med-form", "med-confirm"), ("scan-form", "scan-confirm")):
         box = next(a for _, a, _ in page.tags if a.get("id") == box_id)
         assert box.get("type") == "checkbox" and box.get("name") == "confirmed" and "required" in box
         assert re.search(rf'<label for="{box_id}">I confirm this information is correct</label>', html)
         assert re.search(rf'<form id="{form_id}"[^>]*novalidate', html)
-    assert "UNCONFIRMED — review every field against the label" in html
+    assert "Unconfirmed: check every field against the label" in html
     file_input = next(a for _, a, _ in page.tags if a.get("id") == "scan-file")
     assert file_input.get("accept") == "image/jpeg,image/png,image/webp"
-    scan_js = _read(STATIC / "js" / "cg" / "scan.js")
-    assert "data.append('image'" in scan_js and "facingMode: { ideal: 'environment' }" in scan_js
-    flows = _read(STATIC / "js" / "demo" / "flows.js")
-    assert "I confirm this information is correct" in flows and "UNCONFIRMED" in flows
+    meds = _read(STATIC / "js" / "care" / "medications.js")
+    assert "data.append('image'" in meds and "/scans/${scan.scan_id}/confirm" in meds
     medform = _read(STATIC / "js" / "medform.js")
-    assert "confirmBox.checked" in medform and "body.confirmed = true" in medform
+    assert "!confirmBox.checked" in medform and "body.confirmed = true" in medform
 
 
-def test_chart_has_table_twin_and_follows_mark_specs():
-    html = _read(STATIC / "caregiver.html")
-    assert re.search(r"<details[^>]*>\s*<summary>Show the data as a table</summary>", html)
-    chart = _read(STATIC / "js" / "chart.js")
-    assert "MAX_BAR = 24" in chart and "radius = 4" in chart
-    assert "role: 'img'" in chart and "'aria-label': describeRow(r)" in chart
-    css = _read(STATIC / "css" / "caregiver.css")
-    assert re.search(r"\.col-bar\s*\{\s*fill:\s*var\(--chart-1\)", css)
-    assert "stroke-dasharray" not in re.search(r"\.chart-grid\s*\{[^}]*\}", css).group(0)
+def test_patient_page_contract():
+    page = parse_page("patient.html")
+    attrs = {a.get("id"): a for _, a, _ in page.tags if a.get("id")}
+    log = attrs["chat-log"]
+    assert log.get("role") == "log" and log.get("aria-live") == "polite"
+    assert attrs["voice-status"].get("role") == "status"
+    assert attrs["talk-btn"].get("aria-pressed") == "false"
+    assert attrs["toasts"].get("role") == "region" and attrs["toasts"].get("aria-label")
+    views = [a.get("data-view") for a in page.find("a") if a.get("data-view")]
+    assert views == ["home", "assistant", "schedule", "history", "reports", "share"]
+    for v in views:
+        assert f"view-{v}" in attrs and f"{v}-title" in attrs and attrs[f"{v}-title"].get("tabindex") == "-1"
+    for ident in ("share-pid", "share-code", "next-pill", "cooldown-text", "containers", "last-drop", "device-line", "drop-result"):
+        assert ident in attrs, ident
+    html = _read(STATIC / "patient.html")
+    assert "<kbd>Alt</kbd> + <kbd>M</kbd>" in html, "talk shortcut is shown on screen"
+    js = _read(STATIC / "js" / "patient.js")
+    assert "announce(view.message" in js, "drop results are announced from DropOutcome.message"
+    assert "/drops`, { slot: v.slot }" in js
+
+
+def test_login_page_contract():
+    page = parse_page("login.html")
+    roles = {a.get("value") for a in page.find("input") if a.get("name") == "role"}
+    assert roles == {"patient", "doctor", "family"}
+    attrs = {a.get("id"): a for _, a, _ in page.tags if a.get("id")}
+    assert attrs["signin-password"].get("autocomplete") == "current-password"
+    assert attrs["reg-password"].get("autocomplete") == "new-password" and attrs["reg-password"].get("minlength") == "8"
+    assert attrs["signin-email"].get("type") == "email"
+    for ident in ("patient-codes", "codes-pid", "codes-code", "link-step", "link-pid", "link-code"):
+        assert ident in attrs, ident
+    assert "Share these two codes with your doctor or family" in _read(STATIC / "login.html")
+
+
+def test_every_enum_value_has_plain_words():
+    words = _read(STATIC / "js" / "words.js")
+
+    def table(name: str) -> set[str]:
+        m = re.search(rf"export const {name} = Object\.freeze\(\{{(.*?)\n\}}\);", words, re.S)
+        assert m, name
+        return set(re.findall(r"^\s+([A-Za-z_]+):", m.group(1), re.M))
+
+    assert enum_values(MODELS_PY, "DropStatus") <= table("DROP_STATUS")
+    assert enum_values(MODELS_PY, "DenyReason") <= table("DENY_REASON")
+    assert enum_values(MODELS_PY, "DropSource") <= table("DROP_SOURCE")
+    assert enum_values(MODELS_PY, "NotificationKind") <= table("NOTIFICATION_KIND")
+    assert enum_values(MODELS_PY, "DoseStatus") <= table("DOSE_STATUS")
+    assert enum_values(PROTOCOL_PY, "DeviceState") <= table("DEVICE_STATE")
+    assert enum_values(PROTOCOL_PY, "Err") | enum_values(PROTOCOL_PY, "HostCode") <= table("HARDWARE_REASON")
+    assert {"SENT", "SAVED", "FAILED"} <= table("DELIVERY_STATUS")
 
 
 # =========================================================================== JS logic under Node
@@ -659,110 +959,129 @@ def test_js_format_helpers(js_tree: Path):
     import * as f from './js/format.js';
     assert.equal(f.formatClock('2026-10-04T08:00:00-07:00'), '8:00 AM');
     assert.equal(f.formatClock('2026-10-04T13:05:00-07:00'), '1:05 PM');
-    assert.equal(f.formatClock('2026-10-04T00:30:00+00:00'), '12:30 AM');
     assert.equal(f.formatClock(null), '–');
-    assert.equal(f.formatClock('nonsense'), '–');
     // UTC timestamps are shown in the device offset, never the browser's zone
-    assert.equal(f.formatClockDevice('2026-10-04T15:00:00+00:00', -420), '8:00 AM');
     assert.equal(f.formatClockDevice('2026-10-04T15:00:00.123456+00:00', -420), '8:00 AM');
     assert.equal(f.deviceOffsetFrom('2026-10-04T08:00:00-07:00'), -420);
-    assert.equal(f.dateKey('2026-10-04T23:30:00-07:00'), '2026-10-04');
-    assert.equal(f.relativeDayWord('2026-10-05T08:00:00-07:00', '2026-10-04T22:00:00-07:00'), 'TOMORROW');
-    assert.equal(f.relativeDayWord('2026-10-04T23:00:00-07:00', '2026-10-04T22:00:00-07:00'), 'TODAY');
-    assert.equal(f.shiftDateKey('2026-10-31', 1), '2026-11-01');
-    assert.equal(f.formatLongDate('2026-10-05'), 'Monday 5 October 2026');
+    assert.equal(f.dateKey('2026-10-05T02:30:00+00:00', -420), '2026-10-04');
+    assert.equal(f.relativeDayWord('2026-10-05T08:00:00-07:00', '2026-10-04T22:00:00-07:00'), 'tomorrow');
+    assert.equal(f.relativeDayWord('2026-10-05T04:00:00+00:00', '2026-10-04T22:00:00-07:00'), 'today');
+    assert.equal(f.formatWhen('2026-10-04T15:00:00+00:00', '2026-10-04T22:00:00-07:00'), 'today at 8:00 AM');
+    assert.equal(f.formatWhen('2026-10-02T15:00:00+00:00', '2026-10-04T22:00:00-07:00'), 'on Fri 2 Oct at 8:00 AM');
+    assert.equal(f.advanceLocalIso('2026-10-04T23:59:30-07:00', 45), '2026-10-05T00:00:15-07:00');
     assert.equal(f.addMinutesToLocal('2026-10-04T23:50:30-07:00', 15), '2026-10-05T00:05');
     assert.equal(f.normalizeTime('8:5'), '08:05');
-    assert.equal(f.normalizeTime('08:00:00'), '08:00');
     assert.equal(f.normalizeTime('25:00'), null);
     assert.equal(f.time24To12('20:00'), '8:00 PM');
-    assert.ok(Math.abs(f.toPercent(0.857) - 85.7) < 1e-9);
-    assert.equal(f.toPercent(86), 86);
-    assert.equal(f.toPercent(null), null);
-    assert.equal(f.formatPercent(1), '100%');
-    assert.equal(f.formatPercent(0), '0%');
-    assert.equal(f.formatMinutes(12.4), '12 min');
-    assert.equal(f.formatMinutes(75), '1 h 15 min');
-    assert.equal(f.formatMinutes(null), '–');
-    assert.equal(f.formatOffset(7500), '+2 h 05 min');
+    assert.equal(f.formatPercent(0.857), '86%');
+    assert.equal(f.formatDuration(30), 'less than a minute');
+    assert.equal(f.formatDuration(22 * 60 + 5), '23 minutes');
+    assert.equal(f.formatDuration(60), '1 minute');
+    assert.equal(f.formatDuration(3600), '1 hour');
+    assert.equal(f.formatDuration(3900), '1 hour 5 minutes');
+    assert.equal(f.formatCountdown(0), 'now');
+    assert.equal(f.formatCountdown(1380), 'in 23 minutes');
+    assert.equal(f.plural(1, 'pill'), '1 pill');
+    assert.equal(f.plural(0, 'pill'), '0 pills');
     assert.equal(f.describeRepeat({ frequency: 'WEEKLY', days_of_week: ['FRI', 'MON'] }), 'Mon, Fri');
     assert.equal(f.describeRepeat({ frequency: 'DAILY', days_of_week: [] }), 'Every day');
-    const review = f.doseStatusInfo('HARDWARE_ERROR', true);
-    assert.equal(review.word, 'Hardware error');
-    assert.equal(review.needsReview, true);
-    for (const [status, info] of Object.entries(f.DOSE_STATUS)) {
-      assert.ok(info.word && info.icon && info.tone, `${status} needs a word, an icon and a tone`);
-    }
-    for (const info of Object.values(f.DEVICE_STATE)) assert.ok(info.word && info.icon);
+    assert.equal(f.formatOffset(7500), '+2 h 05 min');
+    assert.equal(f.spellOut('AB12'), 'A, B, 1, 2');
+    assert.equal(f.formatBytes(48211), '47 KB');
     """)
 
 
 @needs_node
-def test_js_kiosk_banner_logic(js_tree: Path):
+def test_js_status_view_models(js_tree: Path):
     run_node(js_tree, """
-    import * as k from './js/kiosk-state.js';
-    const dev = (over = {}) => ({ connected: true, responsive: true, state: 'READY', homed: true, gate: 'CLOSED', slot: 0, ...over });
-    const dose = (over = {}) => ({ event_id: 1, medication_name: 'Vitamin C (demo candy)', strength: '1 piece',
-      compartment_number: 3, slot: 2, scheduled_local: '2026-10-04T08:00:00-07:00', status: 'DUE', ...over });
-    const base = (over = {}) => ({ loaded: true, serverOnline: true, stateError: false, device: dev(), phase: 'IDLE',
-      awaiting: null, due: { due: [], awaiting_confirmation: [], accessed: [], blocked: [], next_upcoming: null },
-      nowLocal: '2026-10-04T07:55:00-07:00', ...over });
-    const key = (v) => k.deriveBanner(v).key;
+    import * as s from './js/status.js';
+    const c = (over = {}) => ({ slot: 1, container_number: 2, compartment_id: 2, medication_id: 3, medication_name: 'Vitamin C (demo candy)',
+      strength: '1 piece', pill_count: 12, capacity: 30, low_stock_threshold: 3, low_stock: false, empty: false, ...over });
+    const ok = s.containerView(c());
+    assert.equal(ok.title, 'Container 2');
+    assert.equal(ok.countText, '12 pills left');
+    assert.equal(ok.badge, null);
+    assert.equal(ok.canDrop, true);
+    assert.equal(ok.dropLabel, 'Drop pill: Vitamin C (demo candy), container 2');
+    const low = s.containerView(c({ pill_count: 2, low_stock: true }));
+    assert.equal(low.badge.word, 'Low');
+    assert.equal(low.countText, '2 pills left');
+    const one = s.containerView(c({ pill_count: 1, low_stock: true }));
+    assert.equal(one.countText, '1 pill left');
+    const empty = s.containerView(c({ pill_count: 0, empty: true }));
+    assert.equal(empty.badge.word, 'Empty');
+    assert.equal(empty.canDrop, false);
+    assert.match(empty.blocked, /empty/);
+    const none = s.containerView(c({ medication_id: null, medication_name: null, pill_count: 0, empty: true }));
+    assert.equal(none.hasMed, false);
+    assert.equal(none.badge, null, 'an unused container is not "empty stock"');
 
-    assert.equal(key({ loaded: false }), 'connecting');
-    assert.equal(k.deriveBanner({ loaded: false, serverOnline: false }).word, 'DEVICE OFFLINE');
-    assert.equal(k.deriveBanner(base({ serverOnline: false })).detail, 'RECONNECTING…');
-    assert.equal(k.deriveBanner(base({ stateError: true })).detail, 'STATUS UNAVAILABLE');
-    assert.equal(key(base({ device: null })), 'offline');
-    assert.equal(key(base({ device: dev({ connected: false }) })), 'offline');
-    assert.equal(k.deriveBanner(base({ device: dev({ responsive: false }) })).detail, 'NOT RESPONDING');
-    // fail closed: an offline device never shows DOSE READY
-    assert.equal(key(base({ device: dev({ connected: false }), phase: 'AWAITING_CONFIRMATION', awaiting: dose() })), 'offline');
-    // carousel motion always wins: keep hands clear
-    for (const state of ['MOVING', 'AT_TARGET', 'HOMING']) {
-      const b = k.deriveBanner(base({ device: dev({ state }), phase: 'AWAITING_CONFIRMATION' }));
-      assert.equal(b.word, 'PREPARING');
-      assert.equal(b.detail, 'KEEP HANDS CLEAR');
+    const status = { now_local: '2026-10-04T08:42:00-07:00', cooldown_minutes: 60, cooldown_remaining_s: 23 * 60,
+      next_manual_allowed_at: '2026-10-04T16:05:00+00:00', containers: [], device: {} };
+    const cd = s.cooldownView(status);
+    assert.equal(cd.active, true);
+    assert.equal(cd.text, 'You can drop another pill at 9:05 AM — in 23 minutes.');
+    assert.equal(s.remainingCooldown(status, 23 * 60 + 1), 0);
+    const after = s.cooldownView(status, s.remainingCooldown(status, 23 * 60 + 5));
+    assert.equal(after.active, false);
+    assert.equal(after.text, 'You can drop a pill now.');
+    assert.match(s.cooldownView({ ...status, cooldown_minutes: 0, cooldown_remaining_s: 0 }).rule, /no waiting time/);
+
+    const next = (over) => s.nextPillText({ now_local: '2026-10-04T08:42:00-07:00', next_scheduled: { medication_name: 'Vitamin C',
+      scheduled_local: '2026-10-04T13:00:00-07:00', container_number: 2, ...over } });
+    assert.equal(next({}), 'Vitamin C at 1:00 PM — container 2');
+    assert.equal(next({ scheduled_local: '2026-10-05T08:00:00-07:00' }), 'Vitamin C tomorrow at 8:00 AM — container 2');
+    assert.equal(next({ container_number: null, slot: null }), 'Vitamin C at 1:00 PM — no container assigned');
+    assert.equal(s.nextPillText({ now_local: status.now_local, next_scheduled: null }), 'No pills are scheduled.');
+    assert.equal(s.containerNumber({ slot: null, container_number: null }), null, 'an unknown slot is not container 1');
+    assert.equal(s.containerNumber({ slot: 0 }), 1);
+
+    const drop = { medication_name: 'Vitamin C', status: 'DROPPED', source: 'schedule', requested_local: '2026-10-04T08:00:00-07:00',
+      completed_at: '2026-10-04T15:00:03+00:00', container_number: 1 };
+    assert.equal(s.lastDropText({ now_local: status.now_local, last_drop: drop }), 'Last pill: Vitamin C, today at 8:00 AM. Dropped automatically at its time.');
+    assert.match(s.lastDropText({ now_local: status.now_local, last_drop: { ...drop, status: 'UNCERTAIN' } }), /not certain/);
+    assert.equal(s.lastDropText({ last_drop: null }), 'No pills have dropped yet.');
+
+    assert.equal(s.deviceView({ connected: true, responsive: true, state: 'READY', homed: true }).word, 'Ready');
+    assert.equal(s.deviceView({ connected: false }).word, 'Offline');
+    assert.equal(s.deviceView({ connected: true, state: 'FAULT' }).ok, false);
+    assert.equal(s.deviceView({ mode: 'none' }).word, 'Not set up');
+    assert.equal(s.deviceView(null).ok, false);
+
+    assert.deepEqual(s.alertsView({ alerts: [{ kind: 'EMPTY', message: 'Container 3 is empty.' }, 'Plain text'] }).map((a) => a.tone), ['bad', 'caution']);
+    assert.equal(s.todayKey(status), '2026-10-04');
+
+    const outcome = s.outcomeView({ status: 'DENIED', reason: 'COOLDOWN', message: 'Please wait until 9:05 AM.' });
+    assert.equal(outcome.dropped, false);
+    assert.equal(outcome.message, 'Please wait until 9:05 AM.', 'the server message is used as is');
+    assert.equal(s.outcomeView({ status: 'UNCERTAIN', message: 'x' }).urgent, true);
+
+    const ready = { ...status, cooldown_remaining_s: 0, device: { connected: true, responsive: true, state: 'READY' } };
+    assert.equal(s.kioskBanner({ status: ready }).key, 'ready');
+    assert.equal(s.kioskBanner({ status: { ...ready, cooldown_remaining_s: 600 }, remainingS: 600 }).word, 'Please wait');
+    assert.equal(s.kioskBanner({ status: ready, dropping: true }).key, 'dropping');
+    assert.equal(s.kioskBanner({ status: ready, online: false }).word, 'Offline');
+    assert.equal(s.kioskBanner({ status: { ...ready, device: { connected: false } } }).key, 'device');
+    assert.equal(s.kioskBanner({ status: { ...ready, next_scheduled: { status: 'DUE', medication_name: 'C', scheduled_local: '2026-10-04T08:30:00-07:00', container_number: 1 } } }).key, 'due');
+    """)
+
+
+@needs_node
+def test_js_words_cover_codes(js_tree: Path):
+    run_node(js_tree, """
+    import * as w from './js/words.js';
+    assert.equal(w.reasonText('COOLDOWN'), 'Too soon after the last pill');
+    assert.equal(w.reasonText('ERR NO_PILL'.split(' ')[1]), 'No pill came out');
+    assert.equal(w.reasonText('NO_PILL (sensor)'), 'No pill came out');
+    assert.equal(w.reasonText(null), null);
+    assert.equal(w.sourceText('agent', 'patient'), 'You asked the assistant');
+    assert.equal(w.sourceText('schedule', 'caregiver'), 'Scheduled auto-drop');
+    assert.equal(w.dropStatusInfo('UNCERTAIN', true).needsReview, true);
+    assert.equal(w.notificationInfo('DROP_UNCERTAIN').urgent, true);
+    assert.equal(w.doseStatusInfo('HARDWARE_ERROR', true).tone, 'bad');
+    for (const table of [w.DROP_STATUS, w.NOTIFICATION_KIND, w.DOSE_STATUS, w.DEVICE_STATE, w.DELIVERY_STATUS]) {
+      for (const [key, info] of Object.entries(table)) assert.ok(info.word && info.icon && info.tone, key);
     }
-    assert.equal(key(base({ phase: 'PREPARING' })), 'preparing');
-    assert.equal(k.deriveBanner(base({ device: dev({ state: 'FAULT' }) })).word, 'NEEDS ASSISTANCE');
-    assert.equal(key(base({ phase: 'ATTENTION' })), 'attention');
-    const ready = base({ phase: 'AWAITING_CONFIRMATION', awaiting: dose({ status: 'DISPENSED' }) });
-    assert.equal(k.deriveBanner(ready).word, 'DOSE READY');
-    assert.equal(k.deriveBanner(ready).detail, "SAY 'TAKEN'");
-    assert.equal(k.suggestedIntent(ready), 'CONFIRM_TAKEN');
-    const review = base({ due: { ...base().due, blocked: [{ dose: dose({ status: 'HARDWARE_ERROR' }), reason: 'NEEDS_REVIEW' }] } });
-    assert.equal(key(review), 'attention');
-    assert.equal(key(base({ device: dev({ gate: 'OPEN', state: 'GATE_OPEN' }) })), 'open');
-    const due = base({ due: { ...base().due, due: [dose()] } });
-    assert.equal(k.deriveBanner(due).word, 'DOSE DUE');
-    assert.equal(k.suggestedIntent(due), 'DISPENSE');
-    assert.equal(k.deriveBanner(base()).word, 'DEVICE READY');
-    assert.equal(k.suggestedIntent(base()), null);
-    for (const b of Object.values(k.BANNERS)) assert.ok(b.word && b.icon && b.tone, b.key);
-
-    assert.equal(k.nextEventText(ready), 'OPEN NOW: COMPARTMENT 3');
-    assert.equal(k.nextEventText(due), 'DUE NOW: 8:00 AM · COMPARTMENT 3');
-    const later = base({ due: { ...base().due, next_upcoming: dose({ scheduled_local: '2026-10-04T14:00:00-07:00' }) } });
-    assert.equal(k.nextEventText(later), 'NEXT EVENT: 2:00 PM · COMPARTMENT 3');
-    const tomorrow = base({ due: { ...base().due, next_upcoming: dose({ scheduled_local: '2026-10-05T08:00:00-07:00' }) } });
-    assert.equal(k.nextEventText(tomorrow), 'NEXT EVENT: TOMORROW 8:00 AM · COMPARTMENT 3');
-    const unassigned = base({ due: { ...base().due, due: [dose({ compartment_number: null, slot: null })] } });
-    assert.equal(k.nextEventText(unassigned), 'DUE NOW: 8:00 AM · NO COMPARTMENT ASSIGNED');
-    assert.equal(k.nextEventText(base()), 'NO UPCOMING DOSES');
-    assert.equal(k.nextEventText(base({ serverOnline: false })), '');
-    assert.equal(k.doseDetailText(due), 'VITAMIN C (DEMO CANDY) · 1 PIECE');
-
-    assert.equal(k.intentForKey('Escape', { typing: true }), 'CANCEL');
-    assert.equal(k.intentForKey(' '), 'PRIMARY_ACTION');
-    assert.equal(k.intentForKey('Enter'), 'PRIMARY_ACTION');
-    assert.equal(k.intentForKey(' ', { onControl: true }), null);
-    assert.equal(k.intentForKey('r'), 'REPEAT');
-    assert.equal(k.intentForKey('H'), 'HELP');
-    assert.equal(k.intentForKey('r', { typing: true }), null);
-    assert.equal(k.intentForKey('x'), null);
-    assert.equal(k.voiceText({ enabled: true, listening: true }).word, 'VOICE ON');
-    assert.equal(k.voiceText({ enabled: false }).word, 'VOICE OFF');
     """)
 
 
@@ -772,11 +1091,11 @@ def test_js_api_client(js_tree: Path):
     import * as api from './js/api.js';
     const calls = [];
     const queue = [];
-    const store = new Map();
-    let prompts = 0;
-    let promptAnswer = '4321';
+    const assigned = [];
+    const loc = { pathname: '/care', search: '?x=1', hash: '#history', assign: (u) => assigned.push(u) };
     const respond = (status, body, { text = false } = {}) => queue.push({ status, body, text });
     api.configureApi({
+      location: loc,
       fetch: async (path, init) => {
         calls.push({ path, ...init });
         const next = queue.shift();
@@ -784,84 +1103,91 @@ def test_js_api_client(js_tree: Path):
         const raw = next.body === undefined ? '' : (next.text ? next.body : JSON.stringify(next.body));
         return { ok: next.status < 300, status: next.status, statusText: 'X', text: async () => raw };
       },
-      storage: { getItem: (k) => store.get(k) ?? null, setItem: (k, v) => store.set(k, v), removeItem: (k) => store.delete(k) },
-      promptPin: () => { prompts += 1; return promptAnswer; },
     });
 
     respond(200, { ok: true });
-    assert.deepEqual(await api.get('/api/state'), { ok: true });
+    assert.deepEqual(await api.get('/api/auth/me'), { ok: true });
     assert.equal(calls[0].method, 'GET');
+    assert.equal(calls[0].credentials, 'same-origin', 'the session cookie travels with every request');
     assert.equal(calls[0].headers.Accept, 'application/json');
     assert.equal(calls[0].headers['Content-Type'], undefined);
-    assert.equal(calls[0].headers['X-Caregiver-Pin'], undefined);
 
     respond(201, { medication_id: 7 });
-    await api.post('/api/medications', { name: 'X', confirmed: true });
+    await api.post('/api/patients/1/medications', { name: 'X', confirmed: true });
     assert.equal(calls[1].headers['Content-Type'], 'application/json');
     assert.deepEqual(JSON.parse(calls[1].body), { name: 'X', confirmed: true });
 
     respond(422, { detail: [{ loc: ['body', 'confirmed'], msg: 'Input should be True', type: 'literal_error' }] });
-    await assert.rejects(api.post('/api/medications', {}), (e) => e instanceof api.ApiError && e.status === 422
+    await assert.rejects(api.post('/api/patients/1/medications', {}), (e) => e instanceof api.ApiError && e.status === 422
       && e.message === 'confirmed: Input should be True' && Array.isArray(e.detail));
-    respond(409, { detail: 'A dose is awaiting confirmation' });
-    await assert.rejects(api.post('/api/compartments/2/present', {}), (e) => e.status === 409 && e.message === 'A dose is awaiting confirmation');
+    respond(403, { detail: 'Only doctor or family accounts can change this' });
+    await assert.rejects(api.patch('/api/patients/1/settings', {}), (e) => e.status === 403 && e.message.startsWith('Only doctor'));
     respond(500, 'Internal Server Error', { text: true });
-    await assert.rejects(api.get('/api/state'), (e) => e.status === 500 && e.message === 'Internal Server Error');
+    await assert.rejects(api.get('/api/patients/1/status'), (e) => e.status === 500 && e.message === 'Internal Server Error');
 
-    // 401 -> ask for the PIN once, retry once with the header, remember the PIN
-    respond(401, { detail: 'Caregiver PIN required' });
-    respond(200, { ok: true });
-    const n = calls.length;
-    assert.deepEqual(await api.post('/api/hardware/home', {}), { ok: true });
-    assert.equal(prompts, 1);
-    assert.equal(calls[n + 1].headers['X-Caregiver-Pin'], '4321');
-    assert.equal(store.get(api.PIN_STORAGE_KEY), '4321');
-    respond(200, []);
-    await api.get('/api/schedules');
-    assert.equal(calls.at(-1).headers['X-Caregiver-Pin'], '4321');
+    // 401 -> sign-in page with ?next= (once), unless the caller opts out
+    respond(401, { detail: 'Not signed in' });
+    await assert.rejects(api.get('/api/patients/1/status'), (e) => e.status === 401);
+    assert.deepEqual(assigned, ['/login?next=%2Fcare%3Fx%3D1%23history']);
+    respond(401, { detail: 'Not signed in' });
+    await assert.rejects(api.get('/api/patients/1/drops?days=7'), (e) => e.status === 401);
+    assert.equal(assigned.length, 1, 'only one redirect');
+    api.configureApi({ location: loc });
+    respond(401, { detail: 'Wrong email or password' });
+    await assert.rejects(api.post('/api/auth/login', {}, { redirectOn401: false }), (e) => e.status === 401 && e.message === 'Wrong email or password');
+    assert.equal(assigned.length, 1, 'no redirect when opted out');
 
-    // wrong PIN twice -> forget it, no endless retry
-    respond(401, { detail: 'Caregiver PIN required' });
-    respond(401, { detail: 'Caregiver PIN required' });
-    await assert.rejects(api.post('/api/hardware/stop', {}), (e) => e.status === 401);
-    assert.equal(store.has(api.PIN_STORAGE_KEY), false);
-    assert.equal(prompts, 2);
-
-    // prompt cancelled -> no retry
-    promptAnswer = null;
-    respond(401, { detail: 'Caregiver PIN required' });
-    const before = calls.length;
-    await assert.rejects(api.post('/api/demo/seed', {}), (e) => e.status === 401);
-    assert.equal(calls.length, before + 1);
-
-    // network failure -> status 0, network flag
-    await assert.rejects(api.get('/api/state'), (e) => e.status === 0 && e.network === true);
+    // raw bytes (offline speech) keep their content type
+    respond(200, { text: 'can i have my pill', confidence: 0.9, engine: 'vosk' });
+    const pcm = new ArrayBuffer(8);
+    await api.postRaw('/api/agent/transcribe', pcm, { contentType: 'application/octet-stream' });
+    assert.equal(calls.at(-1).body, pcm);
+    assert.equal(calls.at(-1).headers['Content-Type'], 'application/octet-stream');
 
     // multipart upload: FormData passed through, no JSON content type
     const form = new FormData();
     form.append('image', new Blob(['x'], { type: 'image/png' }), 'a.png');
     respond(200, { scan_id: 1, status: 'PENDING_REVIEW' });
-    await api.upload('/api/onboarding/scan', form);
+    await api.upload('/api/patients/1/scans', form);
     assert.equal(calls.at(-1).body, form);
     assert.equal(calls.at(-1).headers['Content-Type'], undefined);
 
-    respond(200, { text: 'ok' });
-    await api.postIntent('DISPENSE');
-    assert.equal(calls.at(-1).path, '/api/intents');
-    assert.deepEqual(JSON.parse(calls.at(-1).body), { intent: 'DISPENSE', source: 'ui' });
-    respond(200, { text: 'ok' });
-    await api.postText('what do i take now');
-    assert.deepEqual(JSON.parse(calls.at(-1).body), { text: 'what do i take now', source: 'keyboard' });
     respond(204, undefined);
-    assert.equal(await api.del('/api/schedules/3'), null);
+    assert.equal(await api.del('/api/patients/1/schedules/3'), null);
+    await assert.rejects(api.get('/api/health'), (e) => e.status === 0 && e.network === true);
+
+    // open-redirect protection for ?next=
+    assert.equal(api.safeNext('/care#overview'), '/care#overview');
+    for (const bad of ['https://evil.example', '//evil.example', '/\\\\evil', 'javascript:alert(1)', '/api/auth/me', '/login?next=/x', null]) {
+      assert.equal(api.safeNext(bad), null, String(bad));
+    }
+    assert.equal(api.loginUrl('/patient'), '/login?next=%2Fpatient');
+    assert.equal(api.loginUrl('//evil'), '/login');
     assert.equal(api.detailToMessage(null, 'fallback'), 'fallback');
+    """)
+
+
+@needs_node
+def test_js_session_routing(js_tree: Path):
+    run_node(js_tree, """
+    import { destinationFor, homeFor, isCaregiver, roleName } from './js/session.js';
+    assert.equal(homeFor('patient'), '/patient');
+    assert.equal(homeFor('doctor'), '/care');
+    assert.equal(homeFor('family'), '/care');
+    assert.equal(destinationFor('patient', '/kiosk'), '/kiosk');
+    assert.equal(destinationFor('patient', '/care'), '/patient', 'a patient never lands in the care portal');
+    assert.equal(destinationFor('doctor', '/patient#home'), '/care');
+    assert.equal(destinationFor('family', '/care#history'), '/care#history');
+    assert.equal(destinationFor('doctor', null), '/care');
+    assert.ok(isCaregiver({ role: 'family' }) && !isCaregiver({ role: 'patient' }));
+    assert.equal(roleName('family'), 'Family member');
     """)
 
 
 @needs_node
 def test_js_event_stream(js_tree: Path):
     run_node(js_tree, """
-    import { EventStream, RECONNECTED, KNOWN_TOPICS, parseTimestamp } from './js/events.js';
+    import { EventStream, RECONNECTED, KNOWN_TOPICS, PORTAL_TOPICS, parseTimestamp } from './js/events.js';
     class FakeES {
       static all = [];
       constructor(url) { this.url = url; this.listeners = {}; this.closed = false; FakeES.all.push(this); }
@@ -882,133 +1208,182 @@ def test_js_event_stream(js_tree: Path):
     const got = [];
     const all = [];
     let reconnected = 0;
-    stream.on('device.state', (data, env, meta) => got.push({ data, seq: env.seq, replayed: meta.replayed }));
+    stream.on('drop.updated', (data, env, meta) => got.push({ data, seq: env.seq, replayed: meta.replayed }));
     stream.on('*', (_d, env) => all.push(env.topic));
     stream.on(RECONNECTED, () => { reconnected += 1; });
     stream.start();
-    assert.equal(FakeES.all.length, 1);
     assert.equal(FakeES.all[0].url, '/api/events');
     for (const t of KNOWN_TOPICS) assert.ok(FakeES.all[0].listeners[t], `listens to ${t}`);
-    assert.equal(stream.status, 'connecting');
+    assert.ok(PORTAL_TOPICS.includes('notification') && PORTAL_TOPICS.includes('patient.status'));
 
     const es = FakeES.all[0];
     es.emit('open');
     assert.equal(stream.status, 'open');
     const iso = (ms) => new Date(ms).toISOString().replace('Z', '123+00:00');
-    // replayed history right after connecting
-    es.emit('device.state', { seq: 1, topic: 'device.state', data: { state: 'READY' }, ts: iso(now - 60000) });
-    // a live event
-    es.emit('device.state', { seq: 2, topic: 'device.state', data: { state: 'MOVING' }, ts: iso(now) });
-    // duplicate (same seq + ts) is dropped
-    es.emit('device.state', { seq: 2, topic: 'device.state', data: { state: 'MOVING' }, ts: iso(now) });
-    es.emit('device.state', '{not json');
+    es.emit('drop.updated', { seq: 1, topic: 'drop.updated', data: { drop_id: 1 }, ts: iso(now - 60000) });  // replayed history
+    es.emit('drop.updated', { seq: 2, topic: 'drop.updated', data: { drop_id: 2 }, ts: iso(now) });          // live
+    es.emit('drop.updated', { seq: 2, topic: 'drop.updated', data: { drop_id: 2 }, ts: iso(now) });          // duplicate
+    es.emit('drop.updated', '{not json');
     assert.deepEqual(got.map((g) => [g.seq, g.replayed]), [[1, true], [2, false]]);
-    assert.deepEqual(all, ['device.state', 'device.state']);
+    assert.deepEqual(all, ['drop.updated', 'drop.updated']);
 
-    // a topic registered later is subscribed on the live source
-    const later = [];
-    stream.on('custom.topic', (d) => later.push(d));
-    es.emit('custom.topic', { seq: 3, topic: 'custom.topic', data: { a: 1 }, ts: iso(now) });
-    assert.deepEqual(later, [{ a: 1 }]);
-
-    // drop -> managed reconnect with exponential backoff
     es.emit('error');
     assert.equal(stream.status, 'reconnecting');
-    assert.equal(es.closed, true);
+    assert.equal(stream.failures, 1);
     assert.equal(timers.at(-1).ms, 1000);
     timers.at(-1).fn();
-    assert.equal(FakeES.all.length, 2);
     FakeES.all[1].emit('error');
     assert.equal(timers.at(-1).ms, 2000);
     timers.at(-1).fn();
-    FakeES.all[2].emit('error');
-    assert.equal(timers.at(-1).ms, 4000);
-    timers.at(-1).fn();
     now += 10000;
-    FakeES.all[3].emit('open');
-    assert.equal(stream.status, 'open');
+    FakeES.all[2].emit('open');
+    assert.equal(stream.failures, 0);
     assert.equal(reconnected, 1);
-    // after a server restart seq starts again at 1, but ts differs -> delivered
-    FakeES.all[3].emit('device.state', { seq: 1, topic: 'device.state', data: { state: 'BOOT' }, ts: iso(now) });
-    assert.equal(got.at(-1).data.state, 'BOOT');
-    // replay of an event already seen before the drop is not delivered twice
-    FakeES.all[3].emit('device.state', { seq: 2, topic: 'device.state', data: { state: 'MOVING' }, ts: iso(100000) });
+    // replay of an event seen before the drop is not delivered twice
+    FakeES.all[2].emit('drop.updated', { seq: 2, topic: 'drop.updated', data: { drop_id: 2 }, ts: iso(100000) });
     assert.equal(got.filter((g) => g.seq === 2).length, 1);
-
     stream.close();
-    assert.equal(stream.status, 'closed');
-    FakeES.all[3].emit('error');
-    assert.equal(FakeES.all.length, 4, 'no reconnect after close()');
+    FakeES.all[2].emit('error');
+    assert.equal(FakeES.all.length, 3, 'no reconnect after close()');
     assert.deepEqual(statuses, ['idle', 'connecting', 'open', 'reconnecting', 'open', 'closed']);
     assert.ok(Number.isFinite(parseTimestamp('2026-10-04T15:00:00.123456+00:00')));
     """)
 
 
 @needs_node
-def test_js_chart_carousel_and_log_helpers(js_tree: Path):
+def test_js_pcm_audio(js_tree: Path):
     run_node(js_tree, """
-    import { chartRows, directLabelIndexes, labelEvery, columnPath, describeRow } from './js/chart.js';
-    import { polar, slotAngle, shortestDelta, sectorPath, CarouselView } from './js/carousel.js';
-    import { isHeartbeat } from './js/linelog.js';
-    import { describeCommand, snapshotRows } from './js/hwview.js';
+    import { resample, floatToPcm16, concatFloat32, createSilenceDetector, displayTranscript, rms, TARGET_RATE, MAX_SECONDS } from './js/pcm.js';
+    assert.equal(TARGET_RATE, 16000);
+    assert.ok(MAX_SECONDS < 30, 'stays under the 30 s server limit');
+    const second = new Float32Array(48000).map((_, i) => Math.sin((2 * Math.PI * 440 * i) / 48000) * 0.5);
+    const down = resample(second, 48000);
+    assert.equal(down.length, 16000);
+    assert.ok(Math.abs(rms(down) - rms(second)) < 0.05, 'level preserved');
+    const ramp = Float32Array.from([0, 0.3, 0.6, 0.9, 0.6, 0.3]);
+    assert.deepEqual(Array.from(resample(ramp, 48000, 16000)).map((v) => Math.round(v * 10) / 10), [0.3, 0.6]);
+    const up = resample(Float32Array.from([0, 1]), 8000, 16000);
+    assert.deepEqual(Array.from(up), [0, 0.5, 1, 1]);
+    assert.equal(resample(second, 16000).length, 48000);
+    assert.throws(() => resample(second, 0));
 
-    const rows = chartRows([
-      { date: '2026-10-03', scheduled: 3, taken: 3, missed: 0, rate: 1 },
-      { date: '2026-10-04', scheduled: 3, taken: 1, missed: 2 },
-      { date: '2026-10-05', scheduled: 0, taken: 0, missed: 0, rate: 0 },
-      { date: '2026-10-06', scheduled: 2, taken: 1, missed: 0, rate: 50 },
-    ]);
-    assert.equal(rows[0].pct, 100);
-    assert.ok(Math.abs(rows[1].pct - 33.333) < 0.01, 'rate computed when missing');
-    assert.equal(rows[2].pct, null, 'no doses -> no rate');
-    assert.equal(rows[3].pct, 50);
-    assert.equal(rows[3].other, 1);
-    assert.deepEqual([...directLabelIndexes(rows)].sort(), [1, 3], 'endpoint + lowest day only');
-    assert.equal(labelEvery(20), 3);
-    assert.equal(labelEvery(100), 1);
-    const d = columnPath(10, 20, 24, 100);
-    assert.ok(d.startsWith('M10 120V24A4 4') && d.endsWith('Z'), d);
-    assert.equal(columnPath(0, 0, 24, 0), '');
-    assert.equal(describeRow(rows[1]), 'Sunday 4 October 2026: 33% taken, 1 of 3 doses, 2 missed');
-    assert.equal(describeRow(rows[2]), 'Monday 5 October 2026: no doses scheduled');
+    const pcm = floatToPcm16(Float32Array.from([0, 1, -1, 2, -2, 0.5, NaN]));
+    const view = new DataView(pcm);
+    assert.equal(pcm.byteLength, 14);
+    assert.deepEqual([0, 1, 2, 3, 4, 5, 6].map((i) => view.getInt16(i * 2, true)), [0, 32767, -32768, 32767, -32768, 16384, 0]);
+    assert.equal(new Uint8Array(pcm)[2], 0xff, 'little-endian');
+    assert.equal(concatFloat32([Float32Array.from([1]), Float32Array.from([2, 3])]).length, 3);
 
-    assert.deepEqual(polar(100, 90), [100, 0]);
-    assert.deepEqual(polar(100, 0), [0, -100]);
-    assert.equal(slotAngle(3, 6), 180);
-    assert.equal(shortestDelta(350, 10), 20);
-    assert.equal(shortestDelta(10, 350), -20);
-    assert.ok(sectorPath(0, 6).startsWith('M-56 -96.99A112 112 0 0 1 56 -96.99'), sectorPath(0, 6));
-    const describe = (state) => CarouselView.prototype.describe.call({ state });
-    assert.equal(describe({ slot: 2, gate: 'OPEN', targetSlot: null }), 'Compartment 3 is at the gate. Gate open.');
-    assert.equal(describe({ slot: null, gate: 'CLOSED', targetSlot: 3, moving: true }),
-      'The carousel is turning. Moving to compartment 4. Gate closed.');
-    assert.equal(describe({ slot: null, gate: 'UNKNOWN', targetSlot: null, moving: false }),
-      'Position unknown (between compartments or not homed). Gate state unknown.');
-
-    assert.ok(isHeartbeat('PING') && isHeartbeat('OK PONG') && isHeartbeat('OK STATUS state=READY homed=1'));
-    assert.ok(!isHeartbeat('MOVE_SLOT 3') && !isHeartbeat('ERR BUSY'));
-    assert.equal(describeCommand({ ok: false, result: { command: 'DISPENSE_SLOT 2', ok: false, code: 'TIMEOUT', definitive: false } }),
-      'DISPENSE_SLOT 2 → failed (TIMEOUT, uncertain)');
-    const snap = Object.fromEntries(snapshotRows({ connected: true, responsive: true, state: 'FAULT', homed: false, slot: null, gate: 'CLOSED' }));
-    assert.equal(snap['State'], 'Fault (needs homing) (FAULT)');
-    assert.equal(snap['At the gate'], 'Unknown / between compartments');
+    const det = createSilenceDetector({ threshold: 0.1, silenceMs: 200, maxWaitMs: 500 });
+    const loud = new Float32Array(1600).fill(0.5);
+    const quiet = new Float32Array(1600);
+    assert.equal(det.update(quiet, 16000), 'waiting');
+    assert.equal(det.update(loud, 16000), 'speaking');
+    assert.equal(det.update(quiet, 16000), 'speaking');
+    assert.equal(det.update(quiet, 16000), 'done');
+    const nothing = createSilenceDetector({ threshold: 0.1, maxWaitMs: 150 });
+    assert.equal(nothing.update(quiet, 16000), 'waiting');
+    assert.equal(nothing.update(quiet, 16000), 'nothing', 'no speech within maxWaitMs');
+    assert.equal(displayTranscript('can i have [unk] pill'), 'can i have … pill');
     """)
 
 
 @needs_node
-def test_js_form_validation(js_tree: Path):
+def test_js_voice_input_falls_back_to_offline_capture(js_tree: Path):
+    """A SpeechRecognition that never starts (no speech service) -> AudioWorklet capture ->
+    16 kHz PCM16 upload to /api/agent/transcribe -> result; the microphone is released."""
+    run_node(js_tree, """
+    import { VoiceInput, ReplySpeaker } from './js/voice.js';
+    import { configureApi } from './js/api.js';
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    const tracks = [];
+    Object.defineProperty(globalThis, 'navigator', { configurable: true, writable: true, value: {
+      permissions: { query: async () => ({ state: 'prompt' }) },
+      mediaDevices: { getUserMedia: async () => { const t = { stop() { this.stopped = true; } }; tracks.push(t); return { getTracks: () => [t] }; } },
+    } });
+    class FakeSR extends EventTarget {
+      start() { FakeSR.started += 1; }
+      stop() { this.dispatchEvent(new Event('end')); }
+      abort() { this.aborted = true; this.dispatchEvent(new Event('end')); }
+    }
+    FakeSR.started = 0;
+    globalThis.webkitSpeechRecognition = FakeSR;
+    let node = null;
+    class FakePort extends EventTarget { start() {} }
+    globalThis.AudioWorkletNode = class { constructor(ctx, name) { this.name = name; this.port = new FakePort(); node = this; } connect() {} disconnect() {} };
+    const contexts = [];
+    globalThis.AudioContext = class {
+      constructor() { this.sampleRate = 48000; this.state = 'running'; this.destination = {}; this.audioWorklet = { addModule: async (url) => { this.module = url; } }; contexts.push(this); }
+      createMediaStreamSource() { return { connect() {}, disconnect() {} }; }
+      createGain() { return { gain: { value: 1 }, connect() {} }; }
+      async close() { this.closed = true; }
+    };
+    const posted = [];
+    configureApi({ fetch: async (path, init) => { posted.push({ path, init });
+      return { ok: true, status: 200, text: async () => JSON.stringify({ text: 'what do i take now', confidence: 0.8, engine: 'vosk' }) }; } });
+    const states = [];
+    const results = [];
+    const voice = new VoiceInput({ onState: (s) => states.push(s), onResult: (t, meta) => results.push([t, meta.mode]), startTimeoutMs: 20 });
+    assert.equal(voice.engine, 'browser');
+    voice.start();
+    for (let i = 0; i < 50 && !node; i += 1) await sleep(10);
+    assert.equal(FakeSR.started, 1);
+    assert.ok(node, 'fell back to AudioWorklet capture');
+    assert.equal(node.name, 'tactidose-pcm-capture');
+    assert.equal(contexts[0].module, '/static/js/pcm-worklet.js');
+    assert.equal(voice.engine, 'offline', 'a recognizer that never starts is not used again');
+    const chunk = new Float32Array(2048).fill(0.3);
+    for (let i = 0; i < 12; i += 1) node.port.dispatchEvent(new MessageEvent('message', { data: chunk }));
+    voice.stop();
+    for (let i = 0; i < 50 && !results.length; i += 1) await sleep(10);
+    assert.equal(posted.length, 1);
+    assert.equal(posted[0].path, '/api/agent/transcribe');
+    assert.equal(posted[0].init.headers['Content-Type'], 'application/octet-stream');
+    assert.equal(posted[0].init.body.byteLength, Math.floor((12 * 2048) / 3) * 2, '48 kHz float -> 16 kHz PCM16');
+    assert.deepEqual(results, [['what do i take now', 'offline']]);
+    assert.ok(tracks.length >= 2 && tracks.every((t) => t.stopped), 'every microphone stream is released');
+    assert.ok(contexts.every((c) => c.closed));
+    assert.deepEqual([...new Set(states)], ['starting', 'listening', 'processing', 'idle']);
+
+    // cancel: nothing is sent
+    voice.start();
+    for (let i = 0; i < 50 && voice.state !== 'listening'; i += 1) await sleep(10);
+    node.port.dispatchEvent(new MessageEvent('message', { data: chunk }));
+    voice.cancel();
+    await sleep(20);
+    assert.equal(posted.length, 1, 'cancel sends nothing');
+    assert.equal(voice.state, 'idle');
+
+    // spoken replies fall back to the browser voice when there is no server audio
+    const spoken = [];
+    globalThis.SpeechSynthesisUtterance = class extends EventTarget { constructor(t) { super(); this.text = t; } };
+    globalThis.speechSynthesis = { cancel() {}, speak(u) { spoken.push(u.text); } };
+    const speaker = new ReplySpeaker();
+    assert.equal(speaker.speak('Your pill dropped.'), true);
+    assert.deepEqual(spoken, ['Your pill dropped.']);
+    assert.equal(speaker.speaking, true);
+    speaker.stop();
+    assert.equal(speaker.speaking, false);
+    """)
+
+
+@needs_node
+def test_js_forms_validation(js_tree: Path):
     run_node(js_tree, """
     import { readMedicationForm, linesOf } from './js/medform.js';
-    import { scheduleBody } from './js/cg/schedules.js';
+    import { scheduleBody, groupSchedules } from './js/care/schedule.js';
+    import { settingsBody } from './js/care/settings.js';
+    import { refillBody, containerSettingsBody } from './js/care/containers.js';
+    import { linkBody, normalizeLinkCode, linkErrorText } from './js/links.js';
+    import { registerBody, authErrorText } from './js/authforms.js';
+    import { ApiError } from './js/api.js';
     const fakeForm = (values) => ({ elements: { namedItem: (n) => (n in values ? (n === 'confirmed' ? { checked: values[n] } : { value: values[n] }) : null) } });
-    const fields = { name: ' Vitamin C ', strength: '', instructions_text: 'Take one.', warnings: 'a\\n\\n b ', confirmed_by: 'Ana', confirmed: true };
-
+    const fields = { name: ' Vitamin C ', strength: '', instructions_text: 'Take one.', warnings: 'a\\n\\n b ', confirmed: true };
     assert.equal(readMedicationForm(fakeForm({ ...fields, name: '  ' })).field, 'name');
     const unconfirmed = readMedicationForm(fakeForm({ ...fields, confirmed: false }));
     assert.equal(unconfirmed.ok, false);
     assert.equal(unconfirmed.field, 'confirmed', 'nothing is sent without the confirmation tick');
-    const ok = readMedicationForm(fakeForm(fields));
-    assert.deepEqual(ok.body, { name: 'Vitamin C', instructions_text: 'Take one.', warnings: ['a', 'b'], confirmed: true, confirmed_by: 'Ana' });
+    assert.deepEqual(readMedicationForm(fakeForm(fields)).body, { name: 'Vitamin C', instructions_text: 'Take one.', warnings: ['a', 'b'], confirmed: true });
     assert.equal(readMedicationForm(fakeForm(fields), { keepEmpty: true }).body.strength, '');
     assert.deepEqual(linesOf(' x \\r\\n\\ny'), ['x', 'y']);
 
@@ -1020,4 +1395,175 @@ def test_js_form_validation(js_tree: Path):
     assert.deepEqual(scheduleBody({ medicationId: '3', time: '08:00', frequency: 'WEEKLY', days: ['FRI', 'MON'], editing: false }).body.days_of_week, ['MON', 'FRI']);
     assert.deepEqual(scheduleBody({ medicationId: '', time: '20:15', frequency: 'DAILY', days: [], active: false, editing: true }).body,
       { time_of_day: '20:15', frequency: 'DAILY', days_of_week: ['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN'], active: false });
+    const groups = groupSchedules([
+      { schedule_id: 1, medication_id: 2, medication_name: 'B', time_of_day: '20:00', active: true },
+      { schedule_id: 2, medication_id: 2, medication_name: 'B', time_of_day: '08:00', active: true },
+      { schedule_id: 3, medication_id: 1, medication_name: 'A', time_of_day: '09:00', active: false },
+    ]);
+    assert.deepEqual(groups.map((g) => [g.name, g.items.map((s) => s.time_of_day)]), [['B', ['08:00', '20:00']]]);
+    assert.equal(groupSchedules([{ medication_id: 1, medication_name: 'A', time_of_day: '09:00', active: false }], { showInactive: true }).length, 1);
+
+    assert.deepEqual(settingsBody('45', true).body, { manual_cooldown_minutes: 45, auto_drop_enabled: true });
+    assert.deepEqual(settingsBody('0', false).body, { manual_cooldown_minutes: 0, auto_drop_enabled: false });
+    assert.equal(settingsBody('1441', true).ok, false);
+    assert.equal(settingsBody('-5', true).ok, false);
+    assert.equal(settingsBody('ten', true).ok, false);
+
+    assert.deepEqual(refillBody('set', '20', 30).body, { set: 20 });
+    assert.deepEqual(refillBody('add', '5', 30, 20).body, { add: 5 });
+    assert.equal(refillBody('add', '15', 30, 20).ok, false, 'cannot overfill');
+    assert.equal(refillBody('set', '31', 30).ok, false);
+    assert.equal(refillBody('add', '0', 30, 0).ok, false);
+    assert.equal(refillBody('set', '2.5', 30).ok, false);
+    assert.deepEqual(containerSettingsBody('30', '3').body, { capacity: 30, low_stock_threshold: 3 });
+    assert.equal(containerSettingsBody('3', '3').ok, false);
+    assert.equal(containerSettingsBody('0', '0').ok, false);
+
+    assert.equal(normalizeLinkCode('abcd-23 45'), 'ABCD2345');
+    assert.deepEqual(linkBody(' 12 ', 'alex 2026').body, { patient_id: 12, link_code: 'ALEX2026' });
+    assert.equal(linkBody('', 'X').field, 'patient_id');
+    assert.equal(linkBody('12a', 'ALEX2026').field, 'patient_id');
+    assert.equal(linkBody('12', '').field, 'link_code');
+    assert.equal(linkBody('12', 'AB!?').field, 'link_code');
+    assert.match(linkErrorText({ status: 404 }), /do not match/);
+
+    assert.equal(registerBody({ name: 'A', email: 'a@b.co', password: 'short', role: 'patient' }).field, 'reg-password');
+    assert.equal(registerBody({ name: '', email: 'a@b.co', password: 'longenough', role: 'patient' }).field, 'reg-name');
+    assert.equal(registerBody({ name: 'A', email: 'nope', password: 'longenough', role: 'patient' }).field, 'reg-email');
+    assert.equal(registerBody({ name: 'A', email: 'a@b.co', password: 'longenough', role: 'admin' }).ok, false);
+    assert.deepEqual(registerBody({ name: ' Ann ', email: ' a@b.co ', password: 'longenough', role: 'family', phone: ' 555 ' }).body,
+      { email: 'a@b.co', password: 'longenough', display_name: 'Ann', role: 'family', phone: '555' });
+    assert.match(authErrorText(new ApiError('x', { status: 401 }), 'signin'), /not right/);
+    assert.match(authErrorText(new ApiError('x', { status: 409 }), 'register'), /already exists/);
+    """)
+
+
+@needs_node
+def test_js_notifications_chat_history_reports(js_tree: Path):
+    run_node(js_tree, """
+    import { mergeNotifications, unreadCount, notificationSpeech } from './js/notifications.js';
+    import { toolSummary, messageView, visibleTo } from './js/chat.js';
+    import { dropSummary, groupByDay } from './js/history.js';
+    import { doseSummary, canSkip } from './js/doses.js';
+    import { deliveryText, statsHighlights } from './js/reports.js';
+    import { summarizeDay } from './js/care/overview.js';
+    import { conversationLine } from './js/care/conversations.js';
+    import { scanErrorText } from './js/care/medications.js';
+    import { dayTitle } from './js/patient/schedule.js';
+
+    const n = (id, at, extra = {}) => ({ notification_id: id, created_at: at, kind: 'PILL_DROPPED', title: 'Pill dropped', body: 'Vitamin C dropped.', read_at: null, ...extra });
+    const merged = mergeNotifications([n(1, '2026-10-04T15:00:00+00:00')], [n(2, '2026-10-04T16:00:00.123456+00:00'), n(1, '2026-10-04T15:00:00+00:00', { read_at: 'x' })]);
+    assert.deepEqual(merged.map((x) => x.notification_id), [2, 1]);
+    assert.equal(merged[1].read_at, 'x');
+    assert.equal(unreadCount(merged), 1);
+    assert.equal(notificationSpeech(n(3, null)), 'Pill dropped. Vitamin C dropped.');
+    assert.equal(mergeNotifications([], Array.from({ length: 150 }, (_, i) => n(i, null))).length, 100);
+
+    const tool = { role: 'tool', tool_name: 'request_pill', tool_args: { container_number: 1 }, tool_result: { status: 'DENIED', message: 'Please wait until 9:05 AM.' } };
+    assert.equal(toolSummary(tool).text, 'Asked for a pill: not dropped. Please wait until 9:05 AM.');
+    assert.equal(toolSummary(tool, 'caregiver').text, 'Requested a pill: not dropped. Please wait until 9:05 AM.');
+    assert.equal(toolSummary({ role: 'tool', tool_name: 'get_patient_status', tool_result: {} }).text, 'Checked your pill status.');
+    assert.match(toolSummary({ role: 'tool', tool_name: 'confirm_pill_taken', tool_result: { ok: false, error: 'nothing to confirm' } }).text, /nothing to confirm/);
+    assert.equal(visibleTo({ role: 'tool', tool_name: 'get_patient_status' }, 'patient'), false);
+    assert.equal(visibleTo({ role: 'tool', tool_name: 'get_patient_status' }, 'caregiver'), true);
+    assert.equal(visibleTo({ role: 'tool', tool_name: 'request_pill' }, 'patient'), true);
+    assert.equal(messageView({ role: 'user', content: 'pill [unk] please', input_mode: 'voice' }).text, 'pill … please');
+    assert.equal(messageView({ role: 'user', content: 'hi', input_mode: 'voice' }, { audience: 'caregiver' }).who, 'Patient (spoken)');
+    assert.equal(messageView({ role: 'assistant', content: 'ok', model: 'rules' }, { audience: 'caregiver' }).who, 'Assistant (rules)');
+
+    const drop = { drop_id: 4, status: 'DENIED', reason: 'COOLDOWN', source: 'manual', medication_name: 'Vitamin C', container_number: 1,
+      requested_local: '2026-10-04T08:10:00-07:00', requested_at: '2026-10-04T15:10:00+00:00' };
+    const v = dropSummary(drop, { offsetMin: -420 });
+    assert.equal(v.title, 'Vitamin C — container 1');
+    assert.equal(v.time, '8:10 AM');
+    assert.equal(v.reason, 'Too soon after the last pill');
+    assert.equal(v.source, 'You pressed Drop pill');
+    assert.equal(dropSummary({ ...drop, status: 'UNCERTAIN', needs_review: true }).needsReview, true);
+    assert.equal(dropSummary({ ...drop, status: 'DROPPED', reason: null, pill_count_after: 11 }).pills, '11 pills left in the container afterwards');
+    const groups = groupByDay([drop, { ...drop, drop_id: 3, requested_local: '2026-10-03T21:00:00-07:00' }], -420, '2026-10-04T09:00:00-07:00');
+    assert.deepEqual(groups.map((g) => g.label), ['Today — Sunday 4 October 2026', 'Yesterday — Saturday 3 October 2026']);
+
+    const dose = { event_id: 9, status: 'DISPENSED', medication_name: 'Calcium', container_number: 2, scheduled_local: '2026-10-04T13:00:00-07:00',
+      dispensed_at: '2026-10-04T20:00:05+00:00', dispense_source: 'schedule' };
+    assert.equal(doseSummary(dose, { offsetMin: -420 }).detail, 'Dropped at 1:00 PM — dropped automatically at its time');
+    assert.equal(canSkip({ status: 'SCHEDULED' }) && canSkip({ status: 'DUE' }) && !canSkip(dose) && !canSkip({ status: 'MISSED' }), true);
+    assert.equal(doseSummary({ ...dose, slot: null, container_number: null }).container, 'No container assigned', 'null slot is not container 1');
+    assert.equal(dropSummary({ ...drop, slot: null, container_number: null }).title, 'Vitamin C');
+    assert.deepEqual(summarizeDay([{ status: 'DISPENSED' }, { status: 'TAKEN' }, { status: 'MISSED' }, { status: 'CANCELLED' }, { status: 'SCHEDULED' }, { status: 'HARDWARE_ERROR' }]),
+      { dropped: 2, missed: 1, skipped: 1, open: 1, problems: 1 });
+
+    assert.match(deliveryText({ status: 'SAVED', to_email: 'dr.lee@demo.tactidose' }), /^Saved as an email file to dr.lee@demo.tactidose\\. Email sending is not set up/);
+    assert.equal(deliveryText({ status: 'SENT', to_email: 'a@b.co' }), 'Sent to a@b.co.');
+    assert.equal(deliveryText({ status: 'FAILED', to_email: 'a@b.co', error: 'connection refused' }), 'Not sent to a@b.co: connection refused');
+    assert.deepEqual(statsHighlights({ adherence_rate: 0.857, scheduled_doses: 14, missed: 1 }), ['Adherence 86%', '14 scheduled doses', '1 missed dose']);
+    assert.deepEqual(statsHighlights(null), []);
+    assert.equal(conversationLine({ last_message_at: '2026-10-04T16:02:00+00:00', message_count: 6, channel: 'voice' }, '2026-10-04T10:00:00-07:00'),
+      'today at 9:02 AM · 6 messages · spoken');
+    assert.match(scanErrorText({ status: 503 }), /not set up/);
+    assert.equal(dayTitle('2026-10-05', '2026-10-04'), 'Tomorrow — Monday 5 October 2026');
+    assert.equal(dayTitle('2026-10-09', '2026-10-04'), 'Friday 9 October 2026');
+    """)
+
+
+@needs_node
+def test_js_demo_and_carousel_helpers(js_tree: Path):
+    run_node(js_tree, """
+    import { findScheduledDrop, maxId, waitFor, buildFlows } from './js/demo/flows.js';
+    import { faultLabel, healthValue, FAULT_LABELS } from './js/demo/labels.js';
+    import { polar, slotAngle, shortestDelta, sectorPath, pillsFromPhysical } from './js/carousel.js';
+    import { isHeartbeat } from './js/linelog.js';
+    import { describeCommand, snapshotRows } from './js/hwview.js';
+    import { createPrefs, DEFAULT_PREFS } from './js/prefs.js';
+
+    assert.equal(maxId([{ drop_id: 3 }, { drop_id: 9 }], 'drop_id'), 9);
+    assert.equal(maxId(null, 'drop_id'), 0);
+    const drops = [
+      { drop_id: 5, source: 'schedule', status: 'DROPPED', completed_at: 'x' },
+      { drop_id: 7, source: 'manual', status: 'DROPPED', completed_at: 'x' },
+      { drop_id: 8, source: 'schedule', status: 'UNCERTAIN', completed_at: null },
+      { drop_id: 9, source: 'schedule', status: 'DENIED', reason: 'ALREADY_SATISFIED', completed_at: null },
+    ];
+    assert.equal(findScheduledDrop(drops, 5).drop_id, 9, 'in-flight rows are not an outcome yet');
+    assert.equal(findScheduledDrop(drops, 9), null);
+    let n = 0;
+    assert.equal(await waitFor(async () => (++n >= 3 ? 'yes' : null), { timeoutMs: 1000, intervalMs: 1 }), 'yes');
+    assert.equal(await waitFor(async () => null, { timeoutMs: 5, intervalMs: 1 }), null);
+    const flows = buildFlows({ session: () => null, recent: () => [], renderClock() {}, skipCooldown() {}, notify() {} });
+    assert.deepEqual(flows.map((f) => f.id), ['A', 'B', 'C', 'D']);
+    for (const f of flows) assert.ok(f.steps.length >= 2 && f.steps.every((s) => s.label && typeof s.run === 'function'));
+
+    assert.deepEqual(faultLabel('motor_jam'), FAULT_LABELS.motor_jam);
+    assert.deepEqual(faultLabel('drop_sensor_dead'), ['Drop sensor dead', '']);
+    assert.equal(healthValue(false), 'off');
+    assert.equal(healthValue({ mode: 'sim' }), 'sim');
+    assert.equal(healthValue({ configured: false }), 'not set up');
+
+    assert.deepEqual(polar(100, 90), [100, 0]);
+    assert.equal(slotAngle(1, 3), 120);
+    assert.equal(shortestDelta(350, 10), 20);
+    assert.ok(sectorPath(0, 3).startsWith('M-96.99 -56A112 112 0 0 1 96.99 -56'), sectorPath(0, 3));
+    assert.deepEqual(pillsFromPhysical({ pills: [20, 19, 0] }, 3), [20, 19, 0]);
+    assert.deepEqual(pillsFromPhysical({ pill_counts: { 0: 5, 2: 1 } }, 3), [5, null, 1]);
+    assert.deepEqual(pillsFromPhysical({ containers: [{ slot: 1, pills: 7 }] }, 3), [null, 7, null]);
+    assert.deepEqual(pillsFromPhysical({}, 2), [null, null]);
+
+    assert.ok(isHeartbeat('PING') && isHeartbeat('OK STATUS state=READY') && !isHeartbeat('DROP_SLOT 1'));
+    assert.equal(describeCommand({ ok: false, result: { command: 'DROP_SLOT 1', ok: false, code: 'TIMEOUT', definitive: false } }),
+      'DROP_SLOT 1 → failed (TIMEOUT, uncertain)');
+    const rows = Object.fromEntries(snapshotRows({ connected: true, state: 'READY', proto: '1.1', drop_sensor: true, slot: 0 }));
+    assert.equal(rows['Protocol'], 'v1.1 (pill drop supported)');
+    assert.equal(rows['Drop sensor'], 'Present');
+
+    const store = new Map();
+    const storage = { getItem: (k) => store.get(k) ?? null, setItem: (k, v) => store.set(k, v) };
+    const prefs = createPrefs(storage);
+    assert.equal(prefs.get('speakReplies'), DEFAULT_PREFS.speakReplies);
+    const seen = [];
+    prefs.onChange((k, v) => seen.push([k, v]));
+    prefs.set('confirmDrops', false);
+    assert.equal(createPrefs(storage).get('confirmDrops'), false, 'persisted');
+    assert.deepEqual(seen, [['confirmDrops', false]]);
+    assert.throws(() => prefs.set('nope', true));
+    store.set('tactidose.prefs', '{broken');
+    assert.equal(createPrefs(storage).get('confirmDrops'), true, 'bad storage falls back to defaults');
     """)

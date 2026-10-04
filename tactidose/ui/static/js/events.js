@@ -1,34 +1,39 @@
 /**
- * Live updates from GET /api/events (Server-Sent Events).
+ * Live updates from GET /api/events (Server-Sent Events, filtered per signed-in user).
  *
  * Each SSE message is `event: <topic>` with `data: {"seq", "topic", "data", "ts"}`.
- * On connect the server replays its last 50 events, so after a reconnect the same
- * events can arrive twice: they are de-duplicated by (seq, ts) — ts makes the key
+ * On connect the server replays the last 50 permitted events, so after a reconnect the
+ * same events can arrive twice: they are de-duplicated by (seq, ts) — ts makes the key
  * survive a server restart, where seq starts again from 1.
  *
- * Reconnection is managed here (exponential backoff with jitter) instead of relying
- * on the browser's built-in retry, which gives up after a non-200 response.
- * Handlers receive (data, envelope, meta) where meta.replayed is true for events
- * that were replayed from history right after connecting (so pages can update
- * their view without re-announcing stale messages).
+ * Reconnection is managed here (exponential backoff with jitter) instead of relying on
+ * the browser's built-in retry, which gives up after a non-200 response (for example a
+ * 401 once the session has ended — see session.watchSession()).
+ * Handlers receive (data, envelope, meta) where meta.replayed is true for events that
+ * were replayed from history right after connecting (so pages can update their view
+ * without re-announcing stale messages).
  */
 
-/** Topics published by tactidose.core.bus.Topic. */
-export const KNOWN_TOPICS = Object.freeze([
+/** Topics of tactidose.core.bus.Topic used by the portals. */
+export const PORTAL_TOPICS = Object.freeze([
+  'notification',
+  'drop.updated',
+  'patient.status',
+  'agent.message',
+  'report.updated',
   'device.state',
+]);
+
+/** Extra topics sent in demo mode to users linked to the device's patient. */
+export const DEMO_TOPICS = Object.freeze([
   'device.line',
   'device.event',
   'sim.physical',
-  'assistant.spoken',
-  'assistant.intent',
-  'assistant.state',
-  'voice.heard',
-  'voice.status',
-  'dose.updated',
-  'data.changed',
   'clock.changed',
   'system.notice',
 ]);
+
+export const KNOWN_TOPICS = Object.freeze([...PORTAL_TOPICS, ...DEMO_TOPICS]);
 
 /** Pseudo-topic dispatched (with no data) when the stream re-opens after a drop. */
 export const RECONNECTED = 'stream.reconnected';
@@ -62,7 +67,7 @@ export class EventStream {
     random = null,
   } = {}) {
     this.url = url;
-    this._factory = eventSourceFactory || ((u) => new EventSource(u));
+    this._factory = eventSourceFactory || ((u) => new EventSource(u, { withCredentials: true }));
     this._minDelay = minDelayMs;
     this._maxDelay = maxDelayMs;
     this._timers = timers || { setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout: (t) => clearTimeout(t) };
@@ -76,6 +81,7 @@ export class EventStream {
     this._es = null;
     this._timer = null;
     this._attempt = 0;
+    this._failures = 0;
     this._openedAt = 0;
     this._everOpened = false;
     this._closed = false;
@@ -85,6 +91,11 @@ export class EventStream {
 
   get status() {
     return this._status;
+  }
+
+  /** Consecutive connection failures since the last successful open. */
+  get failures() {
+    return this._failures;
   }
 
   /** Subscribe to a topic ('*' = every topic). Returns an unsubscribe function. */
@@ -164,6 +175,7 @@ export class EventStream {
       es = this._factory(this.url);
     } catch (err) {
       console.error('TactiDose events: could not open stream', err);
+      this._failures += 1;
       this._scheduleReconnect();
       return;
     }
@@ -171,6 +183,7 @@ export class EventStream {
     es.addEventListener('open', () => {
       if (this._es !== es) return;
       this._attempt = 0;
+      this._failures = 0;
       this._openedAt = this._now();
       this._setStatus('open');
       if (this._everOpened) this._dispatch(RECONNECTED, null, null, { replayed: false });
@@ -178,6 +191,7 @@ export class EventStream {
     });
     es.addEventListener('error', () => {
       if (this._es !== es || this._closed) return;
+      this._failures += 1;
       this._dropSource();
       this._setStatus('reconnecting');
       this._scheduleReconnect();

@@ -1,25 +1,31 @@
-"""Schedules -> dose events (materialize) and time-driven transitions (DUE / MISSED).
+"""Schedules -> dose events (materialize) and time-driven transitions (DUE / MISSED), v2.
 
-A ``Schedule`` is a local wall-clock time ("HH:MM", device timezone) on every day
-(DAILY) or on listed weekdays (WEEKLY). :meth:`Scheduler.materialize` turns it into
-one ``DoseEvent`` per local date, converting local time to UTC with the clock's
-zone (DST-correct: a time skipped by spring-forward fires one hour later, an
-ambiguous fall-back time fires once, at its first occurrence).
+A ``Schedule`` is a local wall-clock time ("HH:MM", device timezone) on every day (DAILY) or
+on listed weekdays (WEEKLY). :meth:`Scheduler.materialize` turns it into one ``DoseEvent`` per
+local date on the configured device, for the patient that device is bound to, converting local
+time to UTC with the clock's zone (DST-correct: a time skipped by spring-forward fires one hour
+later, an ambiguous fall-back time fires once, at its first occurrence).
 
 Rules that keep the event log truthful:
 
-* no backfill — an occurrence whose window closed before the schedule was
-  created (or last redefined) is never generated, so new schedules do not
-  fabricate missed doses;
-* one dose per schedule per local day — if the schedule already has an
-  accessed (or possibly accessed) event on that day, an edited time does not
-  produce a second one;
-* idempotent inserts (unique ``(schedule_id, scheduled_at)``; concurrent
-  inserts are tolerated).
+* no backfill — an occurrence whose window closed before the schedule was created (or last
+  redefined) is never generated, so new schedules do not fabricate missed doses;
+* one dose per schedule per local day — if the schedule already has a dropped (or possibly
+  dropped) event on that day, an edited time does not produce a second one;
+* idempotent inserts (unique ``(schedule_id, scheduled_at)``; concurrent inserts are tolerated).
 
-This module also owns the shared dose-transition helpers (compare-and-set
-update, outbox + audit log in the same transaction, bus payloads) used by
-``catalog`` and ``dispense``.
+:meth:`Scheduler.refresh` moves SCHEDULED -> DUE when the window opens and open doses ->
+MISSED when it closes; every MISSED transition stores a MISSED_DOSE notification for the
+patient and their caregivers (through the optional ``notifications`` dependency, in the same
+transaction) and publishes ``Topic.PATIENT_STATUS``. Dropping is not done here:
+``DropService.run_scheduled_drops`` does it right after each tick.
+
+Only doctor/family may edit schedules (the API enforces the role; ``patient_id`` scopes every
+CRUD call to one patient). Edits keep still-matching occurrences, delete stale untouched future
+events, cancel other stale open ones and reset ``Schedule.created_at``.
+
+This module also owns the shared dose-transition helpers (compare-and-set update, outbox +
+audit log in the same transaction, bus payloads) used by ``catalog`` and ``drops``.
 """
 
 from __future__ import annotations
@@ -46,13 +52,15 @@ from tactidose.db.models import (
     Frequency,
     LogCategory,
     Medication,
+    NotificationKind,
     Schedule,
 )
 from tactidose.db.outbox import enqueue_adherence
 from tactidose.db.session import Database
-from tactidose.medication.compartments import get_device, iso
+from tactidose.medication.compartments import assigned_slots, get_device, iso
 from tactidose.medication.errors import NotFoundError, ValidationError
-from tactidose.medication.safety import dispense_window, to_dose_info
+from tactidose.medication.notifications import PendingNotifications, clock_label
+from tactidose.medication.safety import dispense_window, display_slot, to_dose_info
 
 log = logging.getLogger(__name__)
 
@@ -61,11 +69,13 @@ __all__ = [
     "cas_transition",
     "dose_update_payload",
     "is_id",
+    "missed_dose_notice",
     "occurrence_for",
     "parse_days",
     "parse_frequency",
     "parse_time_of_day",
     "publish_all",
+    "publish_patient_status",
     "record_dose_change",
     "schedule_days",
     "schedule_to_dict",
@@ -76,7 +86,7 @@ _DAY_NAMES = {
     "MONDAY": "MON", "TUESDAY": "TUE", "WEDNESDAY": "WED", "THURSDAY": "THU",
     "FRIDAY": "FRI", "SATURDAY": "SAT", "SUNDAY": "SUN",
 }
-#: Statuses that mean the compartment was (or may have been) opened for an event.
+#: Statuses that mean a pill was (or may have been) dropped for an event.
 _DAY_CONSUMED = (DoseStatus.DISPENSING.value, DoseStatus.DISPENSED.value, DoseStatus.TAKEN.value)
 _RECONCILE_STATUSES = (DoseStatus.SCHEDULED.value, DoseStatus.DUE.value, DoseStatus.HARDWARE_ERROR.value)
 _UPDATABLE_FIELDS = frozenset({"time_of_day", "frequency", "days_of_week", "active"})
@@ -162,11 +172,14 @@ def schedule_to_dict(sched: Schedule) -> dict[str, Any]:
         "schedule_id": sched.schedule_id,
         "medication_id": sched.medication_id,
         "medication_name": med.name if med is not None else None,
+        "patient_id": med.user_id if med is not None else None,
         "time_of_day": sched.time_of_day,
         "frequency": sched.frequency,
         "days_of_week": schedule_days(sched),
         "active": bool(sched.active),
+        "created_by_user_id": sched.created_by_user_id,
         "created_at": iso(sched.created_at),
+        "updated_at": iso(sched.updated_at),
     }
 
 
@@ -183,8 +196,8 @@ def cas_transition(
 ) -> DoseEvent | None:
     """Compare-and-set: ``UPDATE dose_events SET ... WHERE event_id=:id AND status IN :expected``.
 
-    Returns the reloaded event if exactly one row changed, else None (someone
-    else changed the event first — the caller must not proceed).
+    Returns the reloaded event if exactly one row changed, else None (someone else changed the
+    event first — the caller must not proceed).
     """
     expected_values = [expected] if isinstance(expected, str) else list(expected)
     stmt = update(DoseEvent).where(DoseEvent.event_id == event_id, DoseEvent.status.in_(expected_values))
@@ -215,6 +228,7 @@ def record_dose_change(
         action,
         {"status": event.status, **(detail or {})},
         event_id=event.event_id,
+        at=clock.now(),
     )
 
 
@@ -224,11 +238,34 @@ def dose_update_payload(
     """``Topic.DOSE_UPDATED`` payload (built inside the session, published after commit)."""
     return {
         "event_id": event.event_id,
+        "patient_id": event.user_id,
         "label": event.label,
         "status": event.status,
         "previous": previous,
         "change": action,
         "dose": to_dose_info(event, clock, slot=slot).to_dict(),
+    }
+
+
+def missed_dose_notice(event: DoseEvent, clock: Clock, slot: int | None = None) -> dict[str, Any]:
+    """MISSED_DOSE notification fields (patient + caregivers)."""
+    med = event.medication
+    name = med.name if med is not None else "a medication"
+    when = clock_label(clock.to_local(event.scheduled_at))
+    return {
+        "patient_id": event.user_id,
+        "kind": NotificationKind.MISSED_DOSE.value,
+        "title": "Missed dose",
+        "body": f"The {when} dose of {name} was not dropped.",
+        "data": {
+            "dose_event_id": event.event_id,
+            "medication_id": event.medication_id,
+            "scheduled_at": iso(event.scheduled_at),
+            "slot": slot,
+            "container_number": None if slot is None else slot + 1,
+        },
+        "to_patient": True,
+        "to_caregivers": True,
     }
 
 
@@ -239,15 +276,33 @@ def publish_all(bus: EventBus | None, topic: str, payloads: Iterable[dict[str, A
         bus.publish(topic, payload)
 
 
+def publish_patient_status(bus: EventBus | None, patients: dict[int, str]) -> None:
+    """``Topic.PATIENT_STATUS`` refetch hints (one per patient)."""
+    if bus is None:
+        return
+    for patient_id, reason in patients.items():
+        bus.publish(Topic.PATIENT_STATUS, {"patient_id": patient_id, "reason": reason})
+
+
 # --------------------------------------------------------------------------- service
 
 
 class Scheduler:
-    def __init__(self, db: Database, clock: Clock, settings: Settings, bus: EventBus | None = None) -> None:
+    def __init__(
+        self,
+        db: Database,
+        clock: Clock,
+        settings: Settings,
+        bus: EventBus | None = None,
+        *,
+        notifications: Any | None = None,
+    ) -> None:
         self.db = db
         self.clock = clock
         self.settings = settings
         self.bus = bus
+        #: NotificationServiceAPI (optional): MISSED_DOSE notifications.
+        self.notifications = notifications
         self._tick_lock = threading.Lock()
 
     # ------------------------------------------------------------------ periodic work
@@ -304,15 +359,14 @@ class Scheduler:
                         continue
                     wanted.append((d, at))
                 if wanted:
-                    payloads.extend(self._insert_missing(s, sched, wanted, now))
+                    payloads.extend(self._insert_missing(s, sched, wanted))
         publish_all(self.bus, Topic.DOSE_UPDATED, payloads)
         if payloads:
             log.info("materialized %d dose event(s)", len(payloads))
+            publish_patient_status(self.bus, {p["patient_id"]: "dose" for p in payloads})
         return len(payloads)
 
-    def _insert_missing(
-        self, s: Session, sched: Schedule, wanted: list[tuple[date, datetime]], now: datetime
-    ) -> list[dict[str, Any]]:
+    def _insert_missing(self, s: Session, sched: Schedule, wanted: list[tuple[date, datetime]]) -> list[dict[str, Any]]:
         lo = wanted[0][1] - timedelta(days=1)
         hi = wanted[-1][1] + timedelta(days=1)
         existing = s.scalars(
@@ -334,7 +388,7 @@ class Scheduler:
             if at in existing_times:
                 continue
             if d in consumed_days:
-                # The schedule's time was edited after today's dose was accessed: one per day.
+                # The schedule's time was edited after today's dose was dropped: one per day.
                 continue
             ev = DoseEvent(
                 schedule_id=sched.schedule_id,
@@ -355,15 +409,19 @@ class Scheduler:
             log_event(
                 s, self.settings.device_id, LogCategory.DOSE, "DOSE_MATERIALIZED",
                 {"schedule_id": sched.schedule_id, "scheduled_at": at.isoformat()}, event_id=ev.event_id,
+                at=self.clock.now(),
             )
             out.append(dose_update_payload(ev, self.clock, previous=None, action="created"))
         return out
 
     def refresh(self) -> int:
-        """SCHEDULED -> DUE when the window opens; open/failed doses -> MISSED when it closes."""
+        """SCHEDULED -> DUE when the window opens; open/failed doses -> MISSED when it closes
+        (+ MISSED_DOSE notification). HARDWARE_ERROR doses under review stay locked."""
         now = self.clock.now()
         opens_by = now + timedelta(minutes=self.settings.dose_early_minutes)
         payloads: list[dict[str, Any]] = []
+        patients: dict[int, str] = {}
+        notes = PendingNotifications(self.notifications)
         with self.db.session() as s:
             rows = s.scalars(
                 select(DoseEvent)
@@ -375,6 +433,7 @@ class Scheduler:
                 )
                 .order_by(DoseEvent.scheduled_at, DoseEvent.event_id)
             ).all()
+            slots: dict[int, tuple[int, int]] | None = None
             for ev in rows:
                 start, end = dispense_window(ev, self.settings)
                 previous = ev.status
@@ -383,7 +442,7 @@ class Scheduler:
                         continue  # uncertain outcome: stays locked for caregiver review
                     changed = cas_transition(
                         s, ev.event_id, previous,
-                        {"status": DoseStatus.MISSED.value, "missed_at": now},
+                        {"status": DoseStatus.MISSED.value, "missed_at": now, "next_attempt_at": None},
                         require_no_review=previous == DoseStatus.HARDWARE_ERROR.value,
                     )
                     action = "MISSED"
@@ -393,16 +452,26 @@ class Scheduler:
                 else:
                     continue
                 if changed is None:
-                    continue  # changed concurrently (e.g. claimed for dispensing)
+                    continue  # changed concurrently (e.g. claimed for a drop)
                 record_dose_change(s, changed, settings=self.settings, clock=self.clock,
                                    action=f"DOSE_{action}", detail={"previous": previous})
                 payloads.append(dose_update_payload(changed, self.clock, previous=previous, action=action.lower()))
+                if action == "MISSED":
+                    if slots is None:
+                        slots = assigned_slots(s, self.settings)
+                    notes.add(s, **missed_dose_notice(changed, self.clock, display_slot(changed, slots)))
+                    patients[changed.user_id] = "missed"
+                else:
+                    patients.setdefault(changed.user_id, "dose")
+        notes.deliver()
         publish_all(self.bus, Topic.DOSE_UPDATED, payloads)
+        publish_patient_status(self.bus, patients)
         return len(payloads)
 
-    # ------------------------------------------------------------------ schedule CRUD
-    def list_schedules(self, include_inactive: bool = False) -> list[dict[str, Any]]:
-        """API.md ``Schedule`` dicts for this device's user (active only by default)."""
+    # ------------------------------------------------------------------ schedule CRUD (doctor/family)
+    def list_schedules(self, include_inactive: bool = False, *, patient_id: int | None = None) -> list[dict[str, Any]]:
+        """API.md ``Schedule`` dicts of one patient (default: the device's patient), active only
+        by default."""
         with self.db.session() as s:
             q = (
                 select(Schedule)
@@ -410,19 +479,19 @@ class Scheduler:
                 .options(selectinload(Schedule.medication))
                 .order_by(Schedule.time_of_day, Schedule.schedule_id)
             )
-            dev = get_device(s, self.settings)
-            if dev is not None:
-                q = q.where(Medication.user_id == dev.user_id)
+            owner = patient_id
+            if owner is None:
+                dev = get_device(s, self.settings)
+                owner = dev.user_id if dev is not None else None
+            if owner is not None:
+                q = q.where(Medication.user_id == owner)
             if not include_inactive:
                 q = q.where(Schedule.active.is_(True))
             return [schedule_to_dict(sc) for sc in s.scalars(q).all()]
 
-    def get_schedule(self, schedule_id: int) -> dict[str, Any]:
+    def get_schedule(self, schedule_id: int, *, patient_id: int | None = None) -> dict[str, Any]:
         with self.db.session() as s:
-            sched = s.get(Schedule, schedule_id)
-            if sched is None:
-                raise NotFoundError(f"Schedule {schedule_id} not found.")
-            return schedule_to_dict(sched)
+            return schedule_to_dict(self._get(s, schedule_id, patient_id))
 
     def create_schedule(
         self,
@@ -430,22 +499,28 @@ class Scheduler:
         time_of_day: str,
         frequency: str = "DAILY",
         days_of_week: Iterable[str] | str | None = None,
+        *,
+        created_by_user_id: int | None = None,
+        patient_id: int | None = None,
     ) -> dict[str, Any]:
         tod = parse_time_of_day(time_of_day)
         freq = parse_frequency(frequency)
         days = parse_days(days_of_week, freq)
+        if created_by_user_id is not None and not is_id(created_by_user_id):
+            raise ValidationError("created_by_user_id must be a user id.")
         now = self.clock.now()
         with self.db.session() as s:
             med = s.get(Medication, medication_id) if is_id(medication_id) else None
-            if med is None:
+            if med is None or (patient_id is not None and med.user_id != patient_id):
                 raise NotFoundError(f"Medication {medication_id} not found.")
-            self._require_schedulable(s, med)
+            self._require_schedulable(s, med, patient_id)
             sched = Schedule(
                 medication_id=med.medication_id,
                 time_of_day=tod,
                 frequency=freq,
                 days_of_week=",".join(days),
                 active=True,
+                created_by_user_id=created_by_user_id,
                 created_at=now,
                 updated_at=now,
             )
@@ -453,13 +528,15 @@ class Scheduler:
             s.flush()
             log_event(s, self.settings.device_id, LogCategory.ADMIN, "SCHEDULE_CREATED",
                       {"schedule_id": sched.schedule_id, "medication_id": med.medication_id,
-                       "time_of_day": tod, "frequency": freq, "days_of_week": days})
+                       "time_of_day": tod, "frequency": freq, "days_of_week": days,
+                       "by_user_id": created_by_user_id}, at=now)
             out = schedule_to_dict(sched)
-        self._publish_data(out["schedule_id"])
+        self._publish_data(out["schedule_id"], out["patient_id"])
         self.tick()
         return out
 
-    def update_schedule(self, schedule_id: int, **fields: Any) -> dict[str, Any]:
+    def update_schedule(self, schedule_id: int, *, patient_id: int | None = None,
+                        by_user_id: int | None = None, **fields: Any) -> dict[str, Any]:
         unknown = set(fields) - _UPDATABLE_FIELDS
         if unknown:
             raise ValidationError(f"Unknown schedule field(s): {', '.join(sorted(unknown))}.")
@@ -468,16 +545,14 @@ class Scheduler:
         now = self.clock.now()
         dose_payloads: list[dict[str, Any]] = []
         with self.db.session() as s:
-            sched = s.get(Schedule, schedule_id) if is_id(schedule_id) else None
-            if sched is None:
-                raise NotFoundError(f"Schedule {schedule_id} not found.")
+            sched = self._get(s, schedule_id, patient_id)
             tod = parse_time_of_day(fields["time_of_day"]) if "time_of_day" in fields else sched.time_of_day
             freq = parse_frequency(fields["frequency"]) if "frequency" in fields else sched.frequency
             days = parse_days(fields["days_of_week"] if "days_of_week" in fields else schedule_days(sched), freq)
             active = fields.get("active", bool(sched.active))
             if active:
                 # Deactivating is always allowed (fail safe); anything that keeps it active is not.
-                self._require_schedulable(s, sched.medication)
+                self._require_schedulable(s, sched.medication, patient_id)
             redefined = (tod, freq, days) != (sched.time_of_day, sched.frequency, schedule_days(sched))
             reactivated = active and not sched.active
             if not (redefined or reactivated or active != bool(sched.active)):
@@ -493,27 +568,43 @@ class Scheduler:
             log_event(s, self.settings.device_id, LogCategory.ADMIN,
                       "SCHEDULE_UPDATED" if active else "SCHEDULE_DEACTIVATED",
                       {"schedule_id": sched.schedule_id, "time_of_day": tod, "frequency": freq,
-                       "days_of_week": days, "active": active, "events_changed": len(dose_payloads)})
+                       "days_of_week": days, "active": active, "events_changed": len(dose_payloads),
+                       "by_user_id": by_user_id}, at=now)
             out = schedule_to_dict(sched)
         publish_all(self.bus, Topic.DOSE_UPDATED, dose_payloads)
-        self._publish_data(schedule_id)
+        self._publish_data(schedule_id, out["patient_id"])
         self.tick()
         return out
 
-    def deactivate_schedule(self, schedule_id: int) -> None:
-        self.update_schedule(schedule_id, active=False)
+    def deactivate_schedule(self, schedule_id: int, *, patient_id: int | None = None,
+                            by_user_id: int | None = None) -> None:
+        self.update_schedule(schedule_id, patient_id=patient_id, by_user_id=by_user_id, active=False)
+
+    def delete_schedule(self, schedule_id: int, *, patient_id: int | None = None,
+                        by_user_id: int | None = None) -> None:
+        """``DELETE …/schedules/{sid}``: a soft delete (deactivation) — dose history keeps its schedule."""
+        self.deactivate_schedule(schedule_id, patient_id=patient_id, by_user_id=by_user_id)
 
     # ------------------------------------------------------------------ internals
-    def _require_schedulable(self, s: Session, med: Medication | None) -> None:
+    @staticmethod
+    def _get(s: Session, schedule_id: int, patient_id: int | None) -> Schedule:
+        sched = s.get(Schedule, schedule_id) if is_id(schedule_id) else None
+        if sched is None or (patient_id is not None and (
+                sched.medication is None or sched.medication.user_id != patient_id)):
+            raise NotFoundError(f"Schedule {schedule_id} not found.")
+        return sched
+
+    def _require_schedulable(self, s: Session, med: Medication | None, patient_id: int | None) -> None:
         if med is None:
             raise NotFoundError("Medication not found.")
         if not med.active:
             raise ValidationError("This medication is archived; it cannot be scheduled.")
         if not med.confirmed_by_user:
             raise ValidationError("Only medications confirmed by a person can be scheduled.")
-        dev = get_device(s, self.settings)
-        if dev is not None and med.user_id != dev.user_id:
-            raise ValidationError("That medication belongs to a different user.")
+        if patient_id is None:
+            dev = get_device(s, self.settings)
+            if dev is not None and med.user_id != dev.user_id:
+                raise ValidationError("That medication belongs to a different patient.")
 
     def _is_valid_occurrence(self, sched: Schedule, at: datetime) -> bool:
         local_date = self.clock.to_local(at).date()
@@ -522,10 +613,10 @@ class Scheduler:
     def _reconcile_events(self, s: Session, sched: Schedule, now: datetime) -> list[dict[str, Any]]:
         """After a schedule edit: drop/cancel open events that no longer match the schedule.
 
-        Events still matching the (active) schedule are kept. Stale, never-touched events
-        whose window has not opened are deleted (they never left SCHEDULED, so nothing was
-        reported); other stale open events are CANCELLED. Accessed, in-flight,
-        closed-window and review-locked events are never touched.
+        Events still matching the (active) schedule are kept. Stale, never-touched events whose
+        window has not opened are deleted (they never left SCHEDULED, so nothing was reported);
+        other stale open events are CANCELLED. Dropped, in-flight, closed-window and
+        review-locked events are never touched.
         """
         payloads: list[dict[str, Any]] = []
         rows = s.scalars(
@@ -547,7 +638,7 @@ class Scheduler:
                 payload = dose_update_payload(ev, self.clock, previous=ev.status, action="deleted")
                 payload["status"] = None
                 log_event(s, self.settings.device_id, LogCategory.DOSE, "DOSE_UNSCHEDULED",
-                          {"schedule_id": sched.schedule_id}, event_id=ev.event_id)
+                          {"schedule_id": sched.schedule_id}, event_id=ev.event_id, at=now)
                 s.delete(ev)
                 payloads.append(payload)
                 continue
@@ -555,7 +646,7 @@ class Scheduler:
             changed = cas_transition(
                 s, ev.event_id, previous,
                 {"status": DoseStatus.CANCELLED.value, "cancelled_at": now,
-                 "review_note": "schedule changed"},
+                 "review_note": "schedule changed", "next_attempt_at": None},
             )
             if changed is None:
                 continue
@@ -565,6 +656,9 @@ class Scheduler:
         s.flush()
         return payloads
 
-    def _publish_data(self, schedule_id: int | None) -> None:
-        if self.bus is not None:
-            self.bus.publish(Topic.DATA_CHANGED, {"entity": "schedule", "id": schedule_id})
+    def _publish_data(self, schedule_id: int | None, patient_id: int | None) -> None:
+        if self.bus is None:
+            return
+        self.bus.publish(Topic.DATA_CHANGED, {"entity": "schedule", "id": schedule_id, "patient_id": patient_id})
+        if patient_id is not None:
+            self.bus.publish(Topic.PATIENT_STATUS, {"patient_id": patient_id, "reason": "schedule"})

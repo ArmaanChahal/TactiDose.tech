@@ -6,13 +6,18 @@
  * The core (TactiDoseCore) never touches a GPIO. It talks to this interface, which has two
  * implementations:
  *   - ArduinoHal (ArduinoHal.h/.cpp): AccelStepper + ESP32Servo on a real ESP32.
- *   - FakeHal    (firmware/native/): simulated carousel physics for the conformance harness.
+ *   - FakeHal    (firmware/native/): simulated mechanism physics for the conformance harness.
  *
  * Conventions
- *   - Positions are motor (micro)steps, absolute, AccelStepper semantics.
- *   - Inputs are LOGICAL: homeSensorActive() is true while the sensor detects home and
- *     buttonPressed() is true while the button is held. Electrical polarity (active-low,
- *     pull-ups) is handled inside the HAL; debouncing is done by the core.
+ *   - Positions are motor (micro)steps, absolute, AccelStepper semantics. Builds without a stepper
+ *     (MECHANISM_PER_CONTAINER_SERVO) implement the stepper calls as no-ops; the core never moves
+ *     the stepper in that mechanism.
+ *   - Release actuators ("gates") are numbered. MECHANISM_CAROUSEL has one gate servo (0) at the
+ *     chute; MECHANISM_PER_CONTAINER_SERVO has one servo per container (gate n = container n = slot n).
+ *   - Inputs are LOGICAL: homeSensorActive() is true while the sensor detects home,
+ *     buttonPressed() while the button is held, dropSensorActive() while the beam is interrupted.
+ *     Electrical polarity (active-low, pull-ups) is handled inside the HAL; debouncing is done by
+ *     the core.
  *   - No call may block. The core calls stepperRun() on every loop() pass.
  */
 #ifndef TACTIDOSE_HAL_H
@@ -46,12 +51,18 @@ class Hal {
   /* Energise (true) or release (false) the motor driver / coils. */
   virtual void stepperEnable(bool on) = 0;
 
-  /* ---- access-gate servo ---- */
-  virtual void servoWrite(uint8_t degrees) = 0;
+  /* ---- release actuators ("gates": access gate / trapdoor / dispensing-wheel servos) ---- */
+  /* Command gate `gate` (numbering above) to `degrees`. */
+  virtual void servoWrite(uint8_t gate, uint8_t degrees) = 0;
 
   /* ---- inputs (logical level, not debounced) ---- */
   virtual bool homeSensorActive() = 0;
   virtual bool buttonPressed(Button button) = 0;
+  /* Drop sensor (optional IR break-beam across the output chute): true while the beam is
+   * interrupted, and also once for an interruption that started and ended since the previous call
+   * (a falling pill breaks the beam for a few ms only; ArduinoHal latches it in an interrupt).
+   * The core samples it only during a DROP_SLOT release and only if CoreConfig::hasDropSensor. */
+  virtual bool dropSensorActive() = 0;
 
   /* ---- serial link to the host ---- */
   /* Next received byte, or -1 if none is waiting. */

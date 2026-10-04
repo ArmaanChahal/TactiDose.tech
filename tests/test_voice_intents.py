@@ -50,6 +50,7 @@ CASES: list[tuple[str, Intent, bool]] = [
     ("taken?", C, False),                      # typed question
     ("are you done?", C, False),
     ("what's next", C, False),
+    ("did my pill drop?", C, False),           # v2: a question, never a drop
     # ---------------------------------------------------------------- DISPENSE
     ("Dispense.", D, False),
     ("dispense", D, False),
@@ -73,6 +74,9 @@ CASES: list[tuple[str, Intent, bool]] = [
     ("unlock", D, False),
     ("dispensed", D, False),                   # ASR variant
     ("tactidose dispense", D, False),
+    ("drop my pill", D, False),                # v2
+    ("drop it", D, False),
+    ("please drop my vitamin", D, False),
     # ---------------------------------------------------------------- CONFIRM_TAKEN
     ("Taken.", T, False),
     ("taken", T, False),
@@ -154,6 +158,8 @@ CASES: list[tuple[str, Intent, bool]] = [
     ("I can't take it", U, True),
     ("no I took it", U, True),                 # ambiguous correction: fail closed
     ("no", U, True),
+    ("don't drop it", U, True),                # v2
+    ("do not drop my pill", U, True),
     # ---------------------------------------------------------------- other UNKNOWN
     ("", U, False),
     ("   ", U, False),
@@ -171,6 +177,7 @@ CASES: list[tuple[str, Intent, bool]] = [
     ("dispensary", U, False),
     ("stopwatch", U, False),
     ("reopen", U, False),
+    ("I dropped my glasses yesterday", U, False),
 ]
 
 

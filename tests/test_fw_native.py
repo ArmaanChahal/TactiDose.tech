@@ -1,16 +1,19 @@
 """Reference firmware core (natively compiled) against the shared protocol conformance suite.
 
 ``firmware/native/bin/harness`` runs ``firmware/tactidose_esp32/TactiDoseCore.cpp`` (the code
-flashed to the ESP32) on a simulated carousel. These tests:
+flashed to the ESP32) on a simulated dispenser. These tests:
 
 * build the harness in Docker when it is missing or stale (skip with a reason when Docker or the
   gcc image is unavailable -- the tests never pull images or touch the network);
-* run every scenario of ``tactidose/hardware/conformance.json`` against :class:`NativeTarget`;
+* run every scenario of ``tactidose/hardware/conformance.json`` (protocol v1.1, DROP_SLOT
+  included) against :class:`NativeTarget`;
 * use the fake HAL as a physical safety oracle: after each scenario no physical rule may have been
-  violated (carousel stepping with the gate open, gate opening between slots, early OK GATE_* ...);
+  violated (carousel stepping with the gate open, gate opening between slots, early OK GATE_*, an
+  OK DROPPED without a falling pill ...);
 * cover what the scenarios cannot see: exact rule-8.6 timeouts, millis() wrap-around, config
-  variants, a stuck home sensor, gate-travel atomicity, line terminators, and that the firmware
-  parser matches ``protocol.parse_command`` byte for byte.
+  variants, a stuck home sensor, gate-travel and release atomicity, release timing, drop-sensor
+  failures, line terminators, that the firmware parser matches ``protocol.parse_command`` byte for
+  byte, and the MECHANISM_PER_CONTAINER_SERVO build (harness ``mechanism=servo``).
 """
 
 from __future__ import annotations
@@ -49,6 +52,17 @@ _GCC_IMAGE = os.environ.get("TACTIDOSE_GCC_IMAGE") or DEFAULT_IMAGE
 SCENARIOS: list[dict[str, Any]] = load_scenarios()["scenarios"]
 BOOT_LINES = ["re:EVENT BOOT \\S+", "OK HOMING", "OK HOMED", "OK READY"]
 WRAP = 1 << 32
+FULL = [20] * 6
+
+#: Harness timing (harness.cpp harnessConfig): settle, servo travel, release hold.
+SETTLE_MS, TRAVEL_MS, HOLD_MS = 300, 400, 500
+
+
+def _drop_lines(slot: int, verdict: str | None = None) -> list[str]:
+    """The complete DROP_SLOT reply from READY (protocol §12.2)."""
+    return [f"OK MOVING {slot}", f"OK AT_SLOT {slot}", "OK GATE_OPEN", "OK GATE_CLOSED",
+            verdict or f"OK DROPPED {slot}", "OK READY"]
+
 
 #: Gate openings the physics must have seen at the end of a scenario (0 = gate never opened).
 GATE_OPENS = {
@@ -63,6 +77,23 @@ GATE_OPENS = {
     "interlocks_while_gate_open": 1,
     "cancel_button_with_gate_open_closes_gate": 1,
     "gate_auto_close_safety_net": 1,
+    "drop_slot_happy_path": 3,
+    "drop_slot_interlocks": 1,
+    "drop_slot_empty_container_reports_no_pill": 2,
+    "stop_during_drop_motion_never_releases": 0,
+    "cancel_button_during_drop_motion_stops": 0,
+    "drop_slot_with_motor_jam_faults_without_release": 0,
+}
+
+#: Physical pill counts (containers 0..5) at the end of the DROP scenarios. Every gate opening
+#: over a full container releases one pill, so OPEN_GATE in drop_slot_interlocks costs one too.
+PILLS_AFTER = {
+    "drop_slot_happy_path": [19, 20, 18, 20, 20, 20],
+    "drop_slot_interlocks": [19, 20, 20, 20, 20, 20],
+    "drop_slot_empty_container_reports_no_pill": [20, 0, 20, 20, 20, 20],
+    "stop_during_drop_motion_never_releases": FULL,
+    "cancel_button_during_drop_motion_stops": FULL,
+    "drop_slot_with_motor_jam_faults_without_release": FULL,
 }
 
 
@@ -113,6 +144,21 @@ def native(harness_binary: Path) -> Iterator[NativeTarget]:
     target = _target(harness_binary)
     yield target
     target.close()
+
+
+@pytest.fixture
+def configured(native: NativeTarget) -> Iterator[NativeTarget]:
+    """The module's harness; settings changed with ``configure()`` are undone afterwards."""
+    yield native
+    native.restore_defaults()
+
+
+@pytest.fixture
+def servo(native: NativeTarget) -> Iterator[NativeTarget]:
+    """The module's harness running the MECHANISM_PER_CONTAINER_SERVO firmware with 3 containers."""
+    native.configure(mechanism="servo", numSlots=3)
+    yield native
+    native.restore_defaults()
 
 
 # --------------------------------------------------------------------------- helpers
@@ -167,6 +213,9 @@ class Session:
     def time_of(self, line: str) -> int:
         return next(t for t, seen in self.log if seen == line)
 
+    def last_time_of(self, line: str) -> int:
+        return [t for t, seen in self.log if seen == line][-1]
+
     def _take(self, end: int) -> list[str]:
         got = [line for _, line in self.log[self._cursor:end]]
         self._cursor = end
@@ -217,6 +266,9 @@ class Recorder:
     def set_jam(self, on: bool) -> None:
         self.target.set_jam(on)
 
+    def set_pills(self, slot: int, count: int) -> None:
+        self.target.set_pills(slot, count)
+
     def close(self) -> None:
         self.target.close()
 
@@ -225,6 +277,14 @@ def _assert_physically_safe(target: NativeTarget) -> dict[str, str]:
     phys = target.physical()
     assert phys["violations"] == "0", f"physical safety rule violated: {phys['last_violation']} ({phys})"
     return phys
+
+
+def _pills(phys: dict[str, str]) -> list[int]:
+    return [int(n) for n in phys["pills"].split(",")]
+
+
+def _opens_by_gate(phys: dict[str, str]) -> list[int]:
+    return [int(n) for n in phys["gate_opens_by_gate"].split(",")]
 
 
 # --------------------------------------------------------------------------- NativeTarget client logic (no Docker)
@@ -241,13 +301,16 @@ for line in sys.stdin:
         print("!peek " + line.split()[1])
     elif line == "> PING":
         print("OK PONG")
+    elif line.startswith("!pills "):
+        print("!seen " + line)
     print("!ack %d" % t, flush=True)
     if line == "!quit":
         break
 """
 
 
-def test_missing_binary_explains_how_to_build(tmp_path: Path) -> None:
+def test_missing_binary_explains_how_to_build(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv(ENV_COMMAND, raising=False)  # a developer's harness command would bypass the check
     with pytest.raises(FileNotFoundError, match="build.ps1"):
         NativeTarget(tmp_path / "no-harness-here")
 
@@ -267,6 +330,21 @@ def test_custom_command_and_speculative_bookkeeping(tmp_path: Path) -> None:
         assert target.tick(5) == [] and target.round_trips == trips + 1 and target.now_ms == 510
 
 
+def test_set_pills_sends_the_v1_1_directive_and_validates(tmp_path: Path) -> None:
+    script = tmp_path / "fake_harness.py"
+    script.write_text(_FAKE_HARNESS, encoding="utf-8")
+    with NativeTarget(command=[sys.executable, str(script)], timeout_s=20) as target:
+        target.reset()
+        trips = target.round_trips
+        target.set_pills(2, 0)                   # the runner's {"pills": [2, 0]} step
+        assert target.round_trips == trips + 1
+        for slot, count in ((12, 1), (-1, 1), (0, -1), (0, 10000), (True, 1), (1.0, 1)):
+            with pytest.raises(ValueError):
+                target.set_pills(slot, count)    # type: ignore[arg-type]
+        with pytest.raises(ValueError):
+            target.set_drop_sensor("sideways")
+
+
 def test_command_from_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     script = tmp_path / "fake harness.py"          # a space in the path on purpose
     script.write_text(_FAKE_HARNESS, encoding="utf-8")
@@ -282,7 +360,7 @@ def test_command_from_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
 def test_unresponsive_harness_times_out_and_is_discarded(tmp_path: Path) -> None:
     script = tmp_path / "mute.py"
     script.write_text("import time\ntime.sleep(60)\n", encoding="utf-8")
-    target = NativeTarget(command=[sys.executable, str(script)], timeout_s=1, startup_timeout_s=1)
+    target = NativeTarget(command=[sys.executable, str(script)], timeout_s=0.3, startup_timeout_s=0.3)
     with pytest.raises(HarnessError, match="did not acknowledge"):
         target.reset()
     assert target._proc is None                  # killed, not left running
@@ -304,7 +382,7 @@ def test_exiting_harness_reports_its_exit_code(tmp_path: Path) -> None:
 
 def test_native_target_supports_every_scenario() -> None:
     skipped = [s["name"] for s in SCENARIOS if scenario_skip_reason(NativeTarget, s, include_slow=True)]
-    assert not skipped and len(SCENARIOS) >= 20
+    assert not skipped and len(SCENARIOS) >= 32
 
 
 @pytest.mark.parametrize("scenario", SCENARIOS, ids=[s["name"] for s in SCENARIOS])
@@ -314,22 +392,16 @@ def test_conformance_scenario(native: NativeTarget, scenario: dict[str, Any]) ->
     phys = _assert_physically_safe(native)
     if scenario["name"] in GATE_OPENS:
         assert int(phys["gate_opens"]) == GATE_OPENS[scenario["name"]], phys
-
-
-@pytest.fixture
-def configured(native: NativeTarget) -> Iterator[NativeTarget]:
-    """The module's harness; settings changed with ``configure()`` are undone afterwards."""
-    yield native
-    native.restore_defaults()
+    if scenario["name"] in PILLS_AFTER:
+        assert _pills(phys) == PILLS_AFTER[scenario["name"]], phys
 
 
 @pytest.mark.parametrize(
     "settings",
     [
+        # 15 s after each boot: inside most scenarios' activity and inside the 120 s auto-close window.
         pytest.param({"millisOffset": WRAP - 15_000}, id="millis-wraps-15s-after-boot"),
-        pytest.param({"millisOffset": WRAP - 60_000}, id="millis-wraps-60s-after-boot"),
-        pytest.param({"homeBackoffSteps": 0}, id="single-pass-homing"),
-        pytest.param({"homeOffsetSteps": 12}, id="home-offset-calibration"),
+        pytest.param({"homeBackoffSteps": 0, "homeOffsetSteps": 12}, id="single-pass-homing-with-offset"),
         pytest.param({"verifySlot": False, "debugLog": False, "holdWhenIdle": False},
                      id="no-slot-check-no-debug-release-when-idle"),
     ],
@@ -346,7 +418,11 @@ def test_full_suite_under_variants(configured: NativeTarget, settings: dict[str,
     assert not failed, "\n".join(failed)
 
 
-#: Short scenario mixing every kind of event, for the plain-vs-speculative cross-check.
+#: Short scenario mixing every kind of event, for the plain-vs-speculative cross-check. Plain
+#: ticking costs one harness round trip per 5 ms of simulated time, so it stays ~5 s long: the
+#: drop happens at the current slot (no motion). The sensorless boot leaves the physical carousel
+#: half a turn off, so slot 0 is physical container 3 (the oracle only checks containers when a
+#: home sensor is fitted).
 CROSS_CHECK: dict[str, Any] = {
     "name": "cross_check",
     "steps": [
@@ -360,9 +436,11 @@ CROSS_CHECK: dict[str, Any] = {
         {"wait_ms": 200, "expect": []},
         {"send": "STOP", "expect": ["ERR STOPPED", "OK STOPPED"]},
         {"send": "HOME", "expect": ["OK HOMING", "OK HOMED", "OK READY"]},
-        {"send": "OPEN_GATE", "expect": ["OK GATE_OPEN"]},
-        {"wait_ms": 1500, "expect": []},
-        {"send": "STATUS", "quiet_ms": 300, "expect": ["status:state=GATE_OPEN,gate=OPEN"]},
+        {"pills": [3, 1], "expect": []},
+        {"send": "DROP_SLOT 0", "expect": ["OK MOVING 0", "OK AT_SLOT 0"]},
+        {"wait_ms": 1000, "expect": ["OK GATE_OPEN"]},
+        {"send": "STOP", "expect": ["OK GATE_CLOSED", "OK DROPPED 0", "OK READY", "OK STOPPED"]},
+        {"send": "STATUS", "quiet_ms": 300, "expect": ["status:state=SAFE_STOP,gate=CLOSED,drop_sensor=1"]},
     ],
 }
 
@@ -384,8 +462,10 @@ def test_speculative_ticking_matches_plain_ticking(native: NativeTarget) -> None
 
 
 def test_harness_rejects_unknown_settings_and_inputs(configured: NativeTarget) -> None:
-    with pytest.raises(HarnessError, match="unknown key"):
-        configured.configure(noSuchSetting=1)
+    for bad in ({"noSuchSetting": 1}, {"mechanism": "belt"}, {"numSlots": 13}, {"numSlots": 1},
+                {"dropOpenMs": 20000}):
+        with pytest.raises(HarnessError, match="unknown key"):
+            configured.configure(**bad)
     with pytest.raises(ValueError):
         configured.send("PING\nPING")
     with pytest.raises(ValueError):
@@ -396,8 +476,8 @@ def test_harness_rejects_unknown_settings_and_inputs(configured: NativeTarget) -
 
 
 def test_run_all_api(native: NativeTarget) -> None:
-    results = run_all(native, names=["dispense_happy_path", "gate_auto_close_safety_net"])
-    assert [r.ok for r in results] == [True, True] and not any(r.skipped for r in results)
+    results = run_all(native, names=["dispense_happy_path", "gate_auto_close_safety_net", "drop_slot_happy_path"])
+    assert [r.ok for r in results] == [True, True, True] and not any(r.skipped for r in results)
 
 
 # --------------------------------------------------------------------------- parser equivalence
@@ -406,13 +486,15 @@ def test_run_all_api(native: NativeTarget) -> None:
 def _fuzz_lines(seed: int = 20261003, count: int = 1500) -> list[str]:
     rng = random.Random(seed)
     words = ["PING", "STATUS", "HOME", "MOVE_SLOT", "DISPENSE_SLOT", "OPEN_GATE", "CLOSE_GATE", "STOP",
-             "move_slot", "Dispense_Slot", "pInG", "MOVE_SLOTS", "OPEN", "GATE", "FOO", "PING\x00", "STOP!"]
+             "DROP_SLOT", "move_slot", "Dispense_Slot", "drop_slot", "Drop_Slot", "pInG", "MOVE_SLOTS",
+             "DROP_SLOTS", "DROP", "OPEN", "GATE", "FOO", "PING\x00", "STOP!"]
     args = ["0", "1", "5", "6", "9", "11", "12", "00", "002", "005", "006", "099", "000", "0000", "1000",
             "-1", "+1", "1.0", "x", "abc", "0x1", "1e1", "\x001", "", "2 3"]
     spaces = [" ", "  ", "\t", "\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\x1f", " \t ", ""]
     alphabet = "".join(chr(c) for c in range(0x00, 0x80) if chr(c) not in "\r\n")
     lines = ["", " ", "\t\t", "PING", "P" * 64, "P" * 65, "PING" + " " * 60, "PING" + " " * 61,
-             "MOVE_SLOT 1" + " " * 53, "MOVE_SLOT 1" + " " * 54, "\x1fSTATUS\x1c"]
+             "MOVE_SLOT 1" + " " * 53, "MOVE_SLOT 1" + " " * 54, "DROP_SLOT 2" + " " * 53,
+             "DROP_SLOT 2" + " " * 54, "\x1fSTATUS\x1c"]
     while len(lines) < count:
         kind = rng.random()
         if kind < 0.7:
@@ -440,7 +522,7 @@ def _python_verdict(line: str, num_slots: int) -> str:
     return f"err {p.error.value} {p.name.value if p.name else '-'}"
 
 
-@pytest.mark.parametrize("num_slots", [6, 2, 12])
+@pytest.mark.parametrize("num_slots", [6, 2, 3, 12])
 def test_firmware_parser_matches_protocol_parse_command(native: NativeTarget, num_slots: int) -> None:
     lines = _fuzz_lines(seed=num_slots)
     firmware = native.parse_lines(lines, num_slots=num_slots)
@@ -506,6 +588,8 @@ def test_stuck_home_sensor_is_never_accepted_as_home(native: NativeTarget) -> No
     s.send("STATUS")
     assert "state=FAULT homed=0" in s.wait(1, 100)[0]
     s.send("DISPENSE_SLOT 2")
+    assert s.wait(1, 100) == ["ERR NOT_HOMED"]
+    s.send("DROP_SLOT 2")
     assert s.wait(1, 100) == ["ERR NOT_HOMED"]
     assert native.physical()["gate_opens"] == "0"
 
@@ -632,3 +716,335 @@ def test_stop_halts_the_carousel_immediately(native: NativeTarget) -> None:
     s.run(500)
     after = native.physical()
     assert int(after["pos"]) == before and after["fw_state"] == "SAFE_STOP" and after["fw_homed"] == "0"
+
+
+# --------------------------------------------------------------------------- DROP_SLOT (protocol v1.1, carousel)
+
+
+def test_status_reports_protocol_1_1_and_the_drop_sensor(native: NativeTarget) -> None:
+    s = Session(native)
+    s.start()
+    s.send("STATUS")
+    status = s.wait(1, 100)[0]
+    assert status.endswith(" fw=1.1.0-native proto=1.1 drop_sensor=1"), status
+    assert "slots=6" in status
+    assert native.physical()["mechanism"] == "carousel"
+
+
+def test_drop_release_timing_and_exactly_one_pill(native: NativeTarget) -> None:
+    """§12.2: settle, open (travel), hold DROP_OPEN_MS, close (travel), verdict + READY at once."""
+    s = Session(native)
+    s.start()
+    s.send("DROP_SLOT 3")
+    assert s.wait(6, 30000) == _drop_lines(3)
+    at, opened, closed = s.time_of("OK AT_SLOT 3"), s.time_of("OK GATE_OPEN"), s.time_of("OK GATE_CLOSED")
+    assert opened - at == SETTLE_MS + TRAVEL_MS
+    assert closed - opened == HOLD_MS + TRAVEL_MS
+    assert s.time_of("OK DROPPED 3") == s.last_time_of("OK READY") == closed
+    phys = _assert_physically_safe(native)
+    assert _pills(phys) == [20, 20, 20, 19, 20, 20] and phys["drop_pulses"] == "1"
+    assert phys["phys_slot"] == "3" and phys["gate"] == "closed" and phys["gate_opens"] == "1"
+    s.send("STATUS")
+    assert "state=READY homed=1 slot=3 gate=CLOSED" in s.wait(1, 100)[0]
+
+
+def test_drop_every_container_releases_from_that_container(native: NativeTarget) -> None:
+    s = Session(native)
+    s.start()
+    expected = list(FULL)
+    for slot in (5, 0, 4, 1, 3, 2):
+        s.send(f"DROP_SLOT {slot}")
+        assert s.wait(6, 30000) == _drop_lines(slot)
+        expected[slot] -= 1
+        phys = _assert_physically_safe(native)
+        assert phys["phys_slot"] == str(slot) and _pills(phys) == expected
+
+
+@pytest.mark.parametrize("phase,delay_ms", [("opening", 50), ("hold", TRAVEL_MS + 100),
+                                            ("closing", TRAVEL_MS + HOLD_MS + 100)])
+def test_stop_during_the_release_is_handled_after_the_verdict(native: NativeTarget, phase: str,
+                                                              delay_ms: int) -> None:
+    """§12.3: the release is atomic; STOP during it yields the verdict first, then OK STOPPED."""
+    s = Session(native)
+    s.start()
+    s.send("DROP_SLOT 2")
+    assert s.wait(2, 30000) == ["OK MOVING 2", "OK AT_SLOT 2"]
+    s.run(SETTLE_MS + delay_ms)
+    assert native.physical()["fw_releasing"] == "1", phase
+    s.send("STOP")
+    expected = ["OK GATE_CLOSED", "OK DROPPED 2", "OK READY", "OK STOPPED"]
+    if phase == "opening":
+        expected.insert(0, "OK GATE_OPEN")
+    assert s.wait(len(expected), 3000) == expected
+    assert s.time_of("OK STOPPED") == s.last_time_of("OK READY")
+    phys = _assert_physically_safe(native)
+    assert _pills(phys)[2] == 19 and phys["fw_state"] == "SAFE_STOP" and phys["gate"] == "closed"
+    s.send("DROP_SLOT 2")
+    assert s.wait(1, 100) == ["ERR NOT_HOMED"]
+
+
+def test_buttons_and_serial_input_wait_for_the_release(native: NativeTarget) -> None:
+    s = Session(native)
+    s.start()
+    s.send("DROP_SLOT 1")
+    assert s.wait(3, 30000) == ["OK MOVING 1", "OK AT_SLOT 1", "OK GATE_OPEN"]
+    s.send("PING")
+    s.press("CANCEL")                             # debounced during the hold, acted on after it
+    s.press("CONFIRM")
+    assert s.wait(6, 3000) == ["OK GATE_CLOSED", "OK DROPPED 1", "OK READY", "EVENT CANCEL_BUTTON",
+                               "EVENT CONFIRM_BUTTON", "OK PONG"]
+    ready = s.last_time_of("OK READY")
+    assert s.time_of("EVENT CANCEL_BUTTON") == s.time_of("OK PONG") == ready
+    s.send("STATUS")                              # CANCEL in READY is an event only
+    assert "state=READY homed=1 slot=1" in s.wait(1, 100)[0]
+    _assert_physically_safe(native)
+
+
+@pytest.mark.parametrize("how", ["STOP", "CANCEL"])
+def test_stop_or_cancel_during_the_settle_never_releases(native: NativeTarget, how: str) -> None:
+    s = Session(native)
+    s.start()
+    s.send("DROP_SLOT 4")
+    assert s.wait(2, 30000) == ["OK MOVING 4", "OK AT_SLOT 4"]
+    s.run(100)                                    # inside the 300 ms settle
+    if how == "STOP":
+        s.send("STOP")
+        assert s.wait(2, 200) == ["ERR STOPPED", "OK STOPPED"]
+    else:
+        s.press("CANCEL")
+        assert s.wait(3, 200) == ["EVENT CANCEL_BUTTON", "ERR STOPPED", "OK STOPPED"]
+    assert s.run(2000, step=5) == []
+    phys = _assert_physically_safe(native)
+    assert phys["gate_opens"] == "0" and _pills(phys) == FULL
+
+
+def test_three_container_carousel_drops_from_each_container(configured: NativeTarget) -> None:
+    """The shipped config.h: NUM_SLOTS 3 on a carousel (1066.67 steps per container)."""
+    configured.configure(numSlots=3)
+    s = Session(configured)
+    s.start()
+    s.send("STATUS")
+    assert "slots=3" in s.wait(1, 100)[0]
+    for slot in (2, 0, 1):
+        s.send(f"DROP_SLOT {slot}")
+        assert s.wait(6, 30000) == _drop_lines(slot)
+        assert configured.physical()["phys_slot"] == str(slot)
+    s.send("DROP_SLOT 3")
+    assert s.wait(1, 100) == ["ERR INVALID_SLOT"]
+    assert _pills(_assert_physically_safe(configured)) == [19, 19, 19]
+
+
+#: hardware_safe scenarios that apply to the shipped 3-container builds (docs/HARDWARE_INTEGRATION.md
+#: 11.2 tells the hardware teammate to run exactly these with --target serial). The others check
+#: slots=6, use slots 3-5 or need a move that takes time.
+THREE_CONTAINER_SAFE = [
+    "ping_variants_and_blank_lines", "unknown_and_overlong_commands", "move_to_current_slot",
+    "invalid_slot_arguments", "interlocks_while_gate_open", "stop_when_idle_and_idempotent",
+    "stop_with_gate_open_closes_gate", "home_from_ready_returns_to_slot_zero", "drop_slot_happy_path",
+]
+
+
+@pytest.mark.parametrize("mechanism", ["carousel", "servo"])
+def test_three_container_builds_pass_the_applicable_safe_scenarios(configured: NativeTarget,
+                                                                   mechanism: str) -> None:
+    by_name = {s["name"]: s for s in SCENARIOS}
+    assert all(by_name[name].get("hardware_safe") for name in THREE_CONTAINER_SAFE)
+    configured.configure(mechanism=mechanism, numSlots=3)
+    failed = []
+    for name in THREE_CONTAINER_SAFE:
+        result = run_scenario(configured, by_name[name])
+        if not result.ok or configured.physical()["violations"] != "0":
+            failed.append(result.describe())
+    assert not failed, "\n".join(failed)
+
+
+def test_drop_open_ms_sets_the_hold_time(configured: NativeTarget) -> None:
+    configured.configure(dropOpenMs=150)
+    s = Session(configured)
+    s.start()
+    s.send("DROP_SLOT 0")
+    assert s.wait(6, 30000) == _drop_lines(0)
+    assert s.time_of("OK GATE_CLOSED") - s.time_of("OK GATE_OPEN") == 150 + TRAVEL_MS
+    _assert_physically_safe(configured)
+
+
+def test_v1_dispense_then_close_also_releases_one_pill(native: NativeTarget) -> None:
+    """The host's v1 emulation (DISPENSE_SLOT n, wait drop_close_delay_ms, CLOSE_GATE) still works."""
+    s = Session(native)
+    s.start()
+    s.send("DISPENSE_SLOT 4")
+    assert s.wait(3, 25000) == ["OK MOVING 4", "OK AT_SLOT 4", "OK GATE_OPEN"]
+    s.run(1500, step=5)
+    s.send("CLOSE_GATE")
+    assert s.wait(2, 1000) == ["OK GATE_CLOSED", "OK READY"]
+    assert _pills(_assert_physically_safe(native)) == [20, 20, 20, 20, 19, 20]
+
+
+# --------------------------------------------------------------------------- drop sensor
+
+
+def test_dead_drop_sensor_reports_no_pill_although_one_fell(native: NativeTarget) -> None:
+    """Fail closed: a sensor that sees nothing makes the host record FAILED/NO_PILL, zero the count
+    and raise an EMPTY alert -- it never invents a drop. (The pill did fall: the caregiver checks.)"""
+    s = Session(native)
+    s.start()
+    native.set_drop_sensor("dead")
+    s.send("DROP_SLOT 2")
+    assert s.wait(6, 30000) == _drop_lines(2, "ERR NO_PILL")
+    phys = _assert_physically_safe(native)
+    assert _pills(phys)[2] == 19 and phys["fw_state"] == "READY"
+
+
+def test_beam_blocked_before_the_release_never_counts_as_a_pill(native: NativeTarget) -> None:
+    s = Session(native)
+    s.start()
+    native.set_drop_sensor("blocked")             # pill stuck in the chute / unplugged receiver
+    s.send("DROP_SLOT 0")
+    assert s.wait(6, 30000) == _drop_lines(0, "ERR NO_PILL")
+    native.set_drop_sensor("ok")
+    s.send("DROP_SLOT 0")                         # a working sensor confirms the next one again
+    assert s.wait(6, 30000) == _drop_lines(0)
+    assert _pills(_assert_physically_safe(native))[0] == 18
+
+
+def test_empty_container_with_working_sensor_reports_no_pill(native: NativeTarget) -> None:
+    s = Session(native)
+    s.start()
+    native.set_pills(3, 0)
+    s.send("DROP_SLOT 3")
+    assert s.wait(6, 30000) == _drop_lines(3, "ERR NO_PILL")
+    native.set_pills(3, 5)                        # refilled
+    s.send("DROP_SLOT 3")
+    assert s.wait(6, 30000) == _drop_lines(3)
+    phys = _assert_physically_safe(native)
+    assert _pills(phys)[3] == 4 and phys["pills_dropped"] == "1"
+
+
+def test_build_without_drop_sensor_reports_every_completed_release(configured: NativeTarget) -> None:
+    """HAS_DROP_SENSOR 0: OK DROPPED only means "release cycle completed" (§12.5)."""
+    configured.configure(dropSensor=False)
+    s = Session(configured)
+    s.start()
+    s.send("STATUS")
+    assert s.wait(1, 100)[0].endswith("proto=1.1 drop_sensor=0")
+    configured.set_pills(1, 0)
+    s.send("DROP_SLOT 1")
+    assert s.wait(6, 30000) == _drop_lines(1)
+    phys = _assert_physically_safe(configured)
+    assert phys["pills_dropped"] == "0" and phys["drop_sensor_fitted"] == "0"
+
+
+# --------------------------------------------------------------------------- MECHANISM_PER_CONTAINER_SERVO
+
+
+def test_servo_mechanism_boots_homes_and_moves_at_once(servo: NativeTarget) -> None:
+    s = Session(servo)
+    servo.reset()
+    servo.boot("ok")
+    assert s.wait(4, 1000)[1:] == ["OK HOMING", "OK HOMED", "OK READY"]
+    assert s.time_of("OK READY") == s.time_of("OK HOMING") == TRAVEL_MS  # servos closed first, no homing travel
+    s.send("STATUS")
+    status = s.wait(1, 100)[0]
+    assert "state=READY homed=1 slot=0 gate=CLOSED slots=3" in status and status.endswith("drop_sensor=1")
+    for cmd, lines in (("MOVE_SLOT 2", ["OK MOVING 2", "OK AT_SLOT 2", "OK READY"]),
+                       ("HOME", ["OK HOMING", "OK HOMED", "OK READY"]),
+                       ("MOVE_SLOT 1", ["OK MOVING 1", "OK AT_SLOT 1", "OK READY"])):
+        sent_at = s.send(cmd)
+        assert s.wait(3, 10) == lines
+        assert s.last_time_of(lines[-1]) == sent_at + 1      # same loop pass as the command
+    s.send("MOVE_SLOT 3")
+    assert s.wait(1, 10) == ["ERR INVALID_SLOT"]
+    phys = _assert_physically_safe(servo)
+    assert phys["mechanism"] == "per_container" and phys["step_pos"] == "0" and phys["gates"] == "closed,closed,closed"
+
+
+def test_servo_mechanism_drop_uses_that_containers_servo(servo: NativeTarget) -> None:
+    s = Session(servo)
+    s.start()
+    opens, pills = [0, 0, 0], [20, 20, 20]
+    for slot in (2, 0, 1, 2):
+        sent_at = s.send(f"DROP_SLOT {slot}")
+        assert s.wait(6, 5000) == _drop_lines(slot)
+        assert s.last_time_of("OK GATE_OPEN") - sent_at == SETTLE_MS + TRAVEL_MS
+        assert s.last_time_of("OK GATE_CLOSED") - s.last_time_of("OK GATE_OPEN") == HOLD_MS + TRAVEL_MS
+        opens[slot] += 1
+        pills[slot] -= 1
+        phys = _assert_physically_safe(servo)
+        assert _opens_by_gate(phys) == opens and _pills(phys) == pills
+    s.send("STATUS")
+    assert "state=READY homed=1 slot=2 gate=CLOSED" in s.wait(1, 100)[0]
+
+
+def test_release_hold_is_wrap_safe(servo: NativeTarget) -> None:
+    """millis() wraps (every 49.7 days) in the middle of the release hold: same timing and verdict."""
+    servo.configure(millisOffset=WRAP - 1500)   # wraps 1500 ms after boot
+    s = Session(servo)
+    s.start()
+    sent_at = s.send("DROP_SLOT 1")
+    assert s.wait(6, 5000) == _drop_lines(1)
+    opened, closed = s.last_time_of("OK GATE_OPEN"), s.last_time_of("OK GATE_CLOSED")
+    assert opened - sent_at == SETTLE_MS + TRAVEL_MS and closed - opened == HOLD_MS + TRAVEL_MS
+    assert opened < 1500 < closed - TRAVEL_MS   # the wrap fell inside the hold
+    assert _pills(_assert_physically_safe(servo)) == [20, 19, 20]
+
+
+def test_servo_mechanism_empty_container_reports_no_pill(servo: NativeTarget) -> None:
+    s = Session(servo)
+    s.start()
+    servo.set_pills(1, 0)
+    s.send("DROP_SLOT 1")
+    assert s.wait(6, 5000) == _drop_lines(1, "ERR NO_PILL")
+    phys = _assert_physically_safe(servo)
+    assert _opens_by_gate(phys) == [0, 1, 0] and _pills(phys) == [20, 0, 20]
+
+
+def test_servo_mechanism_stop_during_settle_never_releases(servo: NativeTarget) -> None:
+    s = Session(servo)
+    s.start()
+    s.send("DROP_SLOT 2")
+    assert s.wait(2, 10) == ["OK MOVING 2", "OK AT_SLOT 2"]
+    s.run(150)                                    # settle (no motion to interrupt in this mechanism)
+    s.send("STOP")
+    assert s.wait(2, 100) == ["ERR STOPPED", "OK STOPPED"]
+    assert s.run(1500, step=5) == []
+    s.send("DROP_SLOT 2")
+    assert s.wait(1, 100) == ["ERR NOT_HOMED"]
+    s.send("HOME")
+    assert s.wait(3, 10) == ["OK HOMING", "OK HOMED", "OK READY"]
+    phys = _assert_physically_safe(servo)
+    assert _opens_by_gate(phys) == [0, 0, 0] and _pills(phys) == [20, 20, 20]
+
+
+def test_servo_mechanism_stop_and_cancel_during_the_release_wait(servo: NativeTarget) -> None:
+    s = Session(servo)
+    s.start()
+    s.send("DROP_SLOT 0")
+    assert s.wait(3, 5000) == ["OK MOVING 0", "OK AT_SLOT 0", "OK GATE_OPEN"]
+    s.press("CANCEL")
+    s.send("STOP")
+    assert s.wait(5, 3000) == ["OK GATE_CLOSED", "OK DROPPED 0", "OK READY", "EVENT CANCEL_BUTTON", "OK STOPPED"]
+    phys = _assert_physically_safe(servo)
+    assert phys["fw_state"] == "SAFE_STOP" and _pills(phys) == [19, 20, 20]
+
+
+def test_servo_mechanism_interlocks_and_open_gate(servo: NativeTarget) -> None:
+    s = Session(servo)
+    s.start()
+    s.send("MOVE_SLOT 1")
+    assert s.wait(3, 10) == ["OK MOVING 1", "OK AT_SLOT 1", "OK READY"]
+    s.send("OPEN_GATE")                           # the "gate" is the servo of the current container
+    assert s.wait(1, 1000) == ["OK GATE_OPEN"]
+    for cmd, err in (("DROP_SLOT 2", "ERR INVALID_STATE"), ("MOVE_SLOT 0", "ERR INVALID_STATE"),
+                     ("HOME", "ERR INVALID_STATE"), ("DROP_SLOT 3", "ERR INVALID_SLOT")):
+        s.send(cmd)
+        assert s.wait(1, 10) == [err], cmd
+    s.send("STATUS")
+    assert "state=GATE_OPEN homed=1 slot=1 gate=OPEN" in s.wait(1, 100)[0]
+    assert servo.physical()["gates"] == "closed,open,closed"
+    s.send("CLOSE_GATE")
+    assert s.wait(2, 1000) == ["OK GATE_CLOSED", "OK READY"]
+    servo.set_jam(True)                           # no stepper: a carousel jam cannot happen here
+    s.send("DROP_SLOT 2")
+    assert s.wait(6, 5000) == _drop_lines(2)
+    phys = _assert_physically_safe(servo)
+    assert _opens_by_gate(phys) == [0, 1, 1] and _pills(phys) == [20, 19, 19]

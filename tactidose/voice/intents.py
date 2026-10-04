@@ -1,7 +1,9 @@
 """Deterministic text -> :class:`Intent` parser and the Vosk command grammar.
 
-Speech is a request, not an authorization (ARCHITECTURE §1.3): this module only turns
-words into an :class:`Intent`. The dose service decides whether anything moves.
+Speech is a request, not an authorization (ARCHITECTURE v2 §2): this module only turns
+words into an :class:`Intent`. Deterministic services (``DropService``) decide whether
+anything moves. In v2, DISPENSE also covers "drop my pill"; the agent
+(``agent/rules_agent.py``) adds container / medication matching on top of this parser.
 
 Pipeline: :func:`normalise` (lower-case, smart quotes, ``[unk]`` removed, punctuation
 stripped, contractions expanded, common ASR variants such as "dispence" / "this pens"
@@ -10,7 +12,7 @@ fixed, whitespace collapsed), then ordered rules:
 1. **CANCEL always wins** ("stop", "cancel", "never mind", "close", ...), even inside
    other text and even when negated. Stopping is the safe direction.
 2. **Actuating intents** (CONFIRM_TAKEN, DISPENSE) are refused when the utterance contains
-   a negation ("I haven't taken it", "don't dispense"). That gives UNKNOWN with
+   a negation ("I haven't taken it", "don't dispense", "don't drop"). That gives UNKNOWN with
    ``negated=True``. When phrased as a status question ("did I take it?", "is it open?"),
    they become CHECK_DUE. When both match ("taken, open the next one"), the result is
    UNKNOWN, because ambiguity fails closed.
@@ -147,6 +149,7 @@ _DISPENSE = _rules(
     "dispense",
     ("open", r"(?<!is )(?<!was )(?<!are )(?<!still )open"),
     "unlock",
+    "drop",  # v2: "drop my pill" asks for one pill drop
     ("give me my medication", rf"(?:give|get|bring|hand|fetch)(?: \w+){{0,3}} {_MED}"),
     ("i want my medication", rf"i (?:want|need) (?:my|the)(?: next)? {_MED}"),
 )
@@ -324,10 +327,17 @@ GRAMMAR_PHRASES: list[str] = [
     # HELP
     "help", "help me", "what can i say", "commands", "options", "what are my options",
     "how does this work",
+    # v2 pill drops and status questions (device-side voice loop -> agent)
+    "drop", "drop it", "drop my pill", "drop a pill", "drop one pill", "drop my medication",
+    "drop pill one", "drop pill two", "drop pill three",
+    "drop container one", "drop container two", "drop container three",
+    "give me my pill", "can i have my pill",
+    "how many pills are left", "how many pills do i have",
+    "when did i last take my pill", "when was my last pill", "did my pill drop",
     # negations: recognised as such so they are never heard as a command
     "not taken", "not yet", "i have not taken it", "i haven't taken it",
     "i did not take it", "i didn't take it", "don't dispense", "do not dispense",
-    "don't open", "do not open", "no",
+    "don't open", "do not open", "don't drop", "do not drop", "no",
     # fillers that absorb non-command speech
     "yes", "okay", "thank you", "thanks", "please", "hello",
     "[unk]",

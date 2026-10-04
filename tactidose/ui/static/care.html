@@ -1,0 +1,375 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <title>Care portal — TactiDose</title>
+  <link rel="icon" href="/static/img/favicon.svg" type="image/svg+xml">
+  <script src="/static/js/theme-init.js"></script>
+  <link rel="stylesheet" href="/static/css/base.css">
+  <link rel="stylesheet" href="/static/css/care.css">
+  <script type="module" src="/static/js/care.js"></script>
+</head>
+<body class="portal care">
+  <a class="skip-link" href="#main">Skip to main content</a>
+
+  <header class="app-header">
+    <p class="brand"><span class="icon-slot" data-icon="pill"></span> <span class="brand-name">TactiDose</span> <span class="brand-sub">Care portal</span></p>
+    <p id="who" class="who"></p>
+    <div class="header-tools">
+      <span id="conn" class="conn" role="status"></span>
+      <button type="button" id="bell" class="btn bell" aria-expanded="false" aria-controls="notif-panel"><span class="icon-slot" data-icon="bell"></span> Notifications <span id="bell-count" class="bell-count" data-count="0" aria-hidden="true">0</span></button>
+      <button type="button" id="settings-btn" class="btn" aria-expanded="false" aria-controls="settings-panel"><span class="icon-slot" data-icon="settings"></span> Display</button>
+      <button type="button" id="signout" class="btn"><span class="icon-slot" data-icon="logout"></span> Sign out</button>
+    </div>
+  </header>
+
+  <main id="main" tabindex="-1">
+    <h1 class="visually-hidden">TactiDose care portal</h1>
+    <div id="page-error" class="page-error" hidden></div>
+    <div id="page-notices" class="notices"></div>
+
+    <section id="settings-panel" class="panel" aria-labelledby="settings-title" hidden>
+      <div class="panel-head">
+        <h2 id="settings-title" tabindex="-1">Display</h2>
+        <button type="button" id="settings-close" class="btn">Close</button>
+      </div>
+      <div id="display-settings"></div>
+      <fieldset>
+        <legend>Alerts</legend>
+        <div class="check-row"><input type="checkbox" id="desktop-alerts"><label for="desktop-alerts">Show desktop alerts when this page is in the background</label></div>
+        <p id="desktop-alerts-status" class="field-hint" role="status"></p>
+      </fieldset>
+    </section>
+
+    <section id="notif-panel" class="panel" aria-labelledby="notif-title" hidden>
+      <div class="panel-head">
+        <h2 id="notif-title" tabindex="-1">All notifications</h2>
+        <button type="button" id="notif-mark-all" class="btn">Mark all as read</button>
+        <button type="button" id="notif-close" class="btn">Close</button>
+      </div>
+      <ul id="notif-list" class="notif-list"></ul>
+    </section>
+
+    <div class="care-layout">
+      <!-- ========================================================== patients -->
+      <section class="care-side card" aria-labelledby="patients-title">
+        <h2 id="patients-title">Your patients</h2>
+        <ul id="patient-list" class="patient-list"></ul>
+        <details id="link-box" class="link-box">
+          <summary><span class="icon-slot" data-icon="link"></span> Link a patient</summary>
+          <p class="field-hint">Ask the patient for their Patient ID and link code. They find both under "Care team" on their page.</p>
+          <form id="link-form" novalidate>
+            <div class="field">
+              <label for="link-pid">Patient ID</label>
+              <input id="link-pid" type="text" inputmode="numeric" autocomplete="off" required>
+            </div>
+            <div class="field">
+              <label for="link-code">Link code</label>
+              <input id="link-code" type="text" autocomplete="off" autocapitalize="characters" spellcheck="false" required>
+            </div>
+            <p id="link-error" class="form-error" role="alert" hidden></p>
+            <button type="submit" id="link-submit" class="btn btn-primary">Link patient</button>
+          </form>
+        </details>
+      </section>
+
+      <section id="no-patient" class="care-main card" aria-labelledby="no-patient-title" hidden>
+        <h2 id="no-patient-title">No patients yet</h2>
+        <p>Link a patient with their Patient ID and link code to follow their pills, change their schedule and refill their containers.</p>
+        <button type="button" id="no-patient-link" class="btn btn-primary"><span class="icon-slot" data-icon="link"></span> Link a patient</button>
+      </section>
+
+      <!-- ========================================================== selected patient -->
+      <section id="patient-area" class="care-main" aria-labelledby="patient-name" hidden>
+        <div class="patient-head">
+          <div>
+            <h2 id="patient-name" tabindex="-1">Patient</h2>
+            <p id="patient-meta" class="muted"></p>
+          </div>
+          <button type="button" id="unlink-btn" class="btn btn-small"><span class="icon-slot" data-icon="x"></span> Stop following</button>
+        </div>
+
+        <div class="tabs" role="tablist" aria-label="Patient sections">
+          <button type="button" role="tab" id="tab-overview" data-tab="overview" aria-controls="panel-overview" aria-selected="true">Overview</button>
+          <button type="button" role="tab" id="tab-schedule" data-tab="schedule" aria-controls="panel-schedule" aria-selected="false" tabindex="-1">Schedule</button>
+          <button type="button" role="tab" id="tab-containers" data-tab="containers" aria-controls="panel-containers" aria-selected="false" tabindex="-1">Containers</button>
+          <button type="button" role="tab" id="tab-settings" data-tab="settings" aria-controls="panel-settings" aria-selected="false" tabindex="-1">Cooldown</button>
+          <button type="button" role="tab" id="tab-medications" data-tab="medications" aria-controls="panel-medications" aria-selected="false" tabindex="-1">Medications</button>
+          <button type="button" role="tab" id="tab-conversations" data-tab="conversations" aria-controls="panel-conversations" aria-selected="false" tabindex="-1">Conversations</button>
+          <button type="button" role="tab" id="tab-history" data-tab="history" aria-controls="panel-history" aria-selected="false" tabindex="-1">History</button>
+          <button type="button" role="tab" id="tab-reports" data-tab="reports" aria-controls="panel-reports" aria-selected="false" tabindex="-1">Reports</button>
+          <button type="button" role="tab" id="tab-notifications" data-tab="notifications" aria-controls="panel-notifications" aria-selected="false" tabindex="-1">Notifications</button>
+          <button type="button" role="tab" id="tab-device" data-tab="device" aria-controls="panel-device" aria-selected="false" tabindex="-1">Device</button>
+        </div>
+
+        <!-- ---------------------------------------------------- overview -->
+        <div id="panel-overview" class="tab-panel" role="tabpanel" aria-labelledby="tab-overview">
+          <div class="overview-grid">
+            <section class="card" aria-labelledby="ov-now-title">
+              <h3 id="ov-now-title">Right now</h3>
+              <dl id="ov-facts" class="facts"></dl>
+            </section>
+            <section class="card" aria-labelledby="ov-alerts-title">
+              <h3 id="ov-alerts-title">Needs attention</h3>
+              <ul id="ov-alerts" class="item-list"></ul>
+            </section>
+            <section class="card" aria-labelledby="ov-containers-title">
+              <h3 id="ov-containers-title">Containers</h3>
+              <div id="ov-containers"></div>
+            </section>
+            <section class="card" aria-labelledby="ov-today-title">
+              <h3 id="ov-today-title">Today's doses</h3>
+              <ul id="ov-today" class="item-list"></ul>
+            </section>
+            <section class="card" aria-labelledby="ov-drops-title">
+              <h3 id="ov-drops-title">Latest drops</h3>
+              <ul id="ov-drops" class="item-list"></ul>
+            </section>
+            <section class="card span-all" aria-labelledby="ov-week-title">
+              <h3 id="ov-week-title">Last 7 days</h3>
+              <div id="ov-week"></div>
+            </section>
+          </div>
+        </div>
+
+        <!-- ---------------------------------------------------- schedule -->
+        <div id="panel-schedule" class="tab-panel" role="tabpanel" aria-labelledby="tab-schedule" hidden>
+          <div class="two-col">
+            <section class="card" aria-labelledby="sched-list-title">
+              <h3 id="sched-list-title">Times</h3>
+              <p class="field-hint">Pills drop automatically at these times. Changes apply from now on.</p>
+              <div class="check-row"><input type="checkbox" id="sched-show-inactive"><label for="sched-show-inactive">Show turned-off times</label></div>
+              <div id="sched-list"></div>
+            </section>
+            <section id="sched-form-card" class="card form-card" aria-labelledby="sched-form-title">
+              <h3 id="sched-form-title" tabindex="-1">Add a time</h3>
+              <form id="sched-form" novalidate>
+                <div class="field">
+                  <label for="sched-med">Medication</label>
+                  <select id="sched-med"></select>
+                </div>
+                <div class="field">
+                  <label for="sched-time">Time</label>
+                  <input type="time" id="sched-time" step="60" required>
+                </div>
+                <fieldset>
+                  <legend>Repeats</legend>
+                  <div class="radio-row"><input type="radio" id="sched-daily" name="frequency" value="DAILY" checked><label for="sched-daily">Every day</label></div>
+                  <div class="radio-row"><input type="radio" id="sched-weekly" name="frequency" value="WEEKLY"><label for="sched-weekly">Only on some days</label></div>
+                  <fieldset id="sched-days" class="days" disabled>
+                    <legend>Days</legend>
+                    <div class="choice-list">
+                      <div class="check-row"><input type="checkbox" id="sched-day-MON" name="days" value="MON"><label for="sched-day-MON">Monday</label></div>
+                      <div class="check-row"><input type="checkbox" id="sched-day-TUE" name="days" value="TUE"><label for="sched-day-TUE">Tuesday</label></div>
+                      <div class="check-row"><input type="checkbox" id="sched-day-WED" name="days" value="WED"><label for="sched-day-WED">Wednesday</label></div>
+                      <div class="check-row"><input type="checkbox" id="sched-day-THU" name="days" value="THU"><label for="sched-day-THU">Thursday</label></div>
+                      <div class="check-row"><input type="checkbox" id="sched-day-FRI" name="days" value="FRI"><label for="sched-day-FRI">Friday</label></div>
+                      <div class="check-row"><input type="checkbox" id="sched-day-SAT" name="days" value="SAT"><label for="sched-day-SAT">Saturday</label></div>
+                      <div class="check-row"><input type="checkbox" id="sched-day-SUN" name="days" value="SUN"><label for="sched-day-SUN">Sunday</label></div>
+                    </div>
+                  </fieldset>
+                </fieldset>
+                <div id="sched-active-row" class="check-row" hidden><input type="checkbox" id="sched-active"><label for="sched-active">This time is on</label></div>
+                <p id="sched-form-error" class="form-error" role="alert" hidden></p>
+                <div class="form-actions">
+                  <button type="submit" id="sched-submit" class="btn btn-primary">Save time</button>
+                  <button type="button" id="sched-cancel-edit" class="btn" hidden>Cancel editing</button>
+                </div>
+              </form>
+            </section>
+          </div>
+        </div>
+
+        <!-- ---------------------------------------------------- containers -->
+        <div id="panel-containers" class="tab-panel" role="tabpanel" aria-labelledby="tab-containers" hidden>
+          <p class="field-hint">Assign a medication to each container, refill it and set when it counts as running low. Use candy or tokens for the demo.</p>
+          <div id="containers-list" class="container-grid"></div>
+        </div>
+
+        <!-- ---------------------------------------------------- cooldown & automatic drops -->
+        <div id="panel-settings" class="tab-panel" role="tabpanel" aria-labelledby="tab-settings" hidden>
+          <section class="card narrow" aria-labelledby="settings-form-title">
+            <h3 id="settings-form-title">Cooldown and automatic drops</h3>
+            <form id="settings-form" novalidate>
+              <div class="field">
+                <label for="set-cooldown">Waiting time after any pill drops (minutes)</label>
+                <p id="set-cooldown-hint" class="field-hint">During this time the patient cannot drop another pill with the button or the assistant. Scheduled pills still drop on time. 0 turns the waiting time off; the most is 1440 (24 hours).</p>
+                <input type="number" id="set-cooldown" min="0" max="1440" step="1" inputmode="numeric" required aria-describedby="set-cooldown-hint">
+              </div>
+              <div class="check-row"><input type="checkbox" id="set-auto" aria-describedby="set-auto-hint"><label for="set-auto">Drop scheduled pills automatically</label></div>
+              <p id="set-auto-hint" class="field-hint">When this is off, nothing drops by itself: the patient has to press Drop pill.</p>
+              <dl id="set-facts" class="facts"></dl>
+              <p id="settings-error" class="form-error" role="alert" hidden></p>
+              <div class="form-actions">
+                <button type="submit" id="settings-submit" class="btn btn-primary">Save</button>
+              </div>
+            </form>
+          </section>
+        </div>
+
+        <!-- ---------------------------------------------------- medications -->
+        <div id="panel-medications" class="tab-panel" role="tabpanel" aria-labelledby="tab-medications" hidden>
+          <div class="two-col">
+            <section class="card" aria-labelledby="med-list-title">
+              <h3 id="med-list-title">Medications</h3>
+              <div class="check-row"><input type="checkbox" id="med-show-archived"><label for="med-show-archived">Show archived medications</label></div>
+              <div id="med-list"></div>
+            </section>
+            <div class="stack">
+              <section id="med-form-card" class="card form-card" aria-labelledby="med-form-title">
+                <h3 id="med-form-title" tabindex="-1">Add a medication</h3>
+                <form id="med-form" novalidate>
+                  <div class="field">
+                    <label for="med-name">Name, exactly as on the label</label>
+                    <input id="med-name" name="name" type="text" maxlength="200" required autocomplete="off">
+                  </div>
+                  <div class="field">
+                    <label for="med-strength">Strength (optional)</label>
+                    <input id="med-strength" name="strength" type="text" maxlength="120" autocomplete="off">
+                  </div>
+                  <div class="field">
+                    <label for="med-instructions">Instructions (optional)</label>
+                    <textarea id="med-instructions" name="instructions_text" rows="3"></textarea>
+                  </div>
+                  <div class="field">
+                    <label for="med-warnings">Warnings (optional, one per line)</label>
+                    <textarea id="med-warnings" name="warnings" rows="3"></textarea>
+                  </div>
+                  <div class="confirm-box">
+                    <input type="checkbox" id="med-confirm" name="confirmed" required>
+                    <label for="med-confirm">I confirm this information is correct</label>
+                  </div>
+                  <p id="med-form-error" class="form-error" role="alert" hidden></p>
+                  <div class="form-actions">
+                    <button type="submit" id="med-submit" class="btn btn-primary">Save medication</button>
+                    <button type="button" id="med-cancel-edit" class="btn" hidden>Cancel editing</button>
+                  </div>
+                </form>
+              </section>
+
+              <section id="scan-card" class="card" aria-labelledby="scan-title">
+                <h3 id="scan-title">Read a label from a photo (optional)</h3>
+                <p class="field-hint">The text read from the photo is not confirmed: you check every field before it is saved.</p>
+                <div class="field">
+                  <label for="scan-file">Photo of the label</label>
+                  <input type="file" id="scan-file" accept="image/jpeg,image/png,image/webp" capture="environment">
+                </div>
+                <p id="scan-status" role="status"></p>
+                <img id="scan-preview" class="scan-preview" alt="The label photo you chose" hidden>
+                <div id="scan-review" hidden>
+                  <p class="unconfirmed-banner"><span class="icon-slot" data-icon="warning"></span> Unconfirmed: check every field against the label</p>
+                  <div id="scan-notes"></div>
+                  <form id="scan-form" novalidate>
+                    <div class="field">
+                      <label for="scan-name">Name, exactly as on the label</label>
+                      <input id="scan-name" name="name" type="text" maxlength="200" required autocomplete="off">
+                    </div>
+                    <div class="field">
+                      <label for="scan-strength">Strength (optional)</label>
+                      <input id="scan-strength" name="strength" type="text" maxlength="120" autocomplete="off">
+                    </div>
+                    <div class="field">
+                      <label for="scan-instructions">Instructions (optional)</label>
+                      <textarea id="scan-instructions" name="instructions_text" rows="3"></textarea>
+                    </div>
+                    <div class="field">
+                      <label for="scan-warnings">Warnings (optional, one per line)</label>
+                      <textarea id="scan-warnings" name="warnings" rows="3"></textarea>
+                    </div>
+                    <div class="confirm-box">
+                      <input type="checkbox" id="scan-confirm" name="confirmed" required>
+                      <label for="scan-confirm">I confirm this information is correct</label>
+                    </div>
+                    <p id="scan-form-error" class="form-error" role="alert" hidden></p>
+                    <div class="form-actions">
+                      <button type="submit" id="scan-submit" class="btn btn-primary">Save as a medication</button>
+                      <button type="button" id="scan-reject" class="btn btn-danger">Reject this scan</button>
+                    </div>
+                  </form>
+                </div>
+              </section>
+            </div>
+          </div>
+        </div>
+
+        <!-- ---------------------------------------------------- conversations -->
+        <div id="panel-conversations" class="tab-panel" role="tabpanel" aria-labelledby="tab-conversations" hidden>
+          <div class="two-col conv-layout">
+            <section class="card" aria-labelledby="conv-list-title">
+              <h3 id="conv-list-title">Conversations</h3>
+              <p class="field-hint">Only the patient's own conversations with the assistant are stored. You can read them; you cannot add to them.</p>
+              <ul id="conv-list" class="item-list"></ul>
+            </section>
+            <section class="card" aria-labelledby="conv-title">
+              <h3 id="conv-title" tabindex="-1">Choose a conversation</h3>
+              <ol id="conv-messages" class="chat-log" aria-labelledby="conv-title"></ol>
+            </section>
+          </div>
+        </div>
+
+        <!-- ---------------------------------------------------- history -->
+        <div id="panel-history" class="tab-panel" role="tabpanel" aria-labelledby="tab-history" hidden>
+          <section class="card" aria-labelledby="hist-title">
+            <h3 id="hist-title">Pill drops</h3>
+            <p class="field-hint">Every request, including refused ones. When it is not certain a pill dropped, the device waits until you record what happened.</p>
+            <div id="cg-history-root"></div>
+          </section>
+          <section class="card" aria-labelledby="doses-title">
+            <h3 id="doses-title">Scheduled doses</h3>
+            <div class="filter-row">
+              <div class="field">
+                <label for="doses-date">Day</label>
+                <input type="date" id="doses-date">
+              </div>
+              <button type="button" id="doses-today" class="btn">Today</button>
+            </div>
+            <ul id="doses-list" class="item-list"></ul>
+          </section>
+        </div>
+
+        <!-- ---------------------------------------------------- reports -->
+        <div id="panel-reports" class="tab-panel" role="tabpanel" aria-labelledby="tab-reports" hidden>
+          <section class="card" aria-labelledby="cg-reports-title">
+            <h3 id="cg-reports-title">Make and send a report</h3>
+            <div id="cg-reports-root"></div>
+          </section>
+        </div>
+
+        <!-- ---------------------------------------------------- notifications for this patient -->
+        <div id="panel-notifications" class="tab-panel" role="tabpanel" aria-labelledby="tab-notifications" hidden>
+          <section class="card" aria-labelledby="pn-title">
+            <div class="panel-head">
+              <h3 id="pn-title">Notifications about this patient</h3>
+              <button type="button" id="pn-mark-all" class="btn">Mark these as read</button>
+            </div>
+            <ul id="pn-list" class="notif-list"></ul>
+          </section>
+        </div>
+
+        <!-- ---------------------------------------------------- device -->
+        <div id="panel-device" class="tab-panel" role="tabpanel" aria-labelledby="tab-device" hidden>
+          <section class="card" aria-labelledby="dev-title">
+            <h3 id="dev-title">Pill device</h3>
+            <div class="btn-row">
+              <button type="button" id="dev-home" class="btn"><span class="icon-slot" data-icon="home"></span> Find start position (home)</button>
+              <button type="button" id="dev-stop" class="btn btn-danger"><span class="icon-slot" data-icon="stop"></span> Stop</button>
+              <button type="button" id="dev-reconnect" class="btn"><span class="icon-slot" data-icon="plug"></span> Reconnect</button>
+              <button type="button" id="dev-refresh" class="btn"><span class="icon-slot" data-icon="rotate"></span> Refresh</button>
+            </div>
+            <div id="dev-result" role="status"></div>
+            <dl id="dev-facts" class="facts"></dl>
+          </section>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <div id="toasts" class="toasts" role="region" aria-label="New notifications"></div>
+
+  <footer class="app-footer">
+    <p>TactiDose prototype — not a medical device. The demo uses candy, never real medication.</p>
+  </footer>
+</body>
+</html>

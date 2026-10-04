@@ -7,7 +7,7 @@
 #   Windows PowerShell: firmware/native/build.ps1   |   any OS: python -m tactidose.hardware.conformance_native build
 #
 # Also checks that the firmware core stays portable C++11 (Arduino-ESP32 2.x compiles gnu++11)
-# and runs the config.h static_asserts for both driver types. Warnings are errors.
+# and runs the config.h static_asserts for both mechanisms and both driver types. Warnings are errors.
 set -eu
 
 IMAGE="${TACTIDOSE_GCC_IMAGE:-gcc:14}"
@@ -44,12 +44,17 @@ STATIC=""
 
 echo "== core is portable C++11"
 $CXX -std=c++11 $WARN -fsyntax-only -I"$CORE" "$CORE/TactiDoseCore.cpp"
-echo "== config.h static_asserts (STEP/DIR and ULN2003)"
+echo "== config.h static_asserts (carousel STEP/DIR and ULN2003, per-container servo)"
 $CXX -std=c++11 $WARN -fsyntax-only -I"$CORE" "$NATIVE/config_check.cpp"
 $CXX -std=c++11 $WARN -fsyntax-only -DDRIVER_TYPE=2 -I"$CORE" "$NATIVE/config_check.cpp"
+$CXX -std=c++11 $WARN -fsyntax-only -DMECHANISM=2 -I"$CORE" "$NATIVE/config_check.cpp"
 echo "== harness (C++17)"
 mkdir -p "$NATIVE/bin"
-$CXX -std=c++17 -O2 $WARN $STATIC -I"$CORE" -I"$NATIVE" -o "$NATIVE/bin/harness.tmp" \
+# A unique temporary name: several test sessions may rebuild at the same time.
+tmp=$(mktemp "$NATIVE/bin/harness.XXXXXX")
+trap 'rm -f "$tmp"' EXIT
+$CXX -std=c++17 -O2 $WARN $STATIC -I"$CORE" -I"$NATIVE" -o "$tmp" \
   "$NATIVE/harness.cpp" "$NATIVE/FakeHal.cpp" "$CORE/TactiDoseCore.cpp"
-mv -f "$NATIVE/bin/harness.tmp" "$NATIVE/bin/harness"
+chmod 755 "$tmp"
+mv -f "$tmp" "$NATIVE/bin/harness"
 echo "built $NATIVE/bin/harness with $($CXX --version | head -n 1)"

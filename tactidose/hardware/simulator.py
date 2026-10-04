@@ -1,16 +1,17 @@
-"""Simulated TactiDose motor controller.
+"""Simulated TactiDose motor controller (serial protocol v1.1).
 
 Three layers:
 
 * :class:`VirtualESP32` - a deterministic, tick-driven twin of the reference firmware
-  state machine (docs/SERIAL_PROTOCOL.md §3-§8, including the §7 acceptance table) plus
-  a model of the physical carousel, home sensor, servo gate and buttons. No threads and
-  no wall clock: time only advances through :meth:`VirtualESP32.tick`, and ``loop()``
-  semantics are reproduced exactly (one firmware iteration per simulated millisecond;
-  idle stretches are skipped because they provably have no effect).
+  state machine (docs/SERIAL_PROTOCOL.md §3-§8 and §12, including the §7 acceptance table)
+  plus a model of the physical carousel, home sensor, servo gate/release, pill containers,
+  drop sensor and buttons. No threads and no wall clock: time only advances through
+  :meth:`VirtualESP32.tick`, and ``loop()`` semantics are reproduced exactly (one firmware
+  iteration per simulated millisecond; idle stretches are skipped because they provably
+  have no effect).
 * :class:`SimulatedDevice` - runs a VirtualESP32 in (scaled) real time on a ``sim-device``
   thread, serves in-process :class:`~tactidose.hardware.transports.Transport` objects and
-  injects faults for the demo panel and the tests.
+  injects faults / sets pill counts for the demo panel and the tests.
 * :class:`ConformanceSimTarget` - adapter for ``tactidose.hardware.conformance``.
 
 Physical model
@@ -23,6 +24,14 @@ motion timeout ``2 x expected + 2 s`` produces ``ERR MOTOR_FAULT``. The home sen
 active while ``physical_steps mod steps_per_rev`` is in ``[0, sensor_zone_steps)``; homing
 records the rising edge, debounces it and returns to the edge, so slot ``k`` is physically
 centred at ``round(k * steps_per_rev / N)`` steps after homing.
+
+Pills (v1.1): every container holds ``pills[k]`` pills (physical, survives reboots). Each time
+the gate/release finishes opening, one pill falls from the container that is *physically*
+over the chute (if it has any) and breaks the drop-sensor beam. ``DROP_SLOT n`` = move ->
+settle -> atomic release (``OK GATE_OPEN``, hold ``drop_open_ms``, ``OK GATE_CLOSED``) ->
+``OK DROPPED n`` (or ``ERR NO_PILL`` when a drop sensor is fitted and saw nothing) ->
+``OK READY``. ``DISPENSE_SLOT`` / ``OPEN_GATE`` open the same release, so a v1 host (or the
+host's v1 emulation against ``proto=None``) drops a pill too.
 
 This is a hackathon prototype for demonstrations with candy/tokens - not a medical device.
 """
@@ -52,6 +61,7 @@ from tactidose.hardware.protocol import (
     StatusReport,
     format_message,
     parse_command,
+    supports_drop_slot,
 )
 from tactidose.hardware.transports import DEFAULT_READ_TIMEOUT_S, TransportError
 
@@ -65,6 +75,9 @@ __all__ = [
     "BUTTONS",
     "FAULT_NAMES",
     "SIM_PORT_NAME",
+    "SIM_PROTO",
+    "SIM_FW_V11",
+    "SIM_FW_V1",
     "SimConfig",
     "VirtualESP32",
     "SimulatedDevice",
@@ -73,8 +86,16 @@ __all__ = [
 
 BUTTONS = ("CONFIRM", "CANCEL")
 SENSOR_MODES = ("ok", "dead", "none")
-FAULT_NAMES = ("home_sensor_dead", "motor_jam", "unresponsive", "brownout_on_gate", "disconnect")
+FAULT_NAMES = (
+    "home_sensor_dead", "motor_jam", "unresponsive", "brownout_on_gate", "brownout_on_release",
+    "disconnect",
+)
 SIM_PORT_NAME = "sim://"
+#: Protocol version the simulator implements (``SimConfig.proto`` default).
+SIM_PROTO = "1.1"
+SIM_FW_V11 = "sim-1.1.0"
+#: Firmware version reported when the simulator plays v1 firmware (``proto=None``).
+SIM_FW_V1 = "sim-1.0.0"
 
 #: Homing aborts after this many carousel revolutions without finding home (§8.5).
 HOMING_MAX_REVS = 1.25
@@ -103,7 +124,13 @@ _OFF, _SEEK, _RETURN = "off", "seek", "return"
 
 @dataclass
 class SimConfig:
-    """Physical and firmware parameters of the simulated device (defaults = reference build)."""
+    """Physical and firmware parameters of the simulated device.
+
+    The defaults are the conformance harness (``conformance.json`` -> ``harness``: 6 slots,
+    3200 steps/rev, 1600 steps before home, drop sensor, 20 pills per container). The app's
+    simulator is built with :meth:`from_settings` (``num_slots = settings.num_slots``, 3 on
+    the v2 device).
+    """
 
     num_slots: int = 6
     steps_per_rev: int = 3200
@@ -118,8 +145,18 @@ class SimConfig:
     gate_max_open_ms: int = 120000
     debounce_ms: int = 30
     sensor_zone_steps: int = 40
-    fw_version: str = "sim-1.0.0"
+    #: None = ``sim-1.1.0`` (``sim-1.0.0`` when ``proto`` does not support DROP_SLOT).
+    fw_version: str | None = None
     home_sensor: str = "ok"   # ok | dead | none
+    #: v1.1: how long the release stays open inside ``DROP_SLOT`` (between the two servo moves).
+    drop_open_ms: int = 600
+    #: v1.1: IR break-beam in the chute; without it ``OK DROPPED`` only means "cycle completed".
+    drop_sensor: bool = True
+    #: v1.1: physical pills in every container at power-on.
+    initial_pills: int = 20
+    #: Protocol version reported in ``STATUS``. None = behave as v1 firmware: ``DROP_SLOT`` is
+    #: ``ERR UNKNOWN_COMMAND`` and ``STATUS`` has no ``proto``/``drop_sensor`` keys.
+    proto: str | None = SIM_PROTO
 
     def __post_init__(self) -> None:
         if not (MIN_SLOTS <= self.num_slots <= MAX_SLOTS):
@@ -130,13 +167,36 @@ class SimConfig:
             raise ValueError("speeds and acceleration must be > 0")
         if not (0 < self.sensor_zone_steps < self.steps_per_rev):
             raise ValueError("sensor_zone_steps must be in (0, steps_per_rev)")
-        if min(self.settle_ms, self.gate_travel_ms, self.debounce_ms) < 0:
+        if min(self.settle_ms, self.gate_travel_ms, self.debounce_ms, self.drop_open_ms) < 0:
             raise ValueError("durations must be >= 0")
         if self.home_timeout_ms <= 0 or self.gate_max_open_ms <= 0:
             raise ValueError("timeouts must be > 0")
-        if not self.fw_version or any(ch.isspace() for ch in self.fw_version):
+        pills = self.initial_pills
+        if isinstance(pills, bool) or not isinstance(pills, int) or pills < 0:
+            raise ValueError("initial_pills must be an int >= 0")
+        if self.proto is not None and not _single_token(self.proto):
+            raise ValueError("proto must be None or a single non-empty token such as '1.1'")
+        if self.fw_version is None:
+            self.fw_version = SIM_FW_V11 if supports_drop_slot(self.proto) else SIM_FW_V1
+        if not _single_token(self.fw_version):
             raise ValueError("fw_version must be a single non-empty token")
+        self.drop_sensor = bool(self.drop_sensor)
         self.home_sensor = _sensor_mode(self.home_sensor)
+
+    @classmethod
+    def from_settings(cls, settings: "Settings") -> "SimConfig":
+        """Reference build with the configured number of containers (``settings.num_slots``)."""
+        return cls(num_slots=settings.num_slots)
+
+    @property
+    def drop_slot_supported(self) -> bool:
+        """True when the simulated firmware implements ``DROP_SLOT`` (``proto >= 1.1``)."""
+        return supports_drop_slot(self.proto)
+
+
+def _single_token(value: object) -> bool:
+    text = str(value)
+    return bool(text) and not any(ch.isspace() for ch in text)
 
 
 def _sensor_mode(mode: str) -> str:
@@ -207,9 +267,17 @@ class _Profile:
         return min(self.distance, max(0, int(s)))
 
 
+#: Move kind per slot command; "home" is the sensorless dead-reckoning HOME.
+_MOVE_KINDS = {
+    CommandName.MOVE_SLOT: "move",
+    CommandName.DISPENSE_SLOT: "dispense",
+    CommandName.DROP_SLOT: "drop",
+}
+
+
 @dataclass
 class _Move:
-    kind: str                  # "move" | "dispense" | "home" (dead reckoning, no sensor)
+    kind: str                  # "move" | "dispense" | "drop" | "home"
     slot: int | None
     direction: int             # +1 / -1
     profile: _Profile
@@ -233,7 +301,9 @@ class _Homing:
 
 @dataclass
 class _GateTravel:
-    opening: bool
+    """A blocking servo operation: travel to ``target`` (or hold, when ``target == from_pos``)."""
+
+    target: float
     start_ms: int
     end_ms: int
     from_pos: float
@@ -257,9 +327,10 @@ class VirtualESP32:
         esp = VirtualESP32()
         esp.boot()                     # EVENT BOOT, auto-home
         esp.tick(6000)
-        esp.feed_line("DISPENSE_SLOT 3")
-        esp.tick(3000)
-        esp.drain_output()             # [..., 'OK MOVING 3', 'OK AT_SLOT 3', 'OK GATE_OPEN']
+        esp.feed_line("DROP_SLOT 3")
+        esp.tick(5000)
+        esp.drain_output()             # [..., 'OK MOVING 3', 'OK AT_SLOT 3', 'OK GATE_OPEN',
+                                       #  'OK GATE_CLOSED', 'OK DROPPED 3', 'OK READY']
     """
 
     _state: DeviceState
@@ -270,8 +341,11 @@ class VirtualESP32:
     _move: _Move | None
     _homing: _Homing | None
     _settle_until: int | None
+    _settle_kind: str | None
     _travel: _GateTravel | None
     _gate_opened_at: int | None
+    _releasing: int | None
+    _saw_pill: bool
     _buttons: dict[str, _Button]
 
     def __init__(self, config: SimConfig | None = None) -> None:
@@ -291,8 +365,13 @@ class VirtualESP32:
         self._sensor_ok = c.home_sensor != "dead"
         self._has_sensor = c.home_sensor != "none"
         self._raw_buttons = dict.fromkeys(BUTTONS, False)
+        self._pills = [c.initial_pills] * n
+        self._pills_dropped = 0
         #: Fault hook: the MCU resets at the instant the gate would start to open.
         self.brownout_on_gate = False
+        #: Fault hook: the MCU resets as a ``DROP_SLOT`` release starts to close - after
+        #: ``OK GATE_OPEN`` (the pill has fallen) but before ``OK GATE_CLOSED`` / ``OK DROPPED``.
+        self.brownout_on_release = False
         # ---- firmware
         self._booted = False
         self._boots = 0
@@ -379,6 +458,20 @@ class VirtualESP32:
         """Jam the carousel: commanded steps no longer move it (moves never complete)."""
         self._jam = bool(on)
 
+    @property
+    def pills(self) -> tuple[int, ...]:
+        """Physical pill count of every container (index = slot)."""
+        return tuple(self._pills)
+
+    def set_pills(self, slot: int, count: int) -> None:
+        """Set the physical pill count of container ``slot`` (load / empty it; no lines, no time)."""
+        n = self.config.num_slots
+        if isinstance(slot, bool) or not isinstance(slot, int) or not 0 <= slot < n:
+            raise ValueError(f"slot must be an int in 0..{n - 1}, got {slot!r}")
+        if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+            raise ValueError(f"pill count must be an int >= 0, got {count!r}")
+        self._pills[slot] = count
+
     def drain_output(self) -> list[str]:
         """Device lines emitted since the previous call (without line terminators)."""
         out, self._out = self._out, []
@@ -392,6 +485,7 @@ class VirtualESP32:
             "angle_deg": round(p * 360.0 / self._rev, 2),
             "physical_steps": p,
             "slot": self._physical_slot(p),
+            "target_slot": self._move.slot if self._move is not None else None,
             "gate_open": self._gate_pos > 0.0,
             "gate_pos": round(self._gate_pos, 3),
             "state": self._state.value,
@@ -401,11 +495,16 @@ class VirtualESP32:
             "sensor_mode": sensor,
             "sensor_active": self._sensor_active(),
             "moving": self._move is not None or self._homing is not None,
+            "releasing": self._releasing is not None,
             "booted": self._booted,
             "boots": self._boots,
             "buttons": {name: self._raw_buttons[name] for name in BUTTONS},
             "num_slots": self.config.num_slots,
             "fw_version": self.config.fw_version,
+            "proto": self.config.proto,
+            "drop_sensor": self.config.drop_sensor,
+            "pills": list(self._pills),
+            "pills_dropped": self._pills_dropped,
             "time_ms": self._time,
         }
 
@@ -419,8 +518,11 @@ class VirtualESP32:
         self._move = None
         self._homing = None
         self._settle_until = None
+        self._settle_kind = None
         self._travel = None
         self._gate_opened_at = None
+        self._releasing = None
+        self._saw_pill = False
         # A button held through a reset is not reported as a new press.
         self._buttons = {name: _Button(stable=self._raw_buttons[name]) for name in BUTTONS}
         self._rx.clear()
@@ -457,8 +559,12 @@ class VirtualESP32:
             self._run_homing()
         elif self._settle_until is not None:
             if self._time >= self._settle_until:
-                self._settle_until = None
-                self._open_gate()
+                kind = self._settle_kind
+                self._settle_until = self._settle_kind = None
+                if kind == "drop":
+                    self._start_release()
+                else:
+                    self._open_gate()
         elif self._state is DeviceState.GATE_OPEN and self._gate_opened_at is not None:
             if self._time - self._gate_opened_at >= self.config.gate_max_open_ms:
                 self._close_gate_then(self._enter_ready)   # §8.7 safety net
@@ -511,6 +617,9 @@ class VirtualESP32:
         parsed = parse_command(text, self.config.num_slots)
         if parsed.empty:
             return
+        if parsed.name is CommandName.DROP_SLOT and not self.config.drop_slot_supported:
+            self._err(Err.UNKNOWN_COMMAND)      # v1 firmware does not know the word at all
+            return
         if parsed.command is None:
             self._err(parsed.error or Err.UNKNOWN_COMMAND)
             return
@@ -522,9 +631,9 @@ class VirtualESP32:
             self._emit(self._status_line())
         elif name is CommandName.HOME:
             self._cmd_home()
-        elif name is CommandName.MOVE_SLOT or name is CommandName.DISPENSE_SLOT:
+        elif name in _MOVE_KINDS:
             assert cmd.slot is not None
-            self._cmd_move(cmd.slot, dispense=name is CommandName.DISPENSE_SLOT)
+            self._cmd_move(cmd.slot, _MOVE_KINDS[name])
         elif name is CommandName.OPEN_GATE:
             self._cmd_open_gate()
         elif name is CommandName.CLOSE_GATE:
@@ -533,13 +642,17 @@ class VirtualESP32:
             self._cmd_stop()
 
     def _status_line(self) -> str:
+        c = self.config
+        v11 = c.drop_slot_supported
         return StatusReport(
             state=self._state,
             homed=self._homed,
             slot=self._slot,
             gate=GateState.OPEN if self._gate_open else GateState.CLOSED,
-            num_slots=self.config.num_slots,
-            fw=self.config.fw_version,
+            num_slots=c.num_slots,
+            fw=c.fw_version,
+            proto=c.proto,
+            drop_sensor=c.drop_sensor if v11 else None,
         ).to_line()
 
     # ------------------------------------------------------------------ firmware: commands (§7)
@@ -552,7 +665,8 @@ class VirtualESP32:
         else:
             self._start_homing()
 
-    def _cmd_move(self, slot: int, *, dispense: bool) -> None:
+    def _cmd_move(self, slot: int, kind: str) -> None:
+        """``MOVE_SLOT`` / ``DISPENSE_SLOT`` / ``DROP_SLOT`` share one acceptance row (§7, §12.2)."""
         s = self._state
         if s in BUSY_STATES:
             self._err(Err.BUSY)
@@ -566,7 +680,7 @@ class VirtualESP32:
             self._ok(Ok.MOVING, slot)
             self._state = DeviceState.MOVING
             self._slot = None
-            self._begin_motion("dispense" if dispense else "move", slot, delta)
+            self._begin_motion(kind, slot, delta)
 
     def _cmd_open_gate(self) -> None:
         s = self._state
@@ -637,6 +751,7 @@ class VirtualESP32:
         self._move = None
         self._homing = None
         self._settle_until = None
+        self._settle_kind = None
 
     def _enter_safe_stop(self) -> None:
         self._abort_motion()
@@ -665,9 +780,15 @@ class VirtualESP32:
 
     # ------------------------------------------------------------------ firmware: gate (§8.2)
     def _start_travel(self, opening: bool, on_done: Callable[[], None]) -> None:
-        travel_ms = self.config.gate_travel_ms
-        self._travel = _GateTravel(opening, self._time, self._time + travel_ms, self._gate_pos, on_done)
-        if travel_ms <= 0:
+        self._start_servo(1.0 if opening else 0.0, self.config.gate_travel_ms, on_done)
+
+    def _start_hold(self, ms: int, on_done: Callable[[], None]) -> None:
+        """Block like a servo move but keep the gate where it is (the DROP_SLOT release hold)."""
+        self._start_servo(self._gate_pos, ms, on_done)
+
+    def _start_servo(self, target: float, ms: int, on_done: Callable[[], None]) -> None:
+        self._travel = _GateTravel(target, self._time, self._time + ms, self._gate_pos, on_done)
+        if ms <= 0:
             self._advance_travel()
 
     def _advance_travel(self) -> bool:
@@ -675,12 +796,11 @@ class VirtualESP32:
         assert tr is not None
         if self._time >= tr.end_ms:
             self._travel = None
-            self._gate_pos = 1.0 if tr.opening else 0.0
+            self._gate_pos = tr.target
             tr.on_done()
             return True
         frac = (self._time - tr.start_ms) / max(1, tr.end_ms - tr.start_ms)
-        target = 1.0 if tr.opening else 0.0
-        self._gate_pos = tr.from_pos + (target - tr.from_pos) * frac
+        self._gate_pos = tr.from_pos + (tr.target - tr.from_pos) * frac
         return False
 
     def _open_gate(self) -> None:
@@ -696,6 +816,55 @@ class VirtualESP32:
         self._state = DeviceState.GATE_OPEN
         self._gate_opened_at = self._time
         self._ok(Ok.GATE_OPEN)
+        self._drop_pill()
+
+    # ------------------------------------------------------------------ firmware: DROP_SLOT release (§12)
+    # The release is one atomic, blocking sequence (open, hold, close): serial input and buttons
+    # are only processed after OK DROPPED / ERR NO_PILL and OK READY (§12.3). The firmware state
+    # stays AT_TARGET (busy) throughout; only the gate position changes.
+    def _start_release(self) -> None:
+        if self.brownout_on_gate:
+            log.debug("virtual ESP32: brown-out at release opening -> reboot")
+            self.boot()
+            return
+        self._releasing = self._slot
+        self._saw_pill = False
+        self._start_travel(True, self._release_opened)
+
+    def _release_opened(self) -> None:
+        self._gate_open = True
+        self._ok(Ok.GATE_OPEN)
+        self._drop_pill()
+        self._start_hold(self.config.drop_open_ms, self._release_closing)
+
+    def _release_closing(self) -> None:
+        if self.brownout_on_release:
+            # Servo inrush on the closing move: reset with the release still open. Boot closes it
+            # first, then sends EVENT BOOT - the host never sees OK GATE_CLOSED / OK DROPPED.
+            log.debug("virtual ESP32: brown-out as the release closes -> reboot")
+            self.boot()
+            return
+        self._start_travel(False, self._release_closed)
+
+    def _release_closed(self) -> None:
+        slot = self._releasing
+        self._releasing = None
+        self._gate_open = False
+        self._ok(Ok.GATE_CLOSED)
+        if self.config.drop_sensor and not self._saw_pill:
+            self._err(Err.NO_PILL)
+        else:
+            self._ok(Ok.DROPPED, slot)
+        self._enter_ready()
+
+    def _drop_pill(self) -> None:
+        """The release just finished opening: one pill falls from the container over the chute."""
+        k = self._physical_slot(self._phys % self._rev)
+        if k is None or self._pills[k] <= 0:
+            return
+        self._pills[k] -= 1
+        self._pills_dropped += 1
+        self._saw_pill = True
 
     def _close_gate_then(self, after: Callable[[], None]) -> None:
         def done() -> None:
@@ -758,6 +927,7 @@ class VirtualESP32:
         else:
             self._state = DeviceState.AT_TARGET
             self._settle_until = self._time + self.config.settle_ms   # §8.4
+            self._settle_kind = m.kind
 
     # ------------------------------------------------------------------ firmware: homing (§8.5)
     def _start_homing(self) -> None:
@@ -855,7 +1025,10 @@ class VirtualESP32:
 
 
 class ConformanceSimTarget:
-    """``ConformanceTarget`` over a fresh :class:`VirtualESP32` (simulated time)."""
+    """``ConformanceTarget`` over a fresh :class:`VirtualESP32` (simulated time).
+
+    The default :class:`SimConfig` is the conformance harness (6 slots, drop sensor, 20 pills).
+    """
 
     name = "sim"
     supports_faults = True
@@ -887,6 +1060,9 @@ class ConformanceSimTarget:
 
     def set_jam(self, on: bool) -> None:
         self.esp.set_jam(on)
+
+    def set_pills(self, slot: int, count: int) -> None:
+        self.esp.set_pills(slot, count)
 
     def close(self) -> None:
         return None
@@ -962,14 +1138,17 @@ class SimulatedDevice:
     """A :class:`VirtualESP32` running in (``settings.sim_speed`` x) real time, with faults.
 
     Ownership: whoever calls :meth:`start` must call :meth:`close` (in ``sim`` hardware
-    mode the ``HardwareClient`` created by ``create_hardware`` does both). Faults
-    (:data:`FAULT_NAMES`):
+    mode the ``HardwareClient`` created by ``create_hardware`` does both). Without an explicit
+    ``config`` the device is :meth:`SimConfig.from_settings` (``settings.num_slots`` containers,
+    protocol 1.1, drop sensor, 20 pills each). Faults (:data:`FAULT_NAMES`):
 
     * ``home_sensor_dead`` - the home sensor never triggers (next homing -> ``ERR HOME_TIMEOUT``);
     * ``motor_jam`` - the carousel stops following the motor (moves -> ``ERR MOTOR_FAULT``);
     * ``unresponsive`` - every byte in both directions is dropped (firmware keeps running);
-    * ``brownout_on_gate`` - the MCU resets (``EVENT BOOT`` + re-home) the instant the gate
-      would start to open; the gate stays closed;
+    * ``brownout_on_gate`` - the MCU resets (``EVENT BOOT`` + re-home) the instant the gate /
+      release would start to open; it stays closed and no pill drops;
+    * ``brownout_on_release`` - the MCU resets as a ``DROP_SLOT`` release starts to close: the
+      pill has dropped after ``OK GATE_OPEN`` but ``OK DROPPED`` never comes (host: UNCERTAIN);
     * ``disconnect`` - USB unplug: the open transport raises ``TransportError`` and new ones
       cannot be opened until the fault is cleared (the firmware keeps running meanwhile).
     """
@@ -982,7 +1161,7 @@ class SimulatedDevice:
     ) -> None:
         self.settings = settings
         self.bus = bus
-        self.config = config if config is not None else SimConfig(num_slots=settings.num_slots)
+        self.config = config if config is not None else SimConfig.from_settings(settings)
         self.speed = float(settings.sim_speed)
         self._esp = VirtualESP32(self.config)
         self._lock = threading.RLock()
@@ -1084,6 +1263,8 @@ class SimulatedDevice:
                 self._esp.set_jam(on)
             elif key == "brownout_on_gate":
                 self._esp.brownout_on_gate = on
+            elif key == "brownout_on_release":
+                self._esp.brownout_on_release = on
             elif key == "disconnect" and on:
                 unplugged, self._transport = self._transport, None
         if unplugged is not None:
@@ -1106,7 +1287,17 @@ class SimulatedDevice:
         with self._lock:
             self._esp.boot()
 
+    def set_pills(self, slot: int, count: int) -> None:
+        """Demo panel: set the physical pill count of container ``slot`` (raises ValueError).
+
+        This is the simulated *physical* truth; the database's ``pill_count`` is not changed.
+        """
+        with self._lock:
+            self._esp.set_pills(slot, count)
+        log.info("simulator container %s now holds %s pills", slot, count)
+
     def physical(self) -> dict[str, Any]:
+        """``VirtualESP32.physical()`` - incl. ``pills`` (list per slot) and ``pills_dropped``."""
         with self._lock:
             return self._esp.physical()
 

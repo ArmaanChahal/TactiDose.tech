@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <title>Pill dispenser — TactiDose</title>
+  <link rel="icon" href="/static/img/favicon.svg" type="image/svg+xml">
+  <script src="/static/js/theme-init.js"></script>
+  <link rel="stylesheet" href="/static/css/base.css">
+  <link rel="stylesheet" href="/static/css/kiosk.css">
+  <script type="module" src="/static/js/kiosk.js"></script>
+</head>
+<body class="kiosk">
+  <a class="skip-link" href="#main">Skip to main content</a>
+
+  <header class="k-header">
+    <p class="k-brand"><span class="icon-slot" data-icon="pill"></span> TactiDose</p>
+    <p id="k-who" class="k-chip"></p>
+    <span id="conn" class="conn" role="status" hidden></span>
+    <div class="k-header-tools">
+      <button type="button" id="theme-btn" class="btn">Colours</button>
+      <a class="btn" href="/patient">Full page</a>
+    </div>
+  </header>
+
+  <main id="main" class="k-main" tabindex="-1">
+    <h1 class="visually-hidden">TactiDose pill dispenser</h1>
+    <div id="page-error" class="page-error" hidden></div>
+
+    <section id="k-status" class="k-status" aria-labelledby="k-status-word">
+      <p id="k-status-word" class="status-word">Starting</p>
+      <p id="k-status-detail" class="k-line"></p>
+      <p id="k-next" class="k-line"></p>
+    </section>
+
+    <div id="k-drops" class="k-drops" role="group" aria-label="Drop a pill"></div>
+
+    <div class="k-actions">
+      <button type="button" id="k-talk" class="k-btn k-btn-talk" aria-pressed="false"><span class="icon-slot" data-icon="mic"></span> <span id="k-talk-label">Talk</span></button>
+      <button type="button" id="k-stop" class="k-btn k-btn-stop"><span class="icon-slot" data-icon="stop"></span> Stop</button>
+    </div>
+
+    <section class="k-captions" aria-labelledby="k-captions-title">
+      <h2 id="k-captions-title" class="visually-hidden">Messages</h2>
+      <p id="k-heard" class="k-heard"></p>
+      <p id="k-caption" class="k-caption" aria-live="polite"></p>
+    </section>
+  </main>
+
+  <footer class="k-footer">
+    <p>Keys: <kbd>T</kbd> talk · <kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> drop a pill (press twice) · <kbd>Esc</kbd> stop. Prototype — not a medical device.</p>
+  </footer>
+</body>
+</html>

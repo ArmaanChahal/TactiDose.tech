@@ -130,12 +130,13 @@ def test_handshake_sees_boot_banner_and_fills_snapshot(rig, bus):
     snap = hw.snapshot()
     assert snap.mode == "sim" and snap.port == "sim://" and snap.connected and snap.responsive
     assert snap.state is DeviceState.READY and snap.homed is True and snap.slot == 0
-    assert snap.gate is GateState.CLOSED and snap.fw_version == "sim-1.0.0"
+    assert snap.gate is GateState.CLOSED and snap.fw_version == "sim-1.1.0"
+    assert snap.proto == "1.1" and snap.drop_sensor is True and snap.to_dict()["proto"] == "1.1"
     assert snap.num_slots_reported == 6 and snap.resets_seen == 1 and snap.in_flight is None
     assert snap.last_error is None and snap.ready_for_motion and snap.last_rx_age_s is not None
     events = sub.drain()
     seen = [(e.data["dir"], e.data["line"]) for e in events if e.topic == Topic.DEVICE_LINE]
-    assert seen[0] == ("rx", "EVENT BOOT sim-1.0.0")
+    assert seen[0] == ("rx", "EVENT BOOT sim-1.1.0")
     assert ("tx", "PING") in seen and ("tx", "STATUS") in seen and ("tx", "HOME") not in seen
     states = [e.data for e in events if e.topic == Topic.DEVICE_STATE]
     assert states[-1]["state"] == "READY" and states[-1]["ready_for_motion"] is True
@@ -218,7 +219,9 @@ def test_ping_and_status(rig):
     assert r.ok and r.code == "PONG" and r.definitive and lines(r) == ["OK PONG"]
     r = hw.status()
     assert r.ok and r.code == "STATUS"
-    assert lines(r) == ["OK STATUS state=READY homed=1 slot=0 gate=CLOSED slots=6 fw=sim-1.0.0"]
+    assert lines(r) == [
+        "OK STATUS state=READY homed=1 slot=0 gate=CLOSED slots=6 fw=sim-1.1.0 proto=1.1 drop_sensor=1"
+    ]
 
 
 def test_dispense_success_then_close_gate(rig):

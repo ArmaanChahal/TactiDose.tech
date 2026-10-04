@@ -1,0 +1,385 @@
+"""Optional device-side voice + button loop (laptop microphone and speaker next to the dispenser).
+
+Replaces the v1 ``core/assistant.py`` dialogue. :class:`DeviceVoiceLoop` serves the patient
+bound to ``settings.device_id`` (``devices.user_id``) or an explicit ``patient_id``:
+
+* **Voice** (``VoiceRecognizer`` -> :meth:`DeviceVoiceLoop.handle_text`, on the ``voice``
+  thread): a short "stop" / "cancel" calls ``DropService.interrupt()`` immediately (stopping is
+  the safe direction), drops queued work and says "Stopped."; any other accepted utterance is
+  queued for ``AgentService.chat(patient_id, text, input_mode="voice")`` and the reply is spoken.
+* **Buttons** (``HardwareController`` event listener, on the reader thread: enqueue only):
+  ``EVENT CONFIRM_BUTTON`` -> ``DropService.request_drop(source="button")`` for the dose due now,
+  or, when nothing is due, the status is spoken; ``EVENT CANCEL_BUTTON`` -> no host STOP (the
+  firmware already stopped locally), queued work is dropped and "Stopped." is said.
+* **Notices**: ``EVENT BOOT`` -> "The dispenser restarted..." (not during the first
+  :attr:`~DeviceVoiceLoop.boot_grace_s` after :meth:`~DeviceVoiceLoop.start`, at most once per
+  :attr:`~DeviceVoiceLoop.notice_repeat_s`); an unsolicited ``ERR HOME_TIMEOUT`` /
+  ``ERR MOTOR_FAULT`` or ``Topic.DEVICE_STATE`` entering FAULT -> "The dispenser needs
+  attention..." once per fault episode.
+
+Everything is spoken through ``SpeakerService`` (``Topic.SPOKEN`` captions; the microphone is
+muted while it speaks). Threads: ``voice-loop`` (one job at a time) and a one-shot
+``voice-start`` (``VoiceRecognizer.start()`` blocks while the Vosk model loads). ``start()``
+returns True once the loop runs (voice may still be unavailable: see ``Topic.VOICE_STATUS``);
+``close()`` is idempotent and never raises.
+"""
+
+from __future__ import annotations
+
+import logging
+import threading
+import time
+from collections import deque
+from typing import Any, Callable
+
+from sqlalchemy import select
+
+from tactidose.agent import AgentNotAllowed, AgentUnavailable
+from tactidose.agent.rules_agent import analyse, describe_outcome, status_summary
+from tactidose.agent.tools import as_int, due_doses
+from tactidose.config import Settings
+from tactidose.core import phrases
+from tactidose.core.bus import BusEvent, EventBus, Topic
+from tactidose.core.clock import Clock
+from tactidose.core.interfaces import (
+    AgentServiceAPI,
+    DropServiceAPI,
+    HardwareController,
+    Speaker,
+)
+from tactidose.db.models import Device
+from tactidose.db.session import Database
+from tactidose.hardware.protocol import Err, Ev, Message
+
+log = logging.getLogger(__name__)
+
+_SPEECH_KIND = {"DROPPED": "success", "DENIED": "warning", "FAILED": "error", "UNCERTAIN": "error"}
+#: Queued jobs a cancel removes before they start.
+_CANCELLABLE = frozenset({"chat", "confirm"})
+
+
+class DeviceVoiceLoop:
+    """Voice + physical buttons for the device's patient. Thread-safe public API."""
+
+    #: Ignore EVENT BOOT this long after start() (the boot that comes with connecting).
+    boot_grace_s: float = 10.0
+    #: Speak the same notice (restart / fault) at most once per this many seconds.
+    notice_repeat_s: float = 30.0
+    #: close() waits this long for the worker (it may be inside a drop or a Gemini call).
+    join_timeout_s: float = 5.0
+
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        agent: AgentServiceAPI,
+        drops: DropServiceAPI,
+        clock: Clock,
+        hardware: HardwareController | None = None,
+        bus: EventBus | None = None,
+        db: Database | None = None,
+        patient_id: int | None = None,
+        speaker: Speaker | None = None,
+        recognizer_factory: Callable[..., Any] | None = None,
+    ) -> None:
+        self.settings = settings
+        self._agent = agent
+        self._drops = drops
+        self._clock = clock
+        self._hardware = hardware
+        self._bus = bus
+        self._db = db
+        self._patient_id = patient_id
+        self._speaker = speaker
+        self._owns_speaker = speaker is None
+        self._recognizer_factory = recognizer_factory
+        self._recognizer: Any = None
+        self._cond = threading.Condition()
+        self._jobs: deque[tuple[str, Any]] = deque()
+        self._thread: threading.Thread | None = None
+        self._start_thread: threading.Thread | None = None
+        self._unsubscribe: list[Callable[[], None]] = []
+        self._started = False
+        self._closed = False
+        self._busy = False
+        self._now: Callable[[], float] = time.monotonic
+        self._started_at = 0.0
+        self._announced: dict[str, float] = {}
+        self._device_state: str | None = None
+        #: Conversation continued by voice turns (AgentService rolls over after 30 minutes).
+        self.conversation_id: int | None = None
+
+    # ================================================================== lifecycle
+    def start(self) -> bool:
+        """Start the worker, the speaker, button handling and (in the background) the recognizer."""
+        with self._cond:
+            if self._closed:
+                return False
+            if self._started:
+                return True
+            self._started = True
+            self._started_at = self._now()
+        try:
+            if self._speaker is None:
+                # Imported here: speech output is an optional extra (sounddevice / OS voices).
+                from tactidose.audio.speaker import SpeakerService
+
+                self._speaker = SpeakerService(self.settings, self._bus)
+            self._speaker.start()
+        except Exception:  # noqa: BLE001 - captions/voice are optional; buttons still work
+            log.exception("voice loop: speaker failed to start")
+        self._thread = threading.Thread(target=self._run, name="voice-loop", daemon=True)
+        self._thread.start()
+        if self._hardware is not None:
+            try:
+                self._unsubscribe.append(self._hardware.add_event_listener(self.on_hardware_event))
+            except Exception:  # noqa: BLE001
+                log.exception("voice loop: could not listen to hardware events")
+        if self._bus is not None:
+            self._unsubscribe.append(self._bus.add_listener(self._on_device_state, [Topic.DEVICE_STATE]))
+        if self.settings.voice_enabled or self._recognizer_factory is not None:
+            self._start_thread = threading.Thread(target=self._start_recognizer, name="voice-start", daemon=True)
+            self._start_thread.start()
+        log.info("device voice loop started (voice %s)", "on" if self._start_thread else "off")
+        return True
+
+    def close(self) -> None:
+        """Stop listening, drop queued work and join the worker. Idempotent; never raises."""
+        with self._cond:
+            if self._closed:
+                return
+            self._closed = True
+            self._jobs.clear()
+            self._cond.notify_all()
+            recognizer, thread = self._recognizer, self._thread
+        for unsubscribe in self._unsubscribe:
+            try:
+                unsubscribe()
+            except Exception:  # noqa: BLE001
+                pass
+        self._unsubscribe.clear()
+        if recognizer is not None:
+            self._close_quietly(recognizer)
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=self.join_timeout_s)
+        # A recognizer still loading its model closes itself when start() returns (see _start_recognizer).
+        if self._owns_speaker and self._speaker is not None:
+            self._close_quietly(self._speaker)
+
+    def status(self) -> dict[str, Any]:
+        with self._cond:
+            pending, busy, running = len(self._jobs), self._busy, self._started and not self._closed
+        recognizer = self._recognizer
+        voice = None
+        if recognizer is not None and hasattr(recognizer, "status"):
+            try:
+                voice = recognizer.status()
+            except Exception:  # noqa: BLE001
+                voice = None
+        return {"running": running, "busy": busy, "pending": pending, "patient_id": self._resolve_patient(),
+                "conversation_id": self.conversation_id, "voice": voice}
+
+    def _start_recognizer(self) -> None:
+        factory = self._recognizer_factory or self._default_recognizer
+        try:
+            recognizer = factory(on_text=self.handle_text, is_muted=self._is_muted)
+            listening = bool(recognizer.start())
+        except Exception:  # noqa: BLE001
+            log.exception("voice loop: recognizer failed to start")
+            return
+        with self._cond:
+            closed = self._closed
+            if not closed:
+                self._recognizer = recognizer
+        if closed:
+            self._close_quietly(recognizer)
+        elif not listening:
+            log.info("voice loop: voice input unavailable (buttons still work)")
+
+    def _default_recognizer(self, *, on_text: Callable[[str, float], None], is_muted: Callable[[], bool]) -> Any:
+        from tactidose.voice.recognizer import VoiceRecognizer
+
+        return VoiceRecognizer(self.settings, on_text=on_text, is_muted=is_muted, bus=self._bus)
+
+    @staticmethod
+    def _close_quietly(obj: Any) -> None:
+        try:
+            obj.close()
+        except Exception:  # noqa: BLE001
+            log.debug("close() failed for %r", obj, exc_info=True)
+
+    # ================================================================== inputs (any thread)
+    def handle_text(self, text: str, confidence: float = 1.0) -> None:
+        """Recognised speech (``voice`` thread). "Stop" acts now; everything else is queued."""
+        try:
+            flags = analyse(text)
+            if flags.stop:
+                self._interrupt()
+                self._enqueue("say", (phrases.STOPPED, "info", True), cancel=True)
+                return
+            if flags.norm:
+                self._enqueue("chat", text)
+        except Exception:  # noqa: BLE001 - never break the recognizer thread
+            log.exception("voice loop: handle_text failed")
+
+    def on_hardware_event(self, msg: Message) -> None:
+        """``HardwareController`` event listener (serial reader thread): only enqueues."""
+        try:
+            if msg.is_event(Ev.CONFIRM_BUTTON):
+                self._enqueue("confirm", None)
+            elif msg.is_event(Ev.CANCEL_BUTTON):
+                self._enqueue("say", (phrases.STOPPED, "info", True), cancel=True)
+            elif msg.is_event(Ev.BOOT):
+                self._enqueue("notice", "BOOT")
+            elif msg.is_err(Err.HOME_TIMEOUT) or msg.is_err(Err.MOTOR_FAULT):
+                self._enqueue("notice", "FAULT")
+        except Exception:  # noqa: BLE001 - never break the reader thread
+            log.exception("voice loop: on_hardware_event failed")
+
+    def _on_device_state(self, ev: BusEvent) -> None:
+        state = str((ev.data or {}).get("state") or "")
+        with self._cond:
+            previous, self._device_state = self._device_state, state
+            if state != "FAULT":
+                self._announced.pop("FAULT", None)  # the next FAULT is a new episode
+        if state == "FAULT" and previous != "FAULT":
+            self._enqueue("notice", "FAULT")
+
+    def _interrupt(self) -> None:
+        try:
+            if self._drops.interrupt():
+                log.info("voice stop: STOP sent")
+        except Exception:  # noqa: BLE001 - a failing STOP must not block the reply
+            log.exception("voice loop: drops.interrupt() failed")
+
+    def _enqueue(self, kind: str, payload: Any, *, cancel: bool = False) -> None:
+        with self._cond:
+            if self._closed:
+                return
+            if cancel:
+                self._jobs = deque(job for job in self._jobs if job[0] not in _CANCELLABLE)
+            self._jobs.append((kind, payload))
+            self._cond.notify_all()
+
+    def _is_muted(self) -> bool:
+        speaker = self._speaker
+        return bool(speaker is not None and speaker.is_speaking)
+
+    # ================================================================== worker
+    def _run(self) -> None:
+        while True:
+            with self._cond:
+                while not self._jobs and not self._closed:
+                    self._cond.wait()
+                if self._closed:
+                    return
+                kind, payload = self._jobs.popleft()
+                self._busy = True
+            try:
+                self._handle(kind, payload)
+            except Exception:  # noqa: BLE001 - the worker must survive anything
+                log.exception("voice loop: %s failed", kind)
+                self._say(phrases.ASK_FOR_ASSISTANCE, "error")
+            finally:
+                with self._cond:
+                    self._busy = False
+                    self._cond.notify_all()
+
+    def wait_idle(self, timeout: float = 5.0) -> bool:
+        """Block until no job is queued or running (tests / CLI)."""
+        with self._cond:
+            return self._cond.wait_for(lambda: not self._jobs and not self._busy, timeout)
+
+    def _handle(self, kind: str, payload: Any) -> None:
+        if kind == "say":
+            text, speech_kind, interrupt = payload
+            self._say(text, speech_kind, interrupt=interrupt)
+        elif kind == "chat":
+            self._chat(str(payload))
+        elif kind == "confirm":
+            self._confirm_button()
+        elif kind == "notice":
+            self._notice(str(payload))
+
+    def _chat(self, text: str) -> None:
+        pid = self._resolve_patient()
+        if pid is None:
+            self._say(phrases.NOT_SET_UP, "warning")
+            return
+        try:
+            reply = self._agent.chat(patient_id=pid, text=text, input_mode="voice",
+                                     conversation_id=self.conversation_id)
+        except AgentNotAllowed:
+            self._say(phrases.NOT_SET_UP, "warning")
+            return
+        except AgentUnavailable:
+            self._say(phrases.AGENT_ERROR, "error")
+            return
+        self.conversation_id = reply.conversation_id
+        statuses = [str(a.get("status")) for a in reply.actions]
+        kind = _SPEECH_KIND.get(statuses[-1], "info") if statuses else "info"
+        self._say(reply.text, kind, meta={"source": "voice", "conversation_id": reply.conversation_id})
+
+    def _confirm_button(self) -> None:
+        pid = self._resolve_patient()
+        if pid is None:
+            self._say(phrases.NOT_SET_UP, "warning")
+            return
+        try:
+            status = self._drops.patient_status(pid)
+        except Exception:  # noqa: BLE001 - fail closed: no status, no drop
+            log.exception("voice loop: patient_status failed")
+            self._say(phrases.DB_UNAVAILABLE, "error")
+            return
+        due = due_doses(status, now=self._clock.now(), settings=self.settings)
+        if not due:
+            self._say(status_summary(status, clock=self._clock, settings=self.settings, offer=False), "info")
+            return
+        dose = due[0]
+        med_id = as_int(dose.get("medication_id"))
+        slot = as_int(dose.get("slot"))
+        target = {"medication_id": med_id} if med_id is not None else {"slot": slot}
+        outcome = self._drops.request_drop(patient_id=pid, source="button", requested_by_user_id=pid, **target)
+        view = outcome.to_dict()
+        self._say(describe_outcome(view, clock=self._clock), _SPEECH_KIND.get(str(view.get("status")), "info"),
+                  meta={"source": "button", "drop_id": view.get("drop_id")})
+
+    def _notice(self, code: str) -> None:
+        now = self._now()
+        if code == "BOOT" and now - self._started_at < self.boot_grace_s:
+            return
+        with self._cond:
+            last = self._announced.get(code)
+            if last is not None and now - last < self.notice_repeat_s:
+                return
+            self._announced[code] = now
+        if code == "BOOT":
+            text, level = phrases.DEVICE_RESTARTED, "warning"
+        else:
+            text, level = phrases.DEVICE_NEEDS_ATTENTION, "error"
+        if self._bus is not None:
+            self._bus.publish(Topic.NOTICE, {"level": level, "message": text, "code": f"DEVICE_{code}"})
+        self._say(text, level, interrupt=code == "FAULT")
+
+    # ================================================================== helpers
+    def _resolve_patient(self) -> int | None:
+        if self._patient_id is not None:
+            return int(self._patient_id)
+        if self._db is None:
+            return None
+        try:
+            with self._db.session() as s:
+                return s.scalar(select(Device.user_id).where(Device.device_id == self.settings.device_id))
+        except Exception:  # noqa: BLE001
+            log.exception("voice loop: could not read the device's patient")
+            return None
+
+    def _say(self, text: str, kind: str = "info", *, interrupt: bool = False,
+             meta: dict[str, Any] | None = None) -> None:
+        speaker = self._speaker
+        if speaker is None or not text:
+            return
+        try:
+            speaker.say(text, kind=kind, interrupt=interrupt, meta={"via": "voice_loop", **(meta or {})})
+        except Exception:  # noqa: BLE001
+            log.exception("voice loop: speaker.say failed")

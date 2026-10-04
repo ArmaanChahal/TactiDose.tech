@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <title>My pills — TactiDose</title>
+  <link rel="icon" href="/static/img/favicon.svg" type="image/svg+xml">
+  <script src="/static/js/theme-init.js"></script>
+  <link rel="stylesheet" href="/static/css/base.css">
+  <link rel="stylesheet" href="/static/css/patient.css">
+  <script type="module" src="/static/js/patient.js"></script>
+</head>
+<body class="portal patient">
+  <a class="skip-link" href="#main">Skip to main content</a>
+
+  <header class="app-header">
+    <p class="brand"><span class="icon-slot" data-icon="pill"></span> <span class="brand-name">TactiDose</span> <span class="brand-sub">My pills</span></p>
+    <p id="who" class="who"></p>
+    <div class="header-tools">
+      <span id="conn" class="conn" role="status" hidden></span>
+      <button type="button" id="bell" class="btn bell" aria-expanded="false" aria-controls="notif-panel"><span class="icon-slot" data-icon="bell"></span> Notifications <span id="bell-count" class="bell-count" data-count="0" aria-hidden="true">0</span></button>
+      <button type="button" id="settings-btn" class="btn" aria-expanded="false" aria-controls="settings-panel"><span class="icon-slot" data-icon="settings"></span> Settings</button>
+      <button type="button" id="signout" class="btn"><span class="icon-slot" data-icon="logout"></span> Sign out</button>
+    </div>
+  </header>
+
+  <nav class="views-nav" aria-label="Sections">
+    <ul>
+      <li><a href="#home" data-view="home"><span class="icon-slot" data-icon="home"></span> Home</a></li>
+      <li><a href="#assistant" data-view="assistant"><span class="icon-slot" data-icon="mic"></span> Assistant</a></li>
+      <li><a href="#schedule" data-view="schedule"><span class="icon-slot" data-icon="calendar"></span> Schedule</a></li>
+      <li><a href="#history" data-view="history"><span class="icon-slot" data-icon="list"></span> History</a></li>
+      <li><a href="#reports" data-view="reports"><span class="icon-slot" data-icon="file"></span> Reports</a></li>
+      <li><a href="#share" data-view="share"><span class="icon-slot" data-icon="users"></span> Care team</a></li>
+    </ul>
+  </nav>
+
+  <main id="main" tabindex="-1">
+    <div id="page-error" class="page-error" hidden></div>
+    <div id="page-notices" class="notices"></div>
+
+    <section id="settings-panel" class="panel" aria-labelledby="settings-title" hidden>
+      <div class="panel-head">
+        <h2 id="settings-title" tabindex="-1">Settings</h2>
+        <button type="button" id="settings-close" class="btn">Close settings</button>
+      </div>
+      <div id="display-settings"></div>
+      <fieldset>
+        <legend>Sound and safety</legend>
+        <div class="check-row"><input type="checkbox" id="pref-speak-replies"><label for="pref-speak-replies">Speak the assistant's replies out loud</label></div>
+        <div class="check-row"><input type="checkbox" id="pref-speak-drops"><label for="pref-speak-drops">Say "pill dropped" out loud</label></div>
+        <div class="check-row"><input type="checkbox" id="pref-confirm-drops"><label for="pref-confirm-drops">Ask me before a pill drops</label></div>
+        <div class="check-row"><input type="checkbox" id="pref-offline-speech"><label for="pref-offline-speech">Use the offline voice recognizer (works without internet)</label></div>
+      </fieldset>
+      <fieldset>
+        <legend>Alerts</legend>
+        <div class="check-row"><input type="checkbox" id="desktop-alerts"><label for="desktop-alerts">Show desktop alerts when this page is in the background</label></div>
+        <p id="desktop-alerts-status" class="field-hint" role="status"></p>
+      </fieldset>
+    </section>
+
+    <section id="notif-panel" class="panel" aria-labelledby="notif-title" hidden>
+      <div class="panel-head">
+        <h2 id="notif-title" tabindex="-1">Notifications</h2>
+        <button type="button" id="notif-mark-all" class="btn">Mark all as read</button>
+        <button type="button" id="notif-close" class="btn">Close notifications</button>
+      </div>
+      <ul id="notif-list" class="notif-list"></ul>
+    </section>
+
+    <!-- ============================================================ Home -->
+    <section id="view-home" class="view" aria-labelledby="home-title">
+      <h1 id="home-title" class="view-title" tabindex="-1">Your pills</h1>
+      <div id="drop-result" class="drop-result" hidden></div>
+
+      <div class="status-grid">
+        <div class="status-card">
+          <h2 class="status-label"><span class="icon-slot" data-icon="clock"></span> Next pill</h2>
+          <p id="next-pill" class="status-big">Loading…</p>
+          <p id="auto-drop-note" class="status-note"></p>
+        </div>
+        <div id="cooldown-card" class="status-card">
+          <h2 class="status-label"><span class="icon-slot" data-icon="pill"></span> Drop a pill</h2>
+          <p id="cooldown-text" class="status-big">Loading…</p>
+          <p id="cooldown-rule" class="status-note"></p>
+        </div>
+      </div>
+
+      <h2 id="containers-title">Containers</h2>
+      <ul id="containers" class="containers" aria-labelledby="containers-title"></ul>
+
+      <div class="status-grid">
+        <div class="status-card">
+          <h2 class="status-label"><span class="icon-slot" data-icon="check-circle"></span> Last pill</h2>
+          <p id="last-drop">Loading…</p>
+        </div>
+        <div class="status-card">
+          <h2 class="status-label"><span class="icon-slot" data-icon="plug"></span> Pill device</h2>
+          <p id="device-line">Loading…</p>
+          <button type="button" id="device-stop" class="btn"><span class="icon-slot" data-icon="stop"></span> Stop the device</button>
+        </div>
+      </div>
+
+      <section id="alerts-box" class="alerts-box" aria-labelledby="alerts-title" hidden>
+        <h2 id="alerts-title"><span class="icon-slot" data-icon="warning"></span> Good to know</h2>
+        <ul id="alerts-list" class="alerts-list"></ul>
+      </section>
+    </section>
+
+    <!-- ============================================================ Assistant -->
+    <section id="view-assistant" class="view" aria-labelledby="assistant-title" hidden>
+      <h1 id="assistant-title" class="view-title" tabindex="-1">Assistant</h1>
+      <p class="view-intro">Ask about your pills, or ask for a pill. Press Talk and speak, or type below.</p>
+      <p id="chat-log-label" class="visually-hidden">Conversation with the assistant</p>
+      <ol id="chat-log" class="chat-log" role="log" aria-live="polite" aria-relevant="additions" aria-labelledby="chat-log-label" tabindex="0"></ol>
+      <p id="voice-status" class="voice-status" role="status"></p>
+      <p id="voice-interim" class="voice-interim" hidden></p>
+      <div class="talk-row">
+        <button type="button" id="talk-btn" class="btn btn-primary btn-talk" aria-pressed="false" aria-describedby="talk-hint"><span class="icon-slot" data-icon="mic"></span> <span id="talk-label">Talk</span></button>
+        <p id="talk-hint" class="field-hint">Shortcut: <kbd>Alt</kbd> + <kbd>M</kbd>. Press Talk again when you are done. <kbd>Esc</kbd> stops.</p>
+      </div>
+      <form id="chat-form" class="chat-form" novalidate>
+        <label for="chat-text">Type a message</label>
+        <div class="chat-input-row">
+          <input id="chat-text" type="text" autocomplete="off" maxlength="500" enterkeyhint="send">
+          <button type="submit" id="chat-send" class="btn btn-primary"><span class="icon-slot" data-icon="send"></span> Send</button>
+        </div>
+      </form>
+      <div class="btn-row assistant-tools">
+        <div class="check-row"><input type="checkbox" id="speak-replies"><label for="speak-replies">Speak replies</label></div>
+        <button type="button" id="stop-speaking" class="btn"><span class="icon-slot" data-icon="volume-off"></span> Stop speaking</button>
+        <button type="button" id="new-chat" class="btn"><span class="icon-slot" data-icon="plus"></span> New conversation</button>
+      </div>
+    </section>
+
+    <!-- ============================================================ Schedule -->
+    <section id="view-schedule" class="view" aria-labelledby="schedule-title" hidden>
+      <h1 id="schedule-title" class="view-title" tabindex="-1">Schedule</h1>
+      <p class="view-intro">Pills drop by themselves at these times, even if you forget. Only your doctor or family can change the schedule.</p>
+      <div class="day-nav">
+        <button type="button" id="sched-prev" class="btn">Previous day</button>
+        <h2 id="sched-day-title" class="day-title">Today</h2>
+        <button type="button" id="sched-next" class="btn">Next day</button>
+        <button type="button" id="sched-today" class="btn">Back to today</button>
+      </div>
+      <ul id="sched-doses" class="item-list" aria-labelledby="sched-day-title"></ul>
+      <h2 id="sched-list-title">Your regular times</h2>
+      <ul id="sched-list" class="item-list" aria-labelledby="sched-list-title"></ul>
+    </section>
+
+    <!-- ============================================================ History -->
+    <section id="view-history" class="view" aria-labelledby="history-title" hidden>
+      <h1 id="history-title" class="view-title" tabindex="-1">History</h1>
+      <p class="view-intro">Every pill request, including the ones that did not drop and why.</p>
+      <div id="history-root"></div>
+    </section>
+
+    <!-- ============================================================ Reports -->
+    <section id="view-reports" class="view" aria-labelledby="reports-title" hidden>
+      <h1 id="reports-title" class="view-title" tabindex="-1">Reports</h1>
+      <p class="view-intro">A report shows your pills, your schedule and your conversations for a period. You can send it to your doctor.</p>
+      <div id="reports-root"></div>
+    </section>
+
+    <!-- ============================================================ Care team -->
+    <section id="view-share" class="view" aria-labelledby="share-title" hidden>
+      <h1 id="share-title" class="view-title" tabindex="-1">Share with your care team</h1>
+      <p class="view-intro">Your doctor or family can follow your pills and help with refills and the schedule. They need these two codes.</p>
+      <dl class="share-codes">
+        <div class="share-code">
+          <dt>Patient ID</dt>
+          <dd><span id="share-pid" class="code-box" aria-describedby="share-pid-spelled">–</span><span id="share-pid-spelled" class="visually-hidden"></span></dd>
+        </div>
+        <div class="share-code">
+          <dt>Link code</dt>
+          <dd><span id="share-code" class="code-box" aria-describedby="share-code-spelled">–</span><span id="share-code-spelled" class="visually-hidden"></span></dd>
+        </div>
+      </dl>
+      <p>Share these with your doctor or family. They sign in to TactiDose, choose "Link a patient" and type both codes.</p>
+      <button type="button" id="share-copy" class="btn btn-primary"><span class="icon-slot" data-icon="copy"></span> Copy both codes</button>
+      <p id="share-status" role="status"></p>
+    </section>
+  </main>
+
+  <div id="toasts" class="toasts" role="region" aria-label="New notifications"></div>
+
+  <footer class="app-footer">
+    <p>TactiDose prototype — not a medical device. The demo uses candy, never real medication.</p>
+  </footer>
+</body>
+</html>

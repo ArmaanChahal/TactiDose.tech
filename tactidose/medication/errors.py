@@ -1,13 +1,14 @@
 """Domain exceptions for the medication package.
 
-Caregiver/admin operations (catalog, compartments, schedules, onboarding, dose
-review) raise these for invalid input or conflicting state. The HTTP layer maps
-them to status codes via :attr:`DomainError.status_code`::
+Doctor/family operations (catalog, containers, schedules, settings, drop reviews, dose skips,
+onboarding) raise these for invalid input or conflicting state. The HTTP layer maps them to
+status codes via :attr:`DomainError.status_code`::
 
     ValidationError -> 422    NotFoundError -> 404    ConflictError -> 409
 
-The kiosk/assistant path (``DoseServiceAPI``) never raises them for expected
-failures: it reports outcomes through status enums instead (fail closed).
+The drop path (``DropServiceAPI.request_drop`` / ``run_scheduled_drops``) never raises them for
+expected failures: it reports every refusal or hardware problem through ``DropOutcome.status``
+and ``reason`` instead (fail closed).
 """
 
 from __future__ import annotations
@@ -39,7 +40,7 @@ class ValidationError(DomainError):
 
 
 class NotFoundError(DomainError):
-    """The referenced record does not exist (HTTP 404)."""
+    """The referenced record does not exist, or belongs to another patient (HTTP 404)."""
 
     status_code = 404
 

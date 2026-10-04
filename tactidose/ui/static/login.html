@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <title>Sign in — TactiDose</title>
+  <link rel="icon" href="/static/img/favicon.svg" type="image/svg+xml">
+  <script src="/static/js/theme-init.js"></script>
+  <link rel="stylesheet" href="/static/css/base.css">
+  <link rel="stylesheet" href="/static/css/login.css">
+  <script type="module" src="/static/js/login.js"></script>
+</head>
+<body class="portal login">
+  <a class="skip-link" href="#main">Skip to main content</a>
+
+  <header class="app-header">
+    <p class="brand"><span class="icon-slot" data-icon="pill"></span> <span class="brand-name">TactiDose</span> <span class="brand-sub">Pill dispenser</span></p>
+    <div class="header-tools">
+      <button type="button" id="theme-btn" class="btn btn-small">Colours</button>
+    </div>
+  </header>
+
+  <main id="main" class="login-main" tabindex="-1">
+    <h1>Welcome to TactiDose</h1>
+    <p class="lead">Sign in to see your pills, or create an account.</p>
+    <div id="page-error" class="page-error" hidden></div>
+
+    <section id="signed-in" class="card" aria-labelledby="signed-in-title" hidden>
+      <h2 id="signed-in-title">You are already signed in</h2>
+      <p id="signed-in-text"></p>
+      <div class="form-actions">
+        <a id="signed-in-continue" class="btn btn-primary btn-big" href="/patient">Continue</a>
+        <button type="button" id="signed-in-signout" class="btn btn-big">Sign out</button>
+      </div>
+    </section>
+
+    <div id="mode-switch" class="mode-switch" role="group" aria-label="Sign in or create an account">
+      <button type="button" id="show-signin" class="btn btn-big" aria-pressed="true" aria-controls="signin-section">Sign in</button>
+      <button type="button" id="show-register" class="btn btn-big" aria-pressed="false" aria-controls="register-section">Create an account</button>
+    </div>
+
+    <!-- ============================================================ sign in -->
+    <section id="signin-section" class="card" aria-labelledby="signin-title">
+      <h2 id="signin-title" tabindex="-1">Sign in</h2>
+      <form id="signin-form" novalidate>
+        <div class="field">
+          <label for="signin-email">Email</label>
+          <input id="signin-email" name="email" type="email" autocomplete="username" required spellcheck="false">
+        </div>
+        <div class="field">
+          <label for="signin-password">Password</label>
+          <div class="password-row">
+            <input id="signin-password" name="password" type="password" autocomplete="current-password" required>
+            <button type="button" id="signin-show" class="btn" aria-pressed="false" aria-controls="signin-password">Show</button>
+          </div>
+        </div>
+        <p id="signin-error" class="form-error" role="alert" hidden></p>
+        <button type="submit" id="signin-submit" class="btn btn-primary btn-big">Sign in</button>
+      </form>
+      <div id="demo-accounts" class="demo-accounts" hidden>
+        <h3 id="demo-accounts-title">Demo accounts</h3>
+        <p class="field-hint">Demo mode is on. Pick an account to fill in the form, then press Sign in.</p>
+        <div id="demo-account-buttons" class="btn-row" role="group" aria-labelledby="demo-accounts-title"></div>
+      </div>
+    </section>
+
+    <!-- ============================================================ register -->
+    <section id="register-section" class="card" aria-labelledby="register-title" hidden>
+      <h2 id="register-title" tabindex="-1">Create an account</h2>
+      <p id="register-disabled" class="state-msg" hidden>New accounts cannot be created on this server. Ask the person who runs it.</p>
+      <form id="register-form" novalidate>
+        <fieldset>
+          <legend>Who are you?</legend>
+          <div class="radio-row"><input type="radio" id="role-patient" name="role" value="patient" checked><label for="role-patient">A patient (I use the pill dispenser)</label></div>
+          <div class="radio-row"><input type="radio" id="role-family" name="role" value="family"><label for="role-family">A family member or carer</label></div>
+          <div class="radio-row"><input type="radio" id="role-doctor" name="role" value="doctor"><label for="role-doctor">A doctor</label></div>
+        </fieldset>
+        <div class="field">
+          <label for="reg-name">Your name</label>
+          <input id="reg-name" name="display_name" type="text" autocomplete="name" maxlength="120" required>
+        </div>
+        <div class="field">
+          <label for="reg-email">Email</label>
+          <input id="reg-email" name="email" type="email" autocomplete="email" required spellcheck="false">
+        </div>
+        <div class="field">
+          <label for="reg-password">Password</label>
+          <p id="reg-password-hint" class="field-hint">At least 8 characters.</p>
+          <div class="password-row">
+            <input id="reg-password" name="password" type="password" autocomplete="new-password" minlength="8" required aria-describedby="reg-password-hint">
+            <button type="button" id="reg-show" class="btn" aria-pressed="false" aria-controls="reg-password">Show</button>
+          </div>
+        </div>
+        <div class="field">
+          <label for="reg-phone">Phone number (optional)</label>
+          <input id="reg-phone" name="phone" type="tel" autocomplete="tel" maxlength="32">
+        </div>
+        <p id="register-error" class="form-error" role="alert" hidden></p>
+        <button type="submit" id="register-submit" class="btn btn-primary btn-big">Create account</button>
+      </form>
+    </section>
+
+    <!-- ============================================================ after a patient registers -->
+    <section id="patient-codes" class="card" aria-labelledby="codes-title" hidden>
+      <h2 id="codes-title" tabindex="-1">Your account is ready</h2>
+      <p>Share these two codes with your doctor or family. They need both to follow your pills.</p>
+      <dl class="share-codes">
+        <div class="share-code">
+          <dt>Patient ID</dt>
+          <dd><span id="codes-pid" class="code-box" aria-describedby="codes-pid-spelled">–</span><span id="codes-pid-spelled" class="visually-hidden"></span></dd>
+        </div>
+        <div class="share-code">
+          <dt>Link code</dt>
+          <dd><span id="codes-code" class="code-box" aria-describedby="codes-code-spelled">–</span><span id="codes-code-spelled" class="visually-hidden"></span></dd>
+        </div>
+      </dl>
+      <p>They sign in, choose "Link a patient" and type both codes. You can find the codes again later under "Care team".</p>
+      <div class="form-actions">
+        <button type="button" id="codes-copy" class="btn btn-big"><span class="icon-slot" data-icon="copy"></span> Copy both codes</button>
+        <a id="codes-continue" class="btn btn-primary btn-big" href="/patient">Continue to my pills</a>
+      </div>
+      <p id="codes-status" role="status"></p>
+    </section>
+
+    <!-- ============================================================ caregiver: link a patient -->
+    <section id="link-step" class="card" aria-labelledby="link-title" hidden>
+      <h2 id="link-title" tabindex="-1">Link a patient</h2>
+      <p>Ask the patient for their Patient ID and link code. They find both under "Care team" on their TactiDose page.</p>
+      <form id="link-form" novalidate>
+        <div class="field">
+          <label for="link-pid">Patient ID</label>
+          <input id="link-pid" name="patient_id" type="text" inputmode="numeric" autocomplete="off" required>
+        </div>
+        <div class="field">
+          <label for="link-code">Link code</label>
+          <input id="link-code" name="link_code" type="text" autocomplete="off" autocapitalize="characters" spellcheck="false" required>
+        </div>
+        <p id="link-error" class="form-error" role="alert" hidden></p>
+        <div class="form-actions">
+          <button type="submit" id="link-submit" class="btn btn-primary btn-big">Link patient</button>
+          <a class="btn btn-big" href="/care">Skip for now</a>
+        </div>
+      </form>
+    </section>
+  </main>
+
+  <footer class="app-footer">
+    <p>TactiDose prototype — not a medical device. The demo uses candy, never real medication.</p>
+  </footer>
+</body>
+</html>

@@ -2,19 +2,22 @@
  * harness.cpp -- native conformance harness for the TactiDose firmware core.
  *
  * Runs firmware/tactidose_esp32/TactiDoseCore.cpp (the exact code that runs on the ESP32) against
- * FakeHal (simulated carousel, simulated time) and speaks the stdin/stdout protocol of
- * docs/ARCHITECTURE.md §7. Driven by tactidose/hardware/conformance_native.py (NativeTarget).
+ * FakeHal (simulated mechanism, simulated time) and speaks the stdin/stdout protocol of
+ * docs/ARCHITECTURE_v1.md §7 plus the v1.1 directive !pills (docs/ARCHITECTURE.md §13). Driven by
+ * tactidose/hardware/conformance_native.py (NativeTarget).
  *
  * stdin, one directive per line; stdout: firmware serial lines verbatim (without \r), then exactly
  * one "!ack <sim_time_ms>" per stdin line:
  *   > <text>                deliver <text> as one serial line (">" alone = empty line)
- *   !reset                  fresh device: carousel 1600 steps before home, sensor ok, jam off,
- *                           buttons released, firmware not booted, sim time 0
- *   !boot ok|dead|none      (re)initialise the firmware (setup()); keeps the physical position
+ *   !reset                  fresh device: carousel 1600 steps before home, sensors ok, jam off,
+ *                           buttons released, every container full (20 pills), firmware not
+ *                           booted, sim time 0
+ *   !boot ok|dead|none      (re)initialise the firmware (setup()); keeps the physical state
  *   !tick <ms>              advance simulated time, calling loop() every 1 ms
  *   !button CONFIRM|CANCEL 1|0
  *   !sensor ok|dead         (extension: stuck = always active)
  *   !jam 1|0
+ *   !pills <slot> <count>   v1.1: physical pill count of one container (no lines, no time)
  *   !quit
  * Extensions (not used by the frozen runner; they never change the simulated state):
  *   !peek <max_ms>          "!peek <n>": the next n ms are guaranteed silent (no serial line)
@@ -25,7 +28,9 @@
  *                           ("-" = zero bytes)
  * Extensions that do change state:
  *   !rx <hex>               deliver raw bytes (no implicit newline), e.g. "\r" terminators
- *   !set <key>=<value>      firmware setting for the following !boot (keys of --set, or millisOffset)
+ *   !dropsensor ok|dead|blocked   drop sensor (IR break-beam) works / never sees a pill / beam stuck
+ *   !set <key>=<value>      firmware setting for the following !reset / !boot (keys of --set, or
+ *                           millisOffset); mechanism / numSlots also reshape the simulated mechanism
  *   !defaults               back to the command-line settings
  * A line that cannot be processed produces "!err <reason>" before its !ack.
  *
@@ -48,6 +53,7 @@
 namespace {
 
 const uint64_t kMaxTickMs = 100000000ULL;
+const uint64_t kMaxPills = 9999;
 
 std::vector<std::string> splitWords(const std::string& s) {
   std::vector<std::string> words;
@@ -129,10 +135,11 @@ bool decodeHex(const std::string& hex, std::string* out) {
 }
 
 /* Firmware configuration matching the conformance.json "harness" physics and the Python
- * simulator defaults (docs/ARCHITECTURE.md SimConfig). Independent of config.h on purpose. */
+ * simulator defaults: a 6-slot carousel with a drop sensor. Independent of config.h on purpose. */
 tactidose::CoreConfig harnessConfig() {
   tactidose::CoreConfig c;
-  c.fwVersion = "1.0.0-native";
+  c.fwVersion = "1.1.0-native";
+  c.mechanism = tactidose::Mechanism::kCarousel;
   c.numSlots = 6;
   c.stepsPerRev = 3200.0f;
   c.maxSpeed = 1600.0f;
@@ -154,12 +161,25 @@ tactidose::CoreConfig harnessConfig() {
   c.servoClosedDeg = 20;
   c.servoOpenDeg = 90;
   c.gateMaxOpenMs = 120000;
+  c.dropOpenMs = 500;
+  c.hasDropSensor = true;
   c.debounceMs = 30;
   c.motionTimeoutFactor = 2.0f;
   c.motionTimeoutMarginMs = 2000;
   c.holdWhenIdle = true;
   c.debugLog = true;
   return c;
+}
+
+/* The simulated mechanism that matches a firmware configuration. */
+harness::Physics physicsFor(const tactidose::CoreConfig& c) {
+  harness::Physics p;
+  p.numSlots = c.numSlots;
+  p.servoClosedDeg = c.servoClosedDeg;
+  p.servoOpenDeg = c.servoOpenDeg;
+  p.gateTravelMs = c.gateTravelMs;
+  p.perContainer = c.mechanism == tactidose::Mechanism::kPerContainerServo;
+  return p;
 }
 
 /* Stable storage for strings referenced by CoreConfig::fwVersion (never freed). */
@@ -180,11 +200,22 @@ bool applySetting(const std::string& assignment, tactidose::CoreConfig* c) {
     c->fwVersion = internString(value);
     return true;
   }
+  if (key == "mechanism") {
+    if (value == "carousel") {
+      c->mechanism = tactidose::Mechanism::kCarousel;
+    } else if (value == "servo" || value == "per_container_servo") {
+      c->mechanism = tactidose::Mechanism::kPerContainerServo;
+    } else {
+      return false;
+    }
+    return true;
+  }
   bool* flag = nullptr;
   if (key == "verifySlot") flag = &c->verifySlotWithHomeSensor;
   if (key == "debugLog") flag = &c->debugLog;
   if (key == "holdWhenIdle") flag = &c->holdWhenIdle;
   if (key == "autoHome") flag = &c->autoHomeOnBoot;
+  if (key == "dropSensor") flag = &c->hasDropSensor;
   if (flag != nullptr) return parseBool(value, flag);
   long n = 0;
   if (!parseLong(value, &n)) return false;
@@ -195,10 +226,14 @@ bool applySetting(const std::string& assignment, tactidose::CoreConfig* c) {
   if (n < 0) return false;
   if (key == "homeBackoffSteps") {
     c->homeBackoffSteps = n;
+  } else if (key == "numSlots" && n >= tactidose::kMinSlots && n <= tactidose::kMaxSlots) {
+    c->numSlots = static_cast<uint8_t>(n);
   } else if (key == "homeDebounceMs" && n <= 1000) {
     c->homeDebounceMs = static_cast<uint16_t>(n);
   } else if (key == "settleMs" && n <= 60000) {
     c->settleMs = static_cast<uint16_t>(n);
+  } else if (key == "dropOpenMs" && n <= 10000) {
+    c->dropOpenMs = static_cast<uint16_t>(n);
   } else if (key == "debounceMs" && n <= 1000) {
     c->debounceMs = static_cast<uint16_t>(n);
   } else if (key == "homeTimeoutMs" && n > 0) {
@@ -221,8 +256,8 @@ bool applySetting(const std::string& assignment, tactidose::CoreConfig* c) {
 
 class Harness {
  public:
-  Harness(const tactidose::CoreConfig& config, const harness::Physics& physics, uint32_t millisOffset)
-      : hal_(physics),
+  Harness(const tactidose::CoreConfig& config, uint32_t millisOffset)
+      : hal_(physicsFor(config)),
         config_(config),
         core_(hal_, config_),
         defaults_(config),
@@ -291,15 +326,17 @@ class Harness {
     const std::string cmd = w.empty() ? std::string() : w[0];
     const size_t argc = w.size() - (w.empty() ? 0 : 1);
     if (cmd == "reset" && argc == 0) {
+      hal_.configure(physicsFor(config_));
       hal_.resetAll();
       booted_ = false;
     } else if (cmd == "boot" && argc == 1 && (w[1] == "ok" || w[1] == "dead" || w[1] == "none")) {
       const bool fitted = w[1] != "none";
       if (w[1] == "ok") hal_.setSensor(harness::SensorMode::kOk);
       if (w[1] == "dead") hal_.setSensor(harness::SensorMode::kDead);
-      hal_.setMillisOffset(millisOffset_);
-      hal_.powerOn(fitted);
       config_.hasHomeSensor = fitted;
+      hal_.configure(physicsFor(config_));
+      hal_.setMillisOffset(millisOffset_);
+      hal_.powerOn(fitted && config_.mechanism == tactidose::Mechanism::kCarousel, config_.hasDropSensor);
       core_ = tactidose::TactiDoseCore(hal_, config_);
       core_.begin();
       booted_ = true;
@@ -317,8 +354,14 @@ class Harness {
     } else if (cmd == "sensor" && argc == 1 && (w[1] == "ok" || w[1] == "dead" || w[1] == "stuck")) {
       hal_.setSensor(w[1] == "ok" ? harness::SensorMode::kOk
                                   : (w[1] == "dead" ? harness::SensorMode::kDead : harness::SensorMode::kStuck));
+    } else if (cmd == "dropsensor" && argc == 1 && (w[1] == "ok" || w[1] == "dead" || w[1] == "blocked")) {
+      hal_.setDropSensor(w[1] == "ok" ? harness::DropSensorMode::kOk
+                                      : (w[1] == "dead" ? harness::DropSensorMode::kDead
+                                                        : harness::DropSensorMode::kBlocked));
     } else if (cmd == "jam" && argc == 1 && (w[1] == "1" || w[1] == "0")) {
       hal_.setJam(w[1] == "1");
+    } else if (cmd == "pills" && argc == 2) {
+      pills(w[1], w[2]);
     } else if (cmd == "quit" && argc == 0) {
       return false;
     } else if (cmd == "peek" && argc == 1) {
@@ -333,7 +376,7 @@ class Harness {
       hal_.describe(out_);
       out_ += std::string(" fw_state=") + tactidose::stateName(core_.state()) + " fw_homed=" +
               (core_.homed() ? "1" : "0") + " fw_slot=" + std::to_string(core_.slot()) +
-              " booted=" + (booted_ ? "1" : "0") + "\n";
+              " fw_releasing=" + (core_.releasing() ? "1" : "0") + " booted=" + (booted_ ? "1" : "0") + "\n";
     } else if (cmd == "set" && argc == 1) {
       set(w[1]);
     } else if (cmd == "defaults" && argc == 0) {
@@ -352,6 +395,18 @@ class Harness {
       error("unknown or malformed directive: !" + cmd);
     }
     return true;
+  }
+
+  void pills(const std::string& slotText, const std::string& countText) {
+    uint64_t slot = 0;
+    uint64_t count = 0;
+    if (!parseUnsigned(slotText, static_cast<uint64_t>(harness::kMaxContainers - 1), &slot) ||
+        !parseUnsigned(countText, kMaxPills, &count)) {
+      error("pills: expected <slot 0.." + std::to_string(harness::kMaxContainers - 1) + "> <count 0.." +
+            std::to_string(kMaxPills) + ">");
+      return;
+    }
+    hal_.setPills(static_cast<int>(slot), static_cast<int>(count));
   }
 
   void set(const std::string& assignment) {
@@ -389,7 +444,7 @@ class Harness {
   }
 
   harness::FakeHal hal_;
-  tactidose::CoreConfig config_; /* used by the next !boot */
+  tactidose::CoreConfig config_; /* used by the next !reset / !boot */
   tactidose::TactiDoseCore core_;
   const tactidose::CoreConfig defaults_;
   uint32_t millisOffset_;
@@ -401,7 +456,7 @@ class Harness {
 int usage(const char* argv0) {
   fprintf(stderr,
           "usage: %s [--millis-offset N] [--set key=value]...\n"
-          "  speaks the docs/ARCHITECTURE.md section 7 protocol on stdin/stdout (see harness.cpp)\n",
+          "  speaks the docs/ARCHITECTURE_v1.md section 7 protocol (+ !pills) on stdin/stdout (see harness.cpp)\n",
           argv0);
   return 2;
 }
@@ -426,13 +481,8 @@ int main(int argc, char** argv) {
       return usage(argv[0]);
     }
   }
-  harness::Physics physics;
-  physics.numSlots = config.numSlots;
-  physics.servoClosedDeg = config.servoClosedDeg;
-  physics.servoOpenDeg = config.servoOpenDeg;
-  physics.gateTravelMs = config.gateTravelMs;
 
-  Harness harness(config, physics, millisOffset);
+  Harness harness(config, millisOffset);
   std::ios::sync_with_stdio(false);
   std::string line;
   while (std::getline(std::cin, line)) {

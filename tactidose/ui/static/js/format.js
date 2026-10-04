@@ -3,8 +3,10 @@
  *
  * Times are always shown in the *device* timezone, not the browser's: `*_local`
  * fields carry the device offset ("2026-10-04T08:00:00-07:00") so their wall-clock
- * digits are used directly; UTC fields are shifted by a device offset taken from
- * a `*_local` value (see deviceOffsetFrom()).
+ * digits are used directly; UTC fields are shifted by a device offset taken from a
+ * `*_local` value (see deviceOffsetFrom()). The server clock may be "time travelling"
+ * in demo mode, so "now" always comes from the server (PatientStatus.now_local) plus
+ * the time elapsed since it was fetched — never from the browser's Date.
  */
 
 const ISO_RE = /^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2})(?:[.,](\d+))?)?)?\s*(Z|[+-]\d{2}(?::?\d{2})?)?$/i;
@@ -23,6 +25,25 @@ export const WEEKDAY_NAMES = Object.freeze({
 });
 
 const pad2 = (n) => String(n).padStart(2, '0');
+
+/**
+ * User-facing container number of a ContainerInfo / DoseView / PillDropView: its
+ * `container_number`, else `slot + 1`, else null (never "container 1" for an unknown slot).
+ */
+export function containerNumberOf(obj) {
+  if (!obj) return null;
+  const n = obj.container_number;
+  if (n !== null && n !== undefined && n !== '' && Number.isFinite(Number(n))) return Number(n);
+  const s = obj.slot;
+  if (s === null || s === undefined || s === '' || !Number.isFinite(Number(s))) return null;
+  return Number(s) + 1;
+}
+
+/** "1 pill" / "2 pills". */
+export function plural(n, one, many = `${one}s`) {
+  const v = Number(n);
+  return `${Number.isFinite(v) ? v : 0} ${v === 1 ? one : many}`;
+}
 
 /**
  * Parse an ISO-8601 date/datetime. Returns wall-clock parts as written, the offset in
@@ -62,6 +83,12 @@ export function parseIso(value) {
 export function deviceOffsetFrom(localIso) {
   const p = parseIso(localIso);
   return p ? p.offsetMin : null;
+}
+
+/** Epoch milliseconds of an ISO string with an offset, else NaN. */
+export function epochOf(iso) {
+  const p = parseIso(iso);
+  return p && p.epochMs !== null ? p.epochMs : NaN;
 }
 
 function wallParts(wallMs) {
@@ -114,11 +141,11 @@ export function formatDateTimeDevice(iso, offsetMin) {
   return `${DAYS[w.weekday]} ${w.day} ${MONTHS[w.month - 1]}, ${clock12(w.hour, w.minute)}`;
 }
 
-/** "YYYY-MM-DD" wall date of an ISO string (in its own offset). */
-export function dateKey(iso) {
-  const p = parseIso(iso);
-  if (!p) return null;
-  return `${p.year}-${pad2(p.month)}-${pad2(p.day)}`;
+/** "YYYY-MM-DD" wall date of an ISO string in the device offset (or its own offset). */
+export function dateKey(iso, offsetMin = null) {
+  const w = deviceWall(iso, offsetMin);
+  if (!w) return null;
+  return `${w.year}-${pad2(w.month)}-${pad2(w.day)}`;
 }
 
 function keyToWallMs(key) {
@@ -164,13 +191,28 @@ export function shiftDateKey(key, days) {
   return `${w.year}-${pad2(w.month)}-${pad2(w.day)}`;
 }
 
-/** "TODAY" / "TOMORROW" / "YESTERDAY" for a dose time relative to the device's "now", else null. */
-export function relativeDayWord(iso, nowLocalIso) {
-  const diff = dayDiff(dateKey(nowLocalIso), dateKey(iso));
-  if (diff === 0) return 'TODAY';
-  if (diff === 1) return 'TOMORROW';
-  if (diff === -1) return 'YESTERDAY';
+/** "today" / "tomorrow" / "yesterday" for `iso` relative to the device's now, else null. */
+export function relativeDayWord(iso, nowLocalIso, offsetMin = null) {
+  const offset = offsetMin ?? deviceOffsetFrom(nowLocalIso);
+  const diff = dayDiff(dateKey(nowLocalIso), dateKey(iso, offset));
+  if (diff === 0) return 'today';
+  if (diff === 1) return 'tomorrow';
+  if (diff === -1) return 'yesterday';
   return null;
+}
+
+/**
+ * "today at 8:00 AM" / "tomorrow at 8:00 AM" / "on Mon 5 Oct at 8:00 AM" in device time.
+ * Without `nowLocalIso` it falls back to "Mon 5 Oct at 8:00 AM".
+ */
+export function formatWhen(iso, nowLocalIso = null, offsetMin = null) {
+  const offset = offsetMin ?? deviceOffsetFrom(nowLocalIso);
+  const w = deviceWall(iso, offset);
+  if (!w) return DASH;
+  const time = clock12(w.hour, w.minute);
+  const word = nowLocalIso ? relativeDayWord(iso, nowLocalIso, offset) : null;
+  if (word) return `${word} at ${time}`;
+  return `${nowLocalIso ? 'on ' : ''}${DAYS[w.weekday]} ${w.day} ${MONTHS[w.month - 1]} at ${time}`;
 }
 
 /** Wall-clock "YYYY-MM-DDTHH:MM" `minutes` after the device-local `nowLocalIso` (seconds dropped). */
@@ -179,6 +221,15 @@ export function addMinutesToLocal(nowLocalIso, minutes) {
   if (!p) return null;
   const w = wallParts(p.wallMs + minutes * 60000);
   return `${w.year}-${pad2(w.month)}-${pad2(w.day)}T${pad2(w.hour)}:${pad2(w.minute)}`;
+}
+
+/** Device-local ISO string `seconds` after `nowLocalIso`, keeping its offset (for live clocks). */
+export function advanceLocalIso(nowLocalIso, seconds) {
+  const p = parseIso(nowLocalIso);
+  if (!p) return null;
+  const w = wallParts(p.wallMs + Math.round(seconds * 1000));
+  const tz = p.offsetMin === null ? '' : `${p.offsetMin < 0 ? '-' : '+'}${pad2(Math.floor(Math.abs(p.offsetMin) / 60))}:${pad2(Math.abs(p.offsetMin) % 60)}`;
+  return `${w.year}-${pad2(w.month)}-${pad2(w.day)}T${pad2(w.hour)}:${pad2(w.minute)}:${pad2(w.second)}${tz}`;
 }
 
 /** Normalise "8:5", "08:05:00" … to "08:05"; returns null when not a time. */
@@ -213,23 +264,36 @@ export function formatPercent(rate) {
   return p === null ? DASH : `${Math.round(p)}%`;
 }
 
-export function formatMinutes(minutes) {
-  if (minutes === null || minutes === undefined || !Number.isFinite(Number(minutes))) return DASH;
-  const m = Number(minutes);
-  if (m < 1) return 'under 1 min';
-  if (m < 60) return `${Math.round(m)} min`;
-  const h = Math.floor(m / 60);
-  const rest = Math.round(m - h * 60);
-  return rest ? `${h} h ${rest} min` : `${h} h`;
-}
-
 export function formatSeconds(seconds) {
   if (seconds === null || seconds === undefined || !Number.isFinite(Number(seconds))) return DASH;
   const s = Number(seconds);
   return s < 10 ? `${s.toFixed(2)} s` : `${Math.round(s)} s`;
 }
 
-/** "+2 h 05 min" / "-30 min" for a demo clock offset in seconds. */
+/**
+ * Words for a remaining duration, rounded up to the minute so the countdown never
+ * says "0 minutes" while a cooldown is still running:
+ * "less than a minute", "23 minutes", "1 hour", "1 hour 5 minutes".
+ */
+export function formatDuration(seconds) {
+  const s = Number(seconds);
+  if (!Number.isFinite(s) || s <= 0) return 'no time';
+  if (s < 60) return 'less than a minute';
+  const total = Math.ceil(s / 60);
+  const h = Math.floor(total / 60);
+  const m = total % 60;
+  if (!h) return plural(m, 'minute');
+  return m ? `${plural(h, 'hour')} ${plural(m, 'minute')}` : plural(h, 'hour');
+}
+
+/** "in 23 minutes" / "in less than a minute" / "now". */
+export function formatCountdown(seconds) {
+  const s = Number(seconds);
+  if (!Number.isFinite(s) || s <= 0) return 'now';
+  return `in ${formatDuration(s)}`;
+}
+
+/** "+2 h 05 min" / "−30 min" for a demo clock offset in seconds. */
 export function formatOffset(seconds) {
   const s = Number(seconds) || 0;
   const sign = s < 0 ? '−' : '+';
@@ -240,17 +304,12 @@ export function formatOffset(seconds) {
   return `${sign}${h} h ${pad2(m)} min`;
 }
 
-export function formatCount(n) {
-  if (n === null || n === undefined || !Number.isFinite(Number(n))) return DASH;
-  return Number(n).toLocaleString('en-US');
-}
-
-export function slotToCompartment(slot) {
-  return slot === null || slot === undefined ? null : Number(slot) + 1;
-}
-
-export function compartmentName(number) {
-  return number ? `Compartment ${number}` : 'No compartment';
+export function formatBytes(n) {
+  const v = Number(n);
+  if (!Number.isFinite(v) || v < 0) return DASH;
+  if (v < 1024) return `${v} bytes`;
+  if (v < 1024 * 1024) return `${Math.round(v / 1024)} KB`;
+  return `${(v / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 /** Repeat rule of a Schedule in words. */
@@ -262,41 +321,7 @@ export function describeRepeat(schedule) {
   return order.map((d) => WEEKDAY_NAMES[d].slice(0, 3)).join(', ');
 }
 
-/** Dose status -> word + icon + tone (never colour alone). */
-export const DOSE_STATUS = Object.freeze({
-  SCHEDULED: { word: 'Scheduled', icon: 'clock', tone: 'neutral' },
-  DUE: { word: 'Due now', icon: 'bell', tone: 'due' },
-  DISPENSING: { word: 'Preparing', icon: 'rotate', tone: 'caution' },
-  DISPENSED: { word: 'Accessed, not confirmed', icon: 'open', tone: 'info' },
-  TAKEN: { word: 'Taken', icon: 'check-circle', tone: 'good' },
-  MISSED: { word: 'Missed', icon: 'x-circle', tone: 'bad' },
-  CANCELLED: { word: 'Skipped', icon: 'slash', tone: 'neutral' },
-  HARDWARE_ERROR: { word: 'Hardware error', icon: 'warning', tone: 'bad' },
-});
-
-export function doseStatusInfo(status, needsReview = false) {
-  const base = DOSE_STATUS[status] || { word: status ? String(status) : 'Unknown', icon: 'help', tone: 'neutral' };
-  return { ...base, needsReview: Boolean(needsReview) };
-}
-
-/** Device state -> word + icon + tone for caregiver/demo views. */
-export const DEVICE_STATE = Object.freeze({
-  BOOT: { word: 'Starting up', icon: 'rotate', tone: 'caution' },
-  HOMING: { word: 'Homing', icon: 'rotate', tone: 'caution' },
-  READY: { word: 'Ready', icon: 'check-circle', tone: 'good' },
-  MOVING: { word: 'Moving', icon: 'rotate', tone: 'caution' },
-  AT_TARGET: { word: 'Settling at compartment', icon: 'rotate', tone: 'caution' },
-  GATE_OPEN: { word: 'Gate open', icon: 'open', tone: 'caution' },
-  SAFE_STOP: { word: 'Stopped (will re-home)', icon: 'stop', tone: 'caution' },
-  FAULT: { word: 'Fault (needs homing)', icon: 'warning', tone: 'bad' },
-  UNKNOWN: { word: 'Unknown', icon: 'help', tone: 'neutral' },
-});
-
-export function deviceStateInfo(state) {
-  return DEVICE_STATE[state] || { word: state ? String(state) : 'Unknown', icon: 'help', tone: 'neutral' };
-}
-
-/** Medication.source in words. */
-export function sourceName(source) {
-  return { manual: 'Entered manually', label_scan: 'From a label scan', demo_seed: 'Demo data' }[source] || source || DASH;
+/** "ALEX2026" -> "A, L, E, X, 2, 0, 2, 6" so screen readers spell a code out. */
+export function spellOut(code) {
+  return Array.from(String(code || '').replace(/\s+/g, '')).join(', ');
 }

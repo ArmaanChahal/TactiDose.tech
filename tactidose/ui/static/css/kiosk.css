@@ -1,568 +1,237 @@
 /*
- * Kiosk / touchscreen view (handoff §21). The primary user is blind or has low
- * vision: voice and the tactile buttons come first, this screen is secondary.
- * Very large text (base >= 32px, status >= 56px), few large buttons (>= 96px tall),
- * every state shown as words + icon. Layout works from 800×480 to 1920×1080:
- *   - wide landscape (>= 1100px wide, > 640px tall): status left, 2×3 buttons right;
- *   - narrow or short landscape (e.g. 800×480, 1024×600): stacked, 3×2 buttons;
- *   - portrait: stacked, 2×3 buttons.
- * The caption box is the flexible part: long messages scroll inside it instead
- * of pushing the buttons off screen.
+ * Kiosk screen (optional extra): a full-screen, voice-first device screen. Very large
+ * text (base >= 2rem, status word >= 3.5rem), few huge buttons (>= 6rem tall), every
+ * state as words + icon. Works from 800×480 to 1920×1080 and on phones.
  */
 
 .kiosk {
-  --k-font-base: clamp(32px, 1.25vw + 22px, 46px);
-  --k-font-status: clamp(56px, 3vw + 32px, 100px);
-  --k-font-small: clamp(24px, 0.5vw + 20px, 30px);
-  --k-btn-min-h: clamp(96px, 17vh, 200px);
-  --k-gap: clamp(8px, 1.2vw, 22px);
+  --k-font-base: clamp(2rem, 1.2vw + 1.4rem, 2.9rem);
+  --k-font-status: clamp(3.5rem, 3vw + 2rem, 6.25rem);
+  --k-font-small: clamp(1.5rem, 0.5vw + 1.25rem, 1.9rem);
+  --k-btn-min-h: clamp(6rem, 16vh, 12rem);
+  --k-gap: clamp(0.5rem, 1.2vw, 1.4rem);
   display: flex;
   flex-direction: column;
-  height: 100vh;
-  height: 100dvh;
-  min-height: 0;
-  overflow-y: auto;
+  min-height: 100vh;
+  min-height: 100dvh;
   font-size: var(--k-font-base);
   line-height: 1.2;
 }
 
-.kiosk .icon-slot {
-  display: inline-flex;
-  align-items: center;
-}
-
-.kiosk .icon-slot .icon {
-  width: 1em;
-  height: 1em;
-  vertical-align: 0;
-}
-
-/* ------------------------------------------------------------------ connection banner */
-
-.k-conn-banner {
-  flex: none;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 0.4em;
-  padding: 4px 12px;
-  background: var(--due-bg);
-  color: var(--due-fg);
-  font-size: var(--k-font-small);
-  font-weight: 900;
-  text-align: center;
-}
-
-/* ------------------------------------------------------------------ header */
-
 .k-header {
-  flex: none;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 6px 22px;
-  padding: 4px var(--k-gap);
-  border-bottom: 3px solid var(--border-subtle);
+  gap: 0.4rem 1.2rem;
+  padding: 0.3rem var(--k-gap);
+  border-bottom: 0.1875rem solid var(--border-subtle);
   font-size: var(--k-font-small);
 }
 
 .k-brand {
+  display: flex;
+  align-items: center;
+  gap: 0.3em;
   margin: 0;
-  font-size: var(--k-font-small);
   font-weight: 900;
-  letter-spacing: 0.02em;
 }
 
 .k-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.3em;
   margin: 0;
-  font-weight: 800;
   color: var(--fg-2);
-  white-space: nowrap;
+  font-weight: 700;
 }
 
-.k-chip[data-on="false"] {
-  color: var(--fg-3);
-}
-
-.k-nav {
+.k-header-tools {
   display: flex;
-  flex-wrap: wrap;
-  gap: 10px;
+  gap: 0.5rem;
   margin-left: auto;
 }
 
-.k-small-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.35em;
-  min-height: 48px;
-  padding: 2px 14px;
-  border: 3px solid var(--fg);
-  border-radius: 12px;
-  background: var(--surface-2);
-  color: var(--fg);
-  font-size: var(--k-font-small);
-  font-weight: 800;
-  text-decoration: none;
-  white-space: nowrap;
-  cursor: pointer;
-}
-
-.k-small-btn .icon {
-  width: 0.95em;
-  height: 0.95em;
-}
-
-/* ------------------------------------------------------------------ main layout */
-
-.k-main {
-  flex: 1 1 auto;
-  min-height: 0;
-  display: grid;
-  grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr);
-  grid-template-rows: minmax(0, 1fr);
-  gap: var(--k-gap);
-  padding: var(--k-gap);
-  align-items: stretch;
-}
-
-.k-status {
-  display: flex;
-  flex-direction: column;
-  gap: calc(var(--k-gap) * 0.8);
-  min-width: 0;
-  min-height: 0;
-}
-
-/* ------------------------------------------------------------------ status banner */
-
-.status-banner {
-  flex: none;
-  display: flex;
-  align-items: center;
-  gap: 0.25em;
-  padding: 0.12em 0.3em;
-  border: 6px solid transparent;
-  border-radius: 18px;
-  font-size: var(--k-font-status);
-  min-width: 0;
-}
-
-.status-icon {
-  display: inline-flex;
-  flex: none;
-}
-
-.status-icon .icon {
-  width: 1em;
-  height: 1em;
-}
-
-.status-text {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  column-gap: 0.5em;
-  min-width: 0;
-}
-
-.status-word {
-  font-size: var(--k-font-status);
-  font-weight: 900;
-  line-height: 1.04;
-}
-
-.status-detail {
-  flex-basis: 100%;
-  font-size: var(--k-font-base);
-  font-weight: 800;
-  line-height: 1.15;
-}
-
-.status-detail:empty {
-  display: none;
-}
-
-.status-banner[data-tone="ok"] {
-  background: var(--surface);
-  color: var(--fg);
-  border-color: var(--fg);
-}
-
-.status-banner[data-tone="due"] {
-  background: var(--due-bg);
-  color: var(--due-fg);
-  border-color: var(--due-fg);
-}
-
-.status-banner[data-tone="caution"] {
-  background: var(--caution-bg);
-  color: var(--caution-fg);
-  border-color: var(--caution-fg);
-  border-image: repeating-linear-gradient(45deg, #ffd400 0 14px, #000000 14px 28px) 6;
-}
-
-.status-banner[data-tone="ready"] {
-  background: var(--invert-bg);
-  color: var(--invert-fg);
-  border-color: var(--invert-bg);
-}
-
-.status-banner[data-tone="alert"] {
-  background: var(--danger-bg);
-  color: var(--danger-bg-fg);
-  border-color: var(--danger-bg-fg);
-}
-
-.status-banner[data-tone="offline"] {
-  background: var(--offline-bg);
-  color: var(--offline-fg);
-  border-color: var(--offline-fg);
-  border-style: dashed;
-}
-
-/* ------------------------------------------------------------------ next event + caption */
-
-.next-event {
-  flex: none;
-  margin: 0;
-  font-weight: 900;
-}
-
-.next-event:empty {
-  display: none;
-}
-
-.dose-detail {
-  flex: none;
-  margin: 0;
-  font-weight: 700;
-  color: var(--fg-2);
-}
-
-.caption-box {
-  flex: 1 1 auto;
-  min-height: 1.4em;
-  overflow-y: auto;
-  border-top: 3px solid var(--border-subtle);
-  padding-top: calc(var(--k-gap) * 0.6);
-  min-width: 0;
-}
-
-.caption-label {
-  margin: 0 0 4px;
-  font-size: var(--k-font-small);
-  font-weight: 800;
-  color: var(--fg-3);
-  letter-spacing: 0.04em;
-}
-
-.caption {
-  margin: 0;
-  font-weight: 650;
-  overflow-wrap: break-word;
-}
-
-.caption .icon {
-  width: 0.9em;
-  height: 0.9em;
-  margin-right: 0.25em;
-  vertical-align: -0.1em;
-}
-
-.caption[data-kind="warning"] .icon {
-  color: var(--warn-fg);
-}
-
-.caption[data-kind="success"] .icon {
-  color: var(--ok-fg);
-}
-
-.caption-alert {
-  color: var(--danger-fg);
-  font-weight: 800;
-}
-
-/* ------------------------------------------------------------------ buttons */
-
-.k-actions {
-  min-width: 0;
-  container-type: inline-size;
-}
-
-.k-actions:focus {
-  outline: none;
-}
-
-.k-buttons {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: calc(var(--k-gap) * 0.8);
-}
-
-.k-btn {
-  position: relative;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-wrap: wrap;
-  gap: 0.3em;
-  min-height: var(--k-btn-min-h);
-  padding: 6px 8px;
-  border: 5px solid var(--fg-3);
-  border-radius: 18px;
-  background: var(--surface-2);
-  color: var(--fg);
-  font-size: var(--k-font-base);
-  font-weight: 900;
-  line-height: 1.05;
-  text-align: center;
-  cursor: pointer;
-  touch-action: manipulation;
-  -webkit-tap-highlight-color: transparent;
-}
-
-.k-btn-label {
-  overflow-wrap: normal;
-  word-break: normal;
-  hyphens: none;
-}
-
-.k-btn .icon {
-  width: 1em;
-  height: 1em;
-}
-
-.k-btn:hover {
-  border-color: var(--fg);
-}
-
-.k-btn:active {
-  transform: translateY(2px);
-}
-
-.k-btn:focus-visible {
-  outline-width: 6px;
-  outline-offset: 4px;
-}
-
-.k-btn.is-suggested {
-  border-color: var(--accent);
-  border-width: 9px;
-  padding: 2px 4px;
-}
-
-/* "Next step" marker: corner arrow that never changes the button's size. */
-.k-next {
-  position: absolute;
-  top: 4px;
-  right: 6px;
-  display: inline-flex;
+.k-header .btn {
   font-size: 0.8em;
 }
 
-.k-btn-cancel {
+.k-main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: var(--k-gap);
+  padding: var(--k-gap);
+  max-width: 120rem;
+  width: 100%;
+  margin: 0 auto;
+}
+
+.k-status {
+  text-align: center;
+}
+
+.status-word {
+  margin: 0;
+  font-size: var(--k-font-status);
+  font-weight: 900;
+  line-height: 1.05;
+}
+
+.k-line {
+  margin: 0.2em 0 0;
+  font-weight: 700;
+}
+
+.k-drops {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 13rem), 1fr));
+  gap: var(--k-gap);
+}
+
+.k-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5em;
+  min-height: var(--k-btn-min-h);
+  padding: 0.3em 0.6em;
+  border: 0.25rem solid var(--fg);
+  border-radius: 1rem;
+  background: var(--surface-2);
+  color: var(--fg);
+  font: inherit;
+  font-weight: 900;
+  text-align: left;
+  cursor: pointer;
+}
+
+.k-btn .icon {
+  width: 1.2em;
+  height: 1.2em;
+}
+
+.k-btn-drop {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-fg);
+  justify-content: flex-start;
+}
+
+.k-btn-drop.is-armed {
+  background: var(--caution-bg);
+  border-color: var(--fg);
+  color: var(--caution-fg);
+  box-shadow: 0 0 0 0.35rem var(--focus);
+}
+
+.k-btn-drop.is-unavailable {
+  background: transparent;
+  border-style: dashed;
+  border-color: var(--danger-fg);
+  color: var(--fg);
+}
+
+.k-drop-num {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.8em;
+  height: 1.8em;
+  border: 0.2rem solid currentColor;
+  border-radius: 999px;
+  font-size: 1.1em;
+}
+
+.k-drop-text {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1em;
+  min-width: 0;
+}
+
+.k-drop-action {
+  font-size: 1em;
+}
+
+.k-drop-med,
+.k-drop-count {
+  font-size: 0.7em;
+  font-weight: 750;
+  overflow-wrap: anywhere;
+}
+
+.k-actions {
+  display: grid;
+  grid-template-columns: 2fr 1fr;
+  gap: var(--k-gap);
+}
+
+.k-btn-talk.is-listening {
   background: var(--danger-bg);
   color: var(--danger-bg-fg);
-  border-color: var(--fg);
 }
 
-.k-btn[aria-disabled="true"] {
-  opacity: 0.5;
-  cursor: progress;
+.k-btn-stop {
+  background: var(--danger-bg);
+  border-color: var(--danger-bg);
+  color: var(--danger-bg-fg);
 }
 
-.k-busy {
-  margin: calc(var(--k-gap) * 0.5) 0 0;
-  font-size: var(--k-font-small);
-  font-weight: 900;
+.k-captions {
+  border: 0.1875rem solid var(--border-subtle);
+  border-radius: 1rem;
+  padding: 0.4em 0.6em;
+  min-height: 4em;
+  overflow-y: auto;
+  max-height: 40vh;
+}
+
+.k-heard {
+  margin: 0 0 0.3em;
   color: var(--fg-2);
-}
-
-/* ------------------------------------------------------------------ footer */
-
-.k-footer {
-  flex: none;
-  padding: 4px var(--k-gap) 6px;
-  border-top: 3px solid var(--border-subtle);
   font-size: var(--k-font-small);
-  color: var(--fg-2);
 }
 
-.k-shortcuts {
+.k-caption {
   margin: 0;
   font-weight: 800;
 }
 
-.k-shortcuts kbd {
-  font-size: 0.9em;
-  font-weight: 900;
-  color: var(--fg);
+.k-footer {
+  padding: 0.3rem var(--k-gap) 0.6rem;
+  color: var(--fg-3);
+  font-size: var(--k-font-small);
 }
 
-.k-keys-short {
-  display: none;
+.k-footer p {
+  margin: 0;
 }
 
-.k-busy:empty {
-  display: none;
-}
+/* Short landscape screens (e.g. 800×480): smaller type, everything on one screen. */
+@media (max-height: 37.5rem) and (orientation: landscape) {
+  .kiosk {
+    --k-font-base: 2rem;
+    --k-font-status: 3.5rem;
+    --k-font-small: 1.25rem;
+    --k-btn-min-h: 6rem;
+    --k-gap: 0.5rem;
+  }
 
-/* ------------------------------------------------------------------ responsive */
-
-@media (max-width: 1400px) {
-  .k-demo-chip {
-    display: none;
+  .k-captions {
+    min-height: 2.5em;
   }
 }
 
-/* Narrow button column: every button puts its icon above the label (consistent look). */
-@container (max-width: 760px) {
-  .k-btn {
-    flex-direction: column;
-    gap: 2px;
-  }
-}
-
-@media (max-width: 900px) {
-  .k-brand {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    overflow: hidden;
-    clip: rect(0 0 0 0);
-    white-space: nowrap;
-  }
-}
-
-@media (max-width: 1279px) {
-  .k-keys-long {
-    display: none;
-  }
-
-  .k-keys-short {
-    display: inline;
-  }
-}
-
-/* Stacked layout: portrait, narrow, or short landscape screens. */
-@media (orientation: portrait), (max-width: 1099px), (max-height: 640px) {
-  /* The status column shrinks (and scrolls inside) before the buttons ever do. */
-  .k-main {
-    display: flex;
-    flex-direction: column;
-    min-height: calc(var(--k-btn-min-h) * 2 + 100px);
-  }
-
-  .k-status {
-    flex: 1 1 auto;
-    min-height: 0;
-    overflow-y: auto;
-  }
-
+@media (max-width: 40rem) {
   .k-actions {
-    flex: none;
-  }
-
-  .status-detail {
-    flex-basis: auto;
-  }
-}
-
-@media (orientation: portrait) {
-  .kiosk {
-    --k-btn-min-h: clamp(96px, 11vh, 160px);
-  }
-
-  .k-main {
-    min-height: calc(var(--k-btn-min-h) * 3 + 120px);
-  }
-}
-
-/* Landscape stacked: one wide row of 3 buttons per line, icon above the label. */
-@media (orientation: landscape) and (max-width: 1099px), (orientation: landscape) and (max-height: 640px) {
-  .kiosk {
-    --k-btn-min-h: 96px;
-  }
-
-  .k-buttons {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
-
-  .k-btn {
-    flex-direction: column;
-    gap: 2px;
-  }
-}
-
-/* Short screens: the caption label is kept for screen readers only, and the
-   connection strip is dropped because the status banner already reads
-   DEVICE OFFLINE — RECONNECTING…. */
-@media (max-height: 640px) {
-  .k-conn-banner {
-    display: none !important;
-  }
-
-  .k-header {
-    padding-top: 2px;
-    padding-bottom: 2px;
-  }
-
-  .k-small-btn {
-    min-height: 44px;
-  }
-
-  .k-footer {
-    padding-top: 2px;
-    padding-bottom: 3px;
-  }
-
-  .k-main {
-    padding-top: 6px;
-    padding-bottom: 6px;
-  }
-
-  .status-banner {
-    padding: 2px 0.3em;
-    border-width: 5px;
-  }
-
-  .caption-label {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    overflow: hidden;
-    clip: rect(0 0 0 0);
-    white-space: nowrap;
-  }
-
-  .caption-box {
-    padding-top: 4px;
-  }
-
-  .k-busy {
-    margin: 4px 0 0;
-  }
-}
-
-@media (max-height: 520px) {
-  .dose-detail {
-    display: none !important;
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 
 @media (forced-colors: active) {
-  .status-banner,
-  .k-btn,
-  .k-small-btn {
-    border-color: CanvasText;
-    border-image: none;
+  .k-btn {
+    border-color: ButtonText;
   }
 
-  .k-btn.is-suggested {
-    border-color: Highlight;
+  .k-btn-drop.is-armed {
+    outline: 0.3rem solid Highlight;
   }
 }

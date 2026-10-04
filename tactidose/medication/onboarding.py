@@ -14,6 +14,10 @@ Handoff §18 activation rule::
 
 The extractor is any ``LabelExtractor`` (Gemini, the deterministic fake, or None
 when label scanning is disabled); its output is data, never an instruction.
+
+v2: scans belong to a patient (``label_scans.user_id``). Every method takes an optional
+``patient_id`` (default: the device's patient); a scan of another patient is reported as not
+found. Label scanning is an optional extra, kept off the main flow; only doctor/family use it.
 """
 
 from __future__ import annotations
@@ -31,7 +35,7 @@ from tactidose.core.bus import EventBus, Topic
 from tactidose.core.clock import Clock
 from tactidose.core.interfaces import ExtractionResult, LabelExtractor
 from tactidose.db.devlog import log_event
-from tactidose.db.models import LabelScan, LogCategory, MedicationSource, ScanStatus
+from tactidose.db.models import LabelScan, LogCategory, MedicationSource, Role, ScanStatus, User
 from tactidose.db.session import Database
 from tactidose.medication.catalog import MedicationCatalog, medication_to_dict
 from tactidose.medication.compartments import ensure_device_rows, get_device, iso, log_device_changes
@@ -116,7 +120,7 @@ class OnboardingService:
         self.bus = bus
 
     # ------------------------------------------------------------------ scan
-    def scan(self, image: bytes, mime_type: str) -> dict[str, Any]:
+    def scan(self, image: bytes, mime_type: str, *, patient_id: int | None = None) -> dict[str, Any]:
         """Extract a label photo into an UNCONFIRMED scan. Never creates a Medication."""
         mime = normalize_mime(mime_type)
         if not isinstance(image, (bytes, bytearray, memoryview)):
@@ -130,12 +134,16 @@ class OnboardingService:
         sha = hashlib.sha256(data).hexdigest()
         image_path = self._save_image(sha, ALLOWED_MIME_TYPES[mime], data)
 
+        with self.db.session() as s:
+            owner = self._owner(s, patient_id)   # validate before calling the (paid) extractor
         status, extracted, model, error = self._extract(data, mime)
         with self.db.session() as s:
-            dev, changes = ensure_device_rows(s, self.settings)
-            log_device_changes(s, self.settings.device_id, changes)
+            if owner is None:
+                dev, changes = ensure_device_rows(s, self.settings)
+                log_device_changes(s, self.settings.device_id, changes, at=self.clock.now())
+                owner = dev.user_id
             row = LabelScan(
-                user_id=dev.user_id,
+                user_id=owner,
                 status=status,
                 model=(model or None) and model[:64],
                 extracted=extracted,
@@ -148,7 +156,7 @@ class OnboardingService:
             s.flush()
             log_event(s, self.settings.device_id, LogCategory.ADMIN, "LABEL_SCANNED",
                       {"scan_id": row.scan_id, "status": status, "model": row.model, "error": error,
-                       "bytes": len(data), "mime": mime})
+                       "bytes": len(data), "mime": mime, "patient_id": owner}, at=self.clock.now())
             out = scan_to_dict(row)
         log.info("label scan %s -> %s (%s)", out["scan_id"], status, error or "ok")
         self._publish(out["scan_id"])
@@ -190,8 +198,8 @@ class OnboardingService:
         return text if len(text) <= 255 else Path(path.name).as_posix()
 
     # ------------------------------------------------------------------ queries
-    def list_scans(self, status: str | None = None) -> list[dict[str, Any]]:
-        """Scans for this device's user, newest first (optionally one status)."""
+    def list_scans(self, status: str | None = None, *, patient_id: int | None = None) -> list[dict[str, Any]]:
+        """Scans of one patient (default: the device's patient), newest first (optionally one status)."""
         wanted: str | None = None
         if status is not None:
             raw = status.value if isinstance(status, ScanStatus) else status
@@ -202,16 +210,19 @@ class OnboardingService:
             wanted = raw.strip().upper()
         with self.db.session() as s:
             q = select(LabelScan).order_by(LabelScan.created_at.desc(), LabelScan.scan_id.desc())
-            dev = get_device(s, self.settings)
-            if dev is not None:
-                q = q.where(LabelScan.user_id == dev.user_id)
+            owner = patient_id
+            if owner is None:
+                dev = get_device(s, self.settings)
+                owner = dev.user_id if dev is not None else None
+            if owner is not None:
+                q = q.where(LabelScan.user_id == owner)
             if wanted is not None:
                 q = q.where(LabelScan.status == wanted)
             return [scan_to_dict(r) for r in s.scalars(q).all()]
 
-    def get_scan(self, scan_id: int) -> dict[str, Any]:
+    def get_scan(self, scan_id: int, *, patient_id: int | None = None) -> dict[str, Any]:
         with self.db.session() as s:
-            return scan_to_dict(self._get(s, scan_id))
+            return scan_to_dict(self._get(s, scan_id, patient_id))
 
     # ------------------------------------------------------------------ review
     def confirm_scan(
@@ -221,20 +232,22 @@ class OnboardingService:
         *,
         confirmed: bool,
         confirmed_by: str | None = None,
+        patient_id: int | None = None,
     ) -> dict[str, Any]:
         """Human-reviewed values -> confirmed Medication (the extraction itself is never copied)."""
         now = self.clock.now()
         with self.db.session() as s:
-            scan = self._get(s, scan_id)
+            scan = self._get(s, scan_id, patient_id)
             if scan.status != ScanStatus.PENDING_REVIEW.value:
-                raise ConflictError(f"Label scan {scan_id} is {scan.status}; only scans awaiting review can be confirmed.")
+                raise ConflictError(
+                    f"Label scan {scan_id} is {scan.status}; only scans awaiting review can be confirmed.")
             if confirmed is not True:
                 raise ValidationError(
                     "The scanned information must be reviewed and explicitly confirmed (confirmed: true)."
                 )
             med = self.catalog.create_record(
                 s, fields, confirmed=True, confirmed_by=confirmed_by,
-                source=MedicationSource.LABEL_SCAN.value, scan_id=scan.scan_id,
+                source=MedicationSource.LABEL_SCAN.value, scan_id=scan.scan_id, patient_id=scan.user_id,
             )
             # CAS on the scan so a double submit can never create two medications.
             res = s.execute(
@@ -247,18 +260,21 @@ class OnboardingService:
             if res.rowcount != 1:
                 raise ConflictError(f"Label scan {scan_id} was reviewed concurrently.")
             log_event(s, self.settings.device_id, LogCategory.ADMIN, "LABEL_SCAN_CONFIRMED",
-                      {"scan_id": scan.scan_id, "medication_id": med.medication_id, "by": med.confirmed_by})
+                      {"scan_id": scan.scan_id, "medication_id": med.medication_id, "by": med.confirmed_by},
+                      at=now)
             out = medication_to_dict(s, med, self.settings)
         self._publish(scan_id)
         if self.bus is not None:
-            self.bus.publish(Topic.DATA_CHANGED, {"entity": "medication", "id": out["medication_id"]})
+            self.bus.publish(Topic.DATA_CHANGED, {"entity": "medication", "id": out["medication_id"],
+                                                  "patient_id": out["patient_id"]})
+            self.bus.publish(Topic.PATIENT_STATUS, {"patient_id": out["patient_id"], "reason": "medication"})
         return out
 
-    def reject_scan(self, scan_id: int, *, by: str | None = None) -> dict[str, Any]:
+    def reject_scan(self, scan_id: int, *, by: str | None = None, patient_id: int | None = None) -> dict[str, Any]:
         """PENDING_REVIEW / FAILED -> REJECTED (idempotent for REJECTED; CONFIRMED -> 409)."""
         reviewer = by.strip()[:120] if isinstance(by, str) and by.strip() else None
         with self.db.session() as s:
-            scan = self._get(s, scan_id)
+            scan = self._get(s, scan_id, patient_id)
             if scan.status == ScanStatus.REJECTED.value:
                 return scan_to_dict(scan)
             if scan.status == ScanStatus.CONFIRMED.value:
@@ -275,18 +291,30 @@ class OnboardingService:
             if res.rowcount != 1:
                 raise ConflictError(f"Label scan {scan_id} was reviewed concurrently.")
             log_event(s, self.settings.device_id, LogCategory.ADMIN, "LABEL_SCAN_REJECTED",
-                      {"scan_id": scan.scan_id, "by": reviewer})
+                      {"scan_id": scan.scan_id, "by": reviewer}, at=self.clock.now())
             out = scan_to_dict(s.get(LabelScan, scan.scan_id, populate_existing=True))
         self._publish(scan_id)
         return out
 
     # ------------------------------------------------------------------ internals
     @staticmethod
-    def _get(s: Session, scan_id: int) -> LabelScan:
+    def _get(s: Session, scan_id: int, patient_id: int | None = None) -> LabelScan:
         scan = s.get(LabelScan, scan_id) if is_id(scan_id) else None
-        if scan is None:
+        if scan is None or (patient_id is not None and scan.user_id != patient_id):
             raise NotFoundError(f"Label scan {scan_id} not found.")
         return scan
+
+    @staticmethod
+    def _owner(s: Session, patient_id: int | None) -> int | None:
+        """Validate an explicit patient (None = the device's patient, resolved later)."""
+        if patient_id is None:
+            return None
+        patient = s.get(User, patient_id) if is_id(patient_id) else None
+        if patient is None:
+            raise NotFoundError(f"Patient {patient_id} not found.")
+        if patient.role != Role.PATIENT.value:
+            raise ValidationError("Label scans can only be added for a patient account.")
+        return patient.user_id
 
     def _publish(self, scan_id: int | None) -> None:
         if self.bus is not None:

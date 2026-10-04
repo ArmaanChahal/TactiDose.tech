@@ -95,7 +95,7 @@ def test_boot_homes_from_initial_offset_and_aligns_exactly():
     esp = VirtualESP32()
     assert esp.physical()["angle_deg"] == 180.0 and not esp.booted
     esp.boot()
-    assert esp.drain_output() == ["EVENT BOOT sim-1.0.0", "OK HOMING"]
+    assert esp.drain_output() == ["EVENT BOOT sim-1.1.0", "OK HOMING"]
     homed_at = run_until(esp, "OK HOMED")
     # 1600 steps at 400 steps/s to the sensor edge, plus debounce and return-to-edge.
     assert 4000 <= homed_at <= 4020
@@ -103,7 +103,9 @@ def test_boot_homes_from_initial_offset_and_aligns_exactly():
     assert phys["state"] == "READY" and phys["homed"] is True
     assert phys["slot"] == 0 and phys["angle_deg"] == 0.0 and phys["physical_steps"] == 0
     assert phys["firmware_position"] == 0 and phys["gate_open"] is False and phys["sensor_active"]
-    assert send(esp, "STATUS") == ["OK STATUS state=READY homed=1 slot=0 gate=CLOSED slots=6 fw=sim-1.0.0"]
+    assert send(esp, "STATUS") == [
+        "OK STATUS state=READY homed=1 slot=0 gate=CLOSED slots=6 fw=sim-1.1.0 proto=1.1 drop_sensor=1"
+    ]
 
 
 def test_slot_targets_are_absolute_and_moves_take_the_shortest_path():
@@ -159,14 +161,16 @@ def test_jam_loses_steps_and_faults_after_motion_timeout():
     assert phys["state"] == "MOVING"                                # never acknowledged
     faulted = run_until(esp, "ERR MOTOR_FAULT")
     assert faulted - started == 2 * 1500 + 2000 + 1
-    assert send(esp, "STATUS") == ["OK STATUS state=FAULT homed=0 slot=-1 gate=CLOSED slots=6 fw=sim-1.0.0"]
+    assert send(esp, "STATUS") == [
+        "OK STATUS state=FAULT homed=0 slot=-1 gate=CLOSED slots=6 fw=sim-1.1.0 proto=1.1 drop_sensor=1"
+    ]
     assert send(esp, "DISPENSE_SLOT 1") == ["ERR NOT_HOMED"]
 
 
 def test_dead_sensor_aborts_homing_after_one_and_a_quarter_revolutions():
     esp = VirtualESP32()
     esp.boot("dead")
-    assert esp.drain_output() == ["EVENT BOOT sim-1.0.0", "OK HOMING"]
+    assert esp.drain_output() == ["EVENT BOOT sim-1.1.0", "OK HOMING"]
     t = run_until(esp, "ERR HOME_TIMEOUT")
     assert 10000 <= t <= 10010                                     # 4000 steps at 400 steps/s
     phys = esp.physical()
@@ -194,7 +198,7 @@ def test_homing_when_already_on_the_sensor_backs_off_first():
 def test_no_sensor_build_assumes_alignment_and_homes_by_dead_reckoning():
     esp = VirtualESP32()
     esp.boot("none")
-    assert esp.drain_output() == ["EVENT BOOT sim-1.0.0", "OK HOMING", "OK HOMED", "OK READY"]
+    assert esp.drain_output() == ["EVENT BOOT sim-1.1.0", "OK HOMING", "OK HOMED", "OK READY"]
     phys = esp.physical()
     assert phys["sensor_mode"] == "none" and phys["homed"]
     assert phys["angle_deg"] == 180.0 and phys["slot"] == 3        # hand alignment was wrong
@@ -303,7 +307,7 @@ def test_brownout_flag_reboots_at_gate_opening():
     esp = homed_esp()
     esp.brownout_on_gate = True
     out = send(esp, "OPEN_GATE")
-    assert out == ["EVENT BOOT sim-1.0.0", "OK HOMING"]
+    assert out == ["EVENT BOOT sim-1.1.0", "OK HOMING"]
     run_until(esp, "OK READY")
     phys = esp.physical()
     assert phys["boots"] == 2 and phys["gate_pos"] == 0.0 and phys["state"] == "READY"
@@ -316,7 +320,7 @@ def test_reboot_with_gate_open_closes_gate_before_boot_event():
     esp.boot()
     assert esp.drain_output() == []                                # servo closing first
     t0 = esp.time_ms
-    t = run_until(esp, "EVENT BOOT sim-1.0.0")
+    t = run_until(esp, "EVENT BOOT sim-1.1.0")
     assert t - t0 == 400 and esp.physical()["gate_pos"] == 0.0
 
 
@@ -371,8 +375,10 @@ def test_idle_skipping_is_equivalent_to_ticking_every_millisecond():
 def test_physical_reports_everything_the_demo_needs():
     phys = homed_esp().physical()
     for key in ("angle_deg", "physical_steps", "slot", "gate_open", "state", "homed",
-                "firmware_position", "jammed", "sensor_mode", "time_ms"):
+                "firmware_position", "jammed", "sensor_mode", "time_ms",
+                "target_slot", "releasing", "proto", "drop_sensor", "pills", "pills_dropped"):
         assert key in phys
+    assert phys["pills"] == [20] * 6 and phys["pills_dropped"] == 0 and phys["proto"] == "1.1"
 
 
 def test_config_validation():
@@ -393,7 +399,7 @@ def test_sim_device_runs_in_scaled_real_time(make_device):
     t0 = time.monotonic()
     dev.start()
     assert any(t.name == "sim-device" and t.daemon for t in threading.enumerate())
-    read_lines(link, has("EVENT BOOT sim-1.0.0", "OK READY"))
+    read_lines(link, has("EVENT BOOT sim-1.1.0", "OK READY"))
     elapsed = time.monotonic() - t0
     assert 0.1 < elapsed < 1.5                                     # ~4 s of homing at x20
     sim_t0, real_t0 = dev.time_ms, time.monotonic()
@@ -470,8 +476,8 @@ def test_fault_brownout_on_gate_reboots_without_opening(make_device):
     read_lines(link, has("OK READY"))                               # boot sequence
     dev.set_fault("brownout_on_gate", True)
     link.write(b"DISPENSE_SLOT 1\n")
-    lines = read_lines(link, has("EVENT BOOT sim-1.0.0", "OK READY"))
-    assert lines[:4] == ["OK MOVING 1", "OK AT_SLOT 1", "EVENT BOOT sim-1.0.0", "OK HOMING"]
+    lines = read_lines(link, has("EVENT BOOT sim-1.1.0", "OK READY"))
+    assert lines[:4] == ["OK MOVING 1", "OK AT_SLOT 1", "EVENT BOOT sim-1.1.0", "OK HOMING"]
     assert "OK GATE_OPEN" not in lines
     phys = dev.physical()
     assert phys["boots"] == 2 and not phys["gate_open"] and phys["slot"] == 0
@@ -488,7 +494,7 @@ def test_fault_home_sensor_dead_and_motor_jam(make_device):
     dev.set_fault("home_sensor_dead", True)
     dev.reboot()
     lines = read_lines(link, has("ERR HOME_TIMEOUT"))
-    assert "EVENT BOOT sim-1.0.0" in lines
+    assert "EVENT BOOT sim-1.1.0" in lines
     assert dev.physical()["sensor_mode"] == "dead" and dev.physical()["state"] == "FAULT"
     dev.set_fault("home_sensor_dead", False)
     link.write(b"HOME\n")

@@ -1,167 +1,160 @@
-"""Every sentence TactiDose speaks, in one place.
+"""Every sentence TactiDose says to the patient (v2), in one place.
 
-Rules (handoff §3, §4, §17, §33; ARCHITECTURE §6):
+Used by the offline rules agent (``agent/rules_agent.py``), the device-side voice loop
+(``agent/voice_loop.py``) and the reply checks of the Gemini agent. The Gemini agent words
+its own replies, but they must not contradict these deterministic outcomes.
 
-* Short sentences that end by telling the user what to do next.
-* No dosage advice, ever. Confirmed label instructions are only read verbatim, prefixed
-  with "The label says:".
-* People hear 1-based compartment numbers: slot 2 is "compartment 3"
-  (``protocol.compartment_label``).
-* Times are spoken in the dose's local time ("8:00 AM", "1:30 PM").
-* With ``tts_include_med_names=False`` no medication names or label text are spoken. Those
-  would be sent to the cloud TTS, so generic wording is used instead ("your 8:00 AM
-  medication").
-* Handoff-mandated wording is kept verbatim (see the constants marked *mandated*).
-* :data:`CRITICAL_PHRASES` lists every static sentence (no names, no times) the assistant
-  can say, so ``warm-tts-cache`` can pre-render them for offline use.
+Style rules (ARCHITECTURE v2 §7; users may be blind, have low vision or be older):
+
+* At most three short sentences per reply, in plain words with no lists or symbols. Every
+  outcome is said in words ("dropped", "nothing was dropped"), never only by a sound or colour.
+* No medical advice: never diagnose, recommend, change doses or suggest extra pills.
+  Symptoms -> "contact your doctor"; emergencies -> "call 911 now".
+* People hear 1-based container numbers: slot 0 is "container 1".
+* Times are spoken in local time ("8:00 AM", "1:30 PM"), with "tomorrow" / "on Wednesday"
+  when not today.
+* Medication names are spoken without their parenthetical suffix:
+  "Vitamin C (demo candy)" -> "Vitamin C".
+* :data:`CRITICAL_PHRASES` lists every static sentence (no names, no clock times) so
+  ``warm-tts-cache`` can pre-render them for offline use.
 """
 
 from __future__ import annotations
 
 import logging
+import re
 from datetime import date, datetime
-
-from tactidose.core.interfaces import BlockReason, DoseInfo
-from tactidose.hardware.protocol import compartment_label
+from typing import Sequence
 
 log = logging.getLogger(__name__)
 
-# --------------------------------------------------------------------------- mandated wording
-#: Handoff §4.2 / ARCHITECTURE §6 (duplicate request, no motor command).
-ALREADY_ACCESSED = "That scheduled dose has already been accessed."
-#: Handoff §15 (dispense command failed).
-COULD_NOT_PREPARE = "I could not prepare the compartment. Please ask for assistance."
-CANCELLED = "Cancelled."
-ASK_FOR_ASSISTANCE = "Please ask for assistance."
-NETWORK_UNAVAILABLE = "Network unavailable."
-HARDWARE_ERROR = "Hardware error."
-NOTHING_DUE = "You do not have a scheduled medication due right now."
-#: Handoff §15/§17. Kept for other modules; the assistant names the dose instead.
-MEDICATION_READY = "Your scheduled medication is ready."
-#: Handoff §17 (label onboarding, spoken by the UI/onboarding flow).
-LABEL_NEEDS_REVIEW = "I detected a new medication label. Please review it before saving."
-#: ARCHITECTURE §6 (host gate timer closed the gate).
-GATE_CLOSED_TIMEOUT = "I've closed the compartment. If you took your dose, say 'taken'."
-
-# --------------------------------------------------------------------------- prompts / building blocks
-PREPARING = "Preparing your dose. Please keep your hands clear of the opening."
-SAY_DISPENSE = "Say 'dispense' or press the big button."
-#: Used when the big button would confirm an open dose instead of dispensing.
-SAY_DISPENSE_WHEN_READY = "Say 'dispense' when you are ready."
-SAY_TAKEN = "When you have taken it, say 'taken' or press the big button."
-TAKEN_REMINDER = "If you took your dose, say 'taken'."
-
-# --------------------------------------------------------------------------- dispense outcomes
-DISPENSE_CANCELLED = "Cancelled. Nothing was dispensed. Say 'dispense' when you are ready."
-HARDWARE_UNAVAILABLE = "Hardware error. Nothing was dispensed. Please ask for assistance."
-DB_UNAVAILABLE = "I can't check your schedule right now. Please ask for assistance."
-IN_PROGRESS = "Your dose is already being prepared. Please wait."
-NEEDS_REVIEW = "This dose needs to be checked by a caregiver. Please ask for assistance."
-NO_COMPARTMENT = "This medication is not assigned to a compartment. Please ask for assistance."
-UNCONFIRMED_MEDICATION = (
-    "This medication has not been confirmed by a caregiver. Please ask for assistance."
+# --------------------------------------------------------------------------- drop outcomes
+PILL_DROPPED = "Pill dropped."
+COOLDOWN = "It's too soon for another pill. Please wait a little longer."
+CONTAINER_EMPTY = "That container is empty. Please ask your caregiver to refill it."
+ALREADY_DROPPED = "That dose has already dropped."
+DEVICE_UNAVAILABLE = (
+    "The dispenser is not ready right now, so nothing was dropped. Please ask your caregiver for help."
 )
-INACTIVE = "This medication is not active. Please ask for assistance."
-TOO_SOON = "That medication was opened a short time ago, so I can't open it again yet."
-
-# --------------------------------------------------------------------------- confirm outcomes
-NOTHING_TO_CONFIRM = "There is no open dose to confirm right now."
-ALREADY_CONFIRMED = "That dose is already recorded as taken."
-CONFIRM_DB_ERROR = "I could not record that right now. Please ask for assistance."
-GATE_CLOSE_FAILED = "I could not close the compartment. Please ask for assistance."
-
-# --------------------------------------------------------------------------- cancel outcomes
-CANCEL_STOPPED = "Cancelled. The carousel has stopped."
-CANCEL_CLOSED_GATE = "Cancelled. I've closed the compartment."
-CANCEL_CLOSED_GATE_REMINDER = (
-    "Cancelled. I've closed the compartment. If you took your dose, say 'taken'."
+NEEDS_REVIEW = "Your caregiver needs to check the last drop first, so nothing was dropped."
+IN_PROGRESS = "A pill is already dropping. Please wait."
+NO_MEDICATION = "That container has no medication set up. Please ask your caregiver."
+UNKNOWN_MEDICATION = "I couldn't find that medication in your containers."
+NOT_ALLOWED = "I'm not allowed to drop a pill for this account."
+DB_UNAVAILABLE = (
+    "I can't check your records right now, so nothing was dropped. Please ask your caregiver for help."
 )
-CANCELLED_REMINDER = "Cancelled. If you took your dose, say 'taken'."
-CANCEL_FAILED = (
-    "I could not stop the device. Please keep your hands clear and ask for assistance."
+DROP_FAILED = "The pill did not drop. Please ask your caregiver for help."
+NO_PILL = "No pill came out. The container may be empty. Please ask your caregiver to check it."
+DROP_UNCERTAIN = (
+    "I'm not sure the pill dropped. Please check, and ask your caregiver to look at the dispenser."
 )
+NOTHING_DROPPED = "Nothing was dropped. Please ask your caregiver for help."
 
-# --------------------------------------------------------------------------- gate timer
-GATE_CLOSED = "I've closed the compartment."
+# --------------------------------------------------------------------------- schedule & status
+NOTHING_DUE = "Nothing is due right now."
+NO_MORE_SCHEDULED = "I don't see another scheduled pill."
+MISSED_DOSE = "You missed a scheduled dose."
+NO_RECENT_DROPS = "I don't see any pills dropped in the last two weeks."
+NO_CONTAINERS = "No containers are set up yet. Please ask your caregiver."
+OFFER_DROP = "Would you like me to drop it now?"
+CAN_REQUEST_NOW = "You can ask me for a pill now."
+NOTHING_TO_CONFIRM = "I don't see a recent pill to mark as taken."
+ALREADY_TAKEN = "That pill is already marked as taken."
+TAKEN_NOTED = "Thank you. I've noted that you took it."
+NOT_MARKED = "Okay. I haven't marked anything as taken."
+RECORD_FAILED = "I couldn't record that right now. Please tell your caregiver."
 
-# --------------------------------------------------------------------------- dialogue
-NOT_UNDERSTOOD = "Sorry, I didn't catch that. Say 'help' to hear what you can say."
-NEGATED = "Okay. I have not changed anything."
-NEGATED_REMINDER = (
-    "Okay. I have not changed anything. When you have taken your dose, say 'taken'."
-)
+# --------------------------------------------------------------------------- dialogue & safety
 HELP = (
-    "You can say: what do I take now, dispense, taken, repeat, cancel, or help. "
-    "You can also press the big button."
+    "You can ask me to drop a pill, what is due, when your last pill dropped, or how many pills "
+    "are left. You can also press the Drop button."
 )
-NOTHING_TO_REPEAT = "I have nothing to repeat yet. Say 'help' to hear what you can say."
+GREETING = "Hello. How can I help you?"
+WELCOME = "You're welcome."
+NOT_UNDERSTOOD = "Sorry, I didn't understand. You can say: drop my pill, what is due, or help."
+UNCLEAR_SPEECH = "Sorry, I didn't catch all of that. Please say it again."
+NEGATED = "Okay. I won't drop a pill."
+WHICH_PILL = "Which pill would you like?"
+NOTHING_TO_REPEAT = "I have nothing to repeat yet."
+EMERGENCY = "This could be an emergency. Please call 911 or your local emergency number now."
+SYMPTOMS = "I can't give medical advice. Please contact your doctor about how you feel."
+SYMPTOMS_NOTE = "For how you feel, please contact your doctor."
+MEDICATION_CHANGE = "I can't change your medication or doses. Please talk to your doctor."
+INJECTION_REFUSED = "I can't change my rules. I can drop one pill when you ask and the rules allow it."
+ONE_PILL_ONLY = "I can only drop one pill at a time. Ask me for one pill if you need it."
+AGENT_ERROR = "I can't do that right now. Please use the Drop button or ask your caregiver."
 
-# --------------------------------------------------------------------------- device notices
-DEVICE_RESTARTED = "The device restarted. Please keep your hands clear while it gets ready."
-DEVICE_NEEDS_ATTENTION = "The device needs attention. Please ask for assistance."
+# --------------------------------------------------------------------------- device
+STOPPED = "Stopped."
+NOT_MOVING = "Okay. The dispenser is not moving."
+CANCELLED = "Cancelled."
+ASK_FOR_ASSISTANCE = "Please ask your caregiver for help."
+DEVICE_RESTARTED = "The dispenser restarted. Please wait while it gets ready."
+DEVICE_NEEDS_ATTENTION = "The dispenser needs attention. Please ask your caregiver for help."
+NOT_SET_UP = "This dispenser is not set up yet. Please ask your caregiver."
 
-#: Spoken when a handler fails unexpectedly (fail closed).
-ERROR_GENERIC = ASK_FOR_ASSISTANCE
-
-#: Every static sentence the system may say verbatim (no names, no times). Pre-rendered by
-#: ``warm-tts-cache`` so the core interaction stays understandable offline (handoff §17).
+#: Every static sentence the system may say verbatim (no names, no clock times). Pre-rendered
+#: by ``warm-tts-cache`` so the core interaction stays understandable offline.
 CRITICAL_PHRASES: list[str] = [
-    ALREADY_ACCESSED,
-    COULD_NOT_PREPARE,
+    PILL_DROPPED,
+    COOLDOWN,
+    CONTAINER_EMPTY,
+    ALREADY_DROPPED,
+    DEVICE_UNAVAILABLE,
+    NEEDS_REVIEW,
+    IN_PROGRESS,
+    NO_MEDICATION,
+    UNKNOWN_MEDICATION,
+    NOT_ALLOWED,
+    DB_UNAVAILABLE,
+    DROP_FAILED,
+    NO_PILL,
+    DROP_UNCERTAIN,
+    NOTHING_DROPPED,
+    NOTHING_DUE,
+    NO_MORE_SCHEDULED,
+    MISSED_DOSE,
+    NO_RECENT_DROPS,
+    NO_CONTAINERS,
+    OFFER_DROP,
+    CAN_REQUEST_NOW,
+    NOTHING_TO_CONFIRM,
+    ALREADY_TAKEN,
+    TAKEN_NOTED,
+    NOT_MARKED,
+    RECORD_FAILED,
+    HELP,
+    GREETING,
+    WELCOME,
+    NOT_UNDERSTOOD,
+    UNCLEAR_SPEECH,
+    NEGATED,
+    WHICH_PILL,
+    NOTHING_TO_REPEAT,
+    EMERGENCY,
+    SYMPTOMS,
+    SYMPTOMS_NOTE,
+    MEDICATION_CHANGE,
+    INJECTION_REFUSED,
+    ONE_PILL_ONLY,
+    AGENT_ERROR,
+    STOPPED,
+    NOT_MOVING,
     CANCELLED,
     ASK_FOR_ASSISTANCE,
-    NETWORK_UNAVAILABLE,
-    HARDWARE_ERROR,
-    NOTHING_DUE,
-    MEDICATION_READY,
-    LABEL_NEEDS_REVIEW,
-    GATE_CLOSED_TIMEOUT,
-    PREPARING,
-    DISPENSE_CANCELLED,
-    HARDWARE_UNAVAILABLE,
-    DB_UNAVAILABLE,
-    IN_PROGRESS,
-    NEEDS_REVIEW,
-    NO_COMPARTMENT,
-    UNCONFIRMED_MEDICATION,
-    INACTIVE,
-    TOO_SOON,
-    NOTHING_TO_CONFIRM,
-    ALREADY_CONFIRMED,
-    CONFIRM_DB_ERROR,
-    GATE_CLOSE_FAILED,
-    CANCEL_STOPPED,
-    CANCEL_CLOSED_GATE,
-    CANCEL_CLOSED_GATE_REMINDER,
-    CANCELLED_REMINDER,
-    CANCEL_FAILED,
-    GATE_CLOSED,
-    TAKEN_REMINDER,
-    NOT_UNDERSTOOD,
-    NEGATED,
-    NEGATED_REMINDER,
-    HELP,
-    NOTHING_TO_REPEAT,
     DEVICE_RESTARTED,
     DEVICE_NEEDS_ATTENTION,
+    NOT_SET_UP,
 ]
-
-_BLOCKED: dict[BlockReason, str] = {
-    BlockReason.NEEDS_REVIEW: NEEDS_REVIEW,
-    BlockReason.NO_COMPARTMENT: NO_COMPARTMENT,
-    BlockReason.UNCONFIRMED_MEDICATION: UNCONFIRMED_MEDICATION,
-    BlockReason.INACTIVE: INACTIVE,
-    BlockReason.TOO_SOON: TOO_SOON,
-    BlockReason.IN_PROGRESS: IN_PROGRESS,
-}
 
 _NUMBER_WORDS = (
     "zero", "one", "two", "three", "four", "five", "six",
     "seven", "eight", "nine", "ten", "eleven", "twelve",
 )
 _WEEKDAYS = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
-_MAX_NAME_CHARS = 80
-_MAX_LABEL_CHARS = 300
+_MAX_NAME_CHARS = 60
+_PARENTHETICAL = re.compile(r"\s*[\(\[][^\)\]]*[\)\]]")
 
 
 # --------------------------------------------------------------------------- small helpers
@@ -174,170 +167,231 @@ def spoken_time(dt: datetime) -> str:
 
 
 def count_words(n: int) -> str:
-    """Small counts as words, which TTS engines read more naturally ("two doses")."""
+    """Small counts as words, which TTS engines read more naturally ("two pills")."""
     return _NUMBER_WORDS[n] if 0 <= n < len(_NUMBER_WORDS) else str(n)
 
 
-def _plural(n: int, word: str) -> str:
-    return f"{count_words(n)} {word}{'' if n == 1 else 's'}"
+def plural(n: int, word: str) -> str:
+    """``plural(1, "pill") == "1 pill"``, ``plural(12, "pill") == "12 pills"``."""
+    return f"{n} {word}{'' if n == 1 else 's'}"
 
 
-def _clean(text: str | None, limit: int) -> str:
-    cleaned = " ".join((text or "").split())
-    if len(cleaned) <= limit:
-        return cleaned
-    cut = cleaned[:limit].rsplit(" ", 1)[0]
-    return cut or cleaned[:limit]
+def relative_day(when: datetime, now_local: datetime | None) -> str:
+    """``"today"``, ``"tomorrow"``, ``"yesterday"``, ``"on Wednesday"`` or
+    ``"on Wednesday October 21"`` (``"today"`` when ``now_local`` is unknown)."""
+    if now_local is None:
+        return "today"
+    today: date = now_local.date()
+    delta = (when.date() - today).days
+    if delta == 0:
+        return "today"
+    if delta == 1:
+        return "tomorrow"
+    if delta == -1:
+        return "yesterday"
+    if -7 < delta < 7:
+        return f"on {_WEEKDAYS[when.weekday()]}"
+    return f"on {_WEEKDAYS[when.weekday()]} {when.strftime('%B')} {when.day}"
 
 
-def _sentence(text: str) -> str:
-    text = text.strip()
-    return text if text.endswith((".", "!", "?")) else text + "."
+def when_phrase(when: datetime, now_local: datetime | None, *, say_today: bool = False) -> str:
+    """``"at 8:00 AM"`` today (``"today at 8:00 AM"`` with ``say_today``), otherwise
+    ``"tomorrow at 8:00 AM"`` / ``"on Wednesday at 8:00 AM"``."""
+    day = relative_day(when, now_local)
+    at = f"at {spoken_time(when)}"
+    if day == "today" and not say_today:
+        return at
+    return f"{day} {at}"
+
+
+def duration_phrase(seconds: float) -> str:
+    """Remaining time, rounded up to whole minutes: ``"less than a minute"``, ``"1 minute"``,
+    ``"45 minutes"``, ``"1 hour"``, ``"2 hours and 5 minutes"``."""
+    total = max(0, int(round(float(seconds))))
+    if total < 60:
+        return "less than a minute"
+    minutes = -(-total // 60)
+    hours, rest = divmod(minutes, 60)
+    if hours == 0:
+        return plural(minutes, "minute")
+    if rest == 0:
+        return plural(hours, "hour")
+    return f"{plural(hours, 'hour')} and {plural(rest, 'minute')}"
+
+
+def short_med_name(name: str | None) -> str:
+    """Speech-friendly medication name: parenthetical suffixes removed, whitespace collapsed,
+    length capped. ``"Vitamin C (demo candy)" -> "Vitamin C"``; empty -> ``"your medication"``."""
+    raw = " ".join(str(name or "").split())
+    short = " ".join(_PARENTHETICAL.sub("", raw).split()) or raw
+    if len(short) > _MAX_NAME_CHARS:
+        short = short[:_MAX_NAME_CHARS].rsplit(" ", 1)[0] or short[:_MAX_NAME_CHARS]
+    return short or "your medication"
+
+
+def container_label(number: int) -> str:
+    """``container_label(2) == "container 2"`` (1-based, as people hear it)."""
+    return f"container {int(number)}"
+
+
+def join(*parts: str | None) -> str:
+    """Join sentences with single spaces, skipping empty parts."""
+    return " ".join(p.strip() for p in parts if p and p.strip())
 
 
 def _cap(text: str) -> str:
     return text[:1].upper() + text[1:] if text else text
 
 
-def med_name(dose: DoseInfo) -> str:
-    """The confirmed medication name, whitespace-normalised and length-capped for speech."""
-    return _clean(dose.medication_name, _MAX_NAME_CHARS) or "medication"
-
-
-def dose_ref(dose: DoseInfo, *, include_names: bool, with_time: bool = True) -> str:
-    """Lower-case reference to a dose: "your 8:00 AM Vitamin C" / "your 8:00 AM medication".
-
-    Generic wording (``include_names=False``) always carries the time. Without the name or
-    the time, a listener cannot tell doses apart.
-    """
-    when = spoken_time(dose.scheduled_local)
-    if not include_names:
-        return f"your {when} medication"
-    return f"your {when} {med_name(dose)}" if with_time else f"your {med_name(dose)}"
-
-
-def compartment(dose: DoseInfo) -> str | None:
-    """``"compartment 3"`` for slot 2 (``None`` when the dose has no slot)."""
-    return compartment_label(dose.slot) if dose.slot is not None else None
-
-
-def label_says(instructions: str | None) -> str:
-    """Verbatim confirmed instructions: ``"The label says: Take one piece."`` (or "")."""
-    text = _clean(instructions, _MAX_LABEL_CHARS)
-    if not text:
-        return ""
-    truncated = len(" ".join((instructions or "").split())) > len(text)
-    out = f"The label says: {_sentence(text)}"
-    return out + " The label text continues." if truncated else out
-
-
-def day_phrase(when: datetime, now_local: datetime | None) -> str:
-    """"" for today (or when ``now_local`` is unknown), "tomorrow", or "on Wednesday"."""
-    if now_local is None:
-        return ""
-    today: date = now_local.date()
-    delta = (when.date() - today).days
-    if delta == 0:
-        return ""
-    if delta == 1:
-        return "tomorrow"
-    if 1 < delta < 7:
-        return f"on {_WEEKDAYS[when.weekday()]}"
-    return f"on {_WEEKDAYS[when.weekday()]} {when.strftime('%B')} {when.day}"
-
-
-def _join(*parts: str) -> str:
-    return " ".join(p.strip() for p in parts if p and p.strip())
+def _options(options: Sequence[tuple[int, str]], conjunction: str = "or") -> str:
+    items = [f"{short_med_name(name)} in {container_label(number)}" for number, name in options]
+    if len(items) <= 1:
+        return "".join(items)
+    if len(items) == 2:
+        return f"{items[0]} {conjunction} {items[1]}"
+    return ", ".join(items[:-1]) + f", {conjunction} {items[-1]}"
 
 
 # --------------------------------------------------------------------------- dynamic sentences
 
 
-def next_dose(dose: DoseInfo | None, *, include_names: bool, now_local: datetime | None) -> str:
-    """"Your next dose is Calcium at 1:00 PM." / "Your next medication is tomorrow at 8:00 AM."."""
-    if dose is None:
-        return ""
-    when = _join(day_phrase(dose.scheduled_local, now_local), f"at {spoken_time(dose.scheduled_local)}")
-    if include_names:
-        return f"Your next dose is {med_name(dose)} {when}."
-    return f"Your next medication is {when}."
-
-
-def nothing_due(next_up: DoseInfo | None = None, *, include_names: bool,
-                now_local: datetime | None = None) -> str:
-    return _join(NOTHING_DUE, next_dose(next_up, include_names=include_names, now_local=now_local))
-
-
-def already_accessed(next_up: DoseInfo | None = None, *, include_names: bool,
-                     now_local: datetime | None = None) -> str:
-    return _join(ALREADY_ACCESSED, next_dose(next_up, include_names=include_names, now_local=now_local))
-
-
-def already_taken(dose: DoseInfo, *, include_names: bool, next_up: DoseInfo | None = None,
-                  now_local: datetime | None = None) -> str:
-    """CHECK_DUE when the in-window dose was already confirmed."""
-    return _join(
-        f"{_cap(dose_ref(dose, include_names=include_names))} is already recorded as taken.",
-        next_dose(next_up, include_names=include_names, now_local=now_local),
-    )
-
-
-def due_now(dose: DoseInfo, *, count: int = 1, include_names: bool,
-            button_dispenses: bool = True) -> str:
-    """CHECK_DUE consent prompt: announce the dose and ask for 'dispense'."""
-    ref = dose_ref(dose, include_names=include_names)
-    if count > 1:
-        head = f"You have {_plural(count, 'dose')} due. The first is {ref}."
+def pill_dropped(name: str | None, container_number: int | None, *,
+                 pill_count_after: int | None = None, low_stock_at: int = 3) -> str:
+    """``"Vitamin C dropped from container 1."`` (+ a low-stock / last-pill note)."""
+    med = short_med_name(name) if name else "Your pill"
+    if container_number is None:
+        head = f"{_cap(med)} dropped."
     else:
-        head = f"{_cap(ref)} is due now."
-    return _join(head, SAY_DISPENSE if button_dispenses else SAY_DISPENSE_WHEN_READY)
+        head = f"{_cap(med)} dropped from {container_label(container_number)}."
+    note = ""
+    if container_number is not None and pill_count_after is not None:
+        if pill_count_after <= 0:
+            note = f"That was the last pill in {container_label(container_number)}."
+        elif pill_count_after <= low_stock_at:
+            note = f"{_cap(container_label(container_number))} has {plural(pill_count_after, 'pill')} left."
+    return join(head, note)
 
 
-def dose_ready(dose: DoseInfo, *, include_names: bool) -> str:
-    """After ``OK GATE_OPEN``: where the dose is, the verbatim label, and how to confirm."""
-    where = compartment(dose)
-    ref = _cap(dose_ref(dose, include_names=include_names, with_time=False))
-    head = f"{ref} is ready in {where}." if where else f"{ref} is ready."
-    label = label_says(dose.instructions) if include_names else ""
-    return _join(head, label, SAY_TAKEN)
+def cooldown(next_allowed_local: datetime | None, now_local: datetime | None,
+             remaining_s: float | None = None) -> str:
+    """Global cooldown refusal with the spoken time of the next allowed drop:
+    ``"It's too soon for another pill. The next pill can drop at 9:00 AM, in 45 minutes."``"""
+    if next_allowed_local is None:
+        return COOLDOWN
+    when = when_phrase(next_allowed_local, now_local)
+    head = "It's too soon for another pill."
+    if remaining_s is not None and remaining_s > 0:
+        return f"{head} The next pill can drop {when}, in {duration_phrase(remaining_s)}."
+    return f"{head} The next pill can drop {when}."
 
 
-def awaiting_confirmation(dose: DoseInfo, *, include_names: bool, more_due: int = 0) -> str:
-    """CHECK_DUE while a dispensed dose still waits for "taken"."""
-    ref = dose_ref(dose, include_names=include_names)
-    where = compartment(dose)
-    head = f"{_cap(where)} was opened for {ref}." if where else f"{_cap(ref)} was opened."
-    tail = ""
-    if more_due > 0:
-        tail = f"You also have {_plural(more_due, 'more dose')} due after that."
-    return _join(head, SAY_TAKEN, tail)
+def container_empty(container_number: int | None) -> str:
+    if container_number is None:
+        return CONTAINER_EMPTY
+    return f"{_cap(container_label(container_number))} is empty. Please ask your caregiver to refill it."
 
 
-def confirmed(dose: DoseInfo | None, *, include_names: bool, gate_closed: bool | None = None,
-              more_due: int = 0) -> str:
-    """"Thank you. Your Vitamin C is recorded as taken." (+ gate problem / what next)."""
-    if dose is None:
-        head = "Thank you. Your dose is recorded as taken."
+def no_pill(container_number: int | None) -> str:
+    """``ERR NO_PILL``: the drop sensor saw nothing pass."""
+    if container_number is None:
+        return NO_PILL
+    return (f"No pill came out of {container_label(container_number)}. It may be empty. "
+            "Please ask your caregiver to check it.")
+
+
+def no_medication(container_number: int | None) -> str:
+    if container_number is None:
+        return NO_MEDICATION
+    return f"{_cap(container_label(container_number))} has no medication set up. Please ask your caregiver."
+
+
+def no_such_container(number: int, num_slots: int) -> str:
+    return f"There is no {container_label(number)}. Your containers are numbered 1 to {num_slots}."
+
+
+def already_dropped(name: str | None = None, scheduled_local: datetime | None = None,
+                    now_local: datetime | None = None) -> str:
+    """Scheduled dose already satisfied: ``"Your 8:00 AM Vitamin C has already dropped."``"""
+    if not name:
+        return ALREADY_DROPPED
+    if scheduled_local is None:
+        return f"Your {short_med_name(name)} has already dropped."
+    return f"Your {spoken_time(scheduled_local)} {short_med_name(name)} has already dropped."
+
+
+def due_now(name: str | None, scheduled_local: datetime, now_local: datetime, *,
+            auto_drop: bool, offer: bool) -> str:
+    """A dose whose window is open. Mentions the automatic drop when it is still ahead and
+    offers a drop now when the cooldown allows it."""
+    med = short_med_name(name)
+    if scheduled_local > now_local:
+        head = f"Your {med} is due at {spoken_time(scheduled_local)}."
+        mid = "It will drop by itself then." if auto_drop else ""
     else:
-        ref = dose_ref(dose, include_names=include_names, with_time=False)
-        head = f"Thank you. {_cap(ref)} is recorded as taken."
-    gate = GATE_CLOSE_FAILED if gate_closed is False else ""
-    nxt = ""
-    if more_due > 0:
-        nxt = f"You have {_plural(more_due, 'more dose')} due. {SAY_DISPENSE_WHEN_READY}"
-    return _join(head, gate, nxt)
+        head = f"Your {spoken_time(scheduled_local)} {med} is due now."
+        mid = ""
+    return join(head, mid, OFFER_DROP if offer else "")
 
 
-def already_confirmed(dose: DoseInfo | None, *, include_names: bool) -> str:
-    if dose is None:
-        return ALREADY_CONFIRMED
-    return f"{_cap(dose_ref(dose, include_names=include_names))} is already recorded as taken."
+def next_pill(name: str | None, scheduled_local: datetime, now_local: datetime | None) -> str:
+    """``"Your next scheduled pill is Calcium at 1:00 PM."`` / ``"... tomorrow at 8:00 AM."``"""
+    return f"Your next scheduled pill is {short_med_name(name)} {when_phrase(scheduled_local, now_local)}."
 
 
-def blocked(reason: BlockReason | str | None) -> str:
-    """Static refusal sentence for a :class:`BlockReason` (unknown -> ask for assistance)."""
-    try:
-        key = reason if isinstance(reason, BlockReason) else BlockReason(str(reason))
-    except ValueError:
-        return ASK_FOR_ASSISTANCE
-    return _BLOCKED.get(key, ASK_FOR_ASSISTANCE)
+def last_pill(name: str | None, dropped_local: datetime, now_local: datetime | None) -> str:
+    """``"Your last pill was Vitamin C, today at 8:00 AM."``"""
+    return (f"Your last pill was {short_med_name(name)}, "
+            f"{when_phrase(dropped_local, now_local, say_today=True)}.")
+
+
+def last_drop_unconfirmed(name: str | None, dropped_local: datetime | None,
+                          now_local: datetime | None) -> str:
+    """An UNCERTAIN last drop: ``"I'm not sure your last pill, Vitamin C today at 8:00 AM,
+    dropped. Your caregiver needs to check it."``"""
+    when = f" {when_phrase(dropped_local, now_local, say_today=True)}" if dropped_local else ""
+    return (f"I'm not sure your last pill, {short_med_name(name)}{when}, dropped. "
+            "Your caregiver needs to check it.")
+
+
+def missed_dose(name: str | None, scheduled_local: datetime, now_local: datetime | None) -> str:
+    """``"You missed your 8:00 AM Vitamin C."`` (with the day when it was not today)."""
+    day = relative_day(scheduled_local, now_local)
+    day_part = "" if day == "today" else f" {day}"
+    return f"You missed your {spoken_time(scheduled_local)} {short_med_name(name)}{day_part}."
+
+
+def container_summary(number: int, name: str | None, count: int, *, low_stock: bool) -> str:
+    """``"Container 2, Calcium: 2 pills left, running low."`` / ``"Container 3, Omega-3: empty."``"""
+    label = _cap(container_label(number))
+    if not name:
+        return f"{label} has no medication set up."
+    med = short_med_name(name)
+    if count <= 0:
+        return f"{label}, {med}: empty."
+    tail = ", running low" if low_stock else ""
+    return f"{label}, {med}: {plural(count, 'pill')} left{tail}."
+
+
+def which_pill(options: Sequence[tuple[int, str]]) -> str:
+    """``"Which pill would you like? Vitamin C in container 1, or Calcium in container 2."``"""
+    if not options:
+        return WHICH_PILL
+    return f"{WHICH_PILL} {_cap(_options(options))}."
+
+
+def medication_list(options: Sequence[tuple[int, str]]) -> str:
+    """``"You have Vitamin C in container 1, and Calcium in container 2."`` (for refusals)."""
+    if not options:
+        return NO_CONTAINERS
+    return f"You have {_options(options, 'and')}."
+
+
+def container_holds(number: int, name: str | None) -> str:
+    """``"Container 2 holds Calcium."``"""
+    return f"{_cap(container_label(number))} holds {short_med_name(name)}."
+
+
+def taken_noted(name: str | None) -> str:
+    if not name:
+        return TAKEN_NOTED
+    return f"Thank you. I've noted that you took your {short_med_name(name)}."

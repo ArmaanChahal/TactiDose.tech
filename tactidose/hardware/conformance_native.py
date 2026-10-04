@@ -1,9 +1,10 @@
 """NativeTarget: runs the conformance suite against the natively compiled firmware core.
 
 ``firmware/native/bin/harness`` wraps ``firmware/tactidose_esp32/TactiDoseCore.cpp`` (the exact
-state machine that runs on the ESP32) in a fake HAL that simulates the carousel physics of
-``conformance.json`` ("harness") in simulated time. It speaks the stdin/stdout protocol of
-docs/ARCHITECTURE.md §7. This module implements
+state machine that runs on the ESP32) in a fake HAL that simulates the dispenser physics of
+``conformance.json`` ("harness": 6-slot carousel, drop sensor, 20 pills per container) in
+simulated time. It speaks the stdin/stdout protocol of docs/ARCHITECTURE_v1.md §7 plus the v1.1
+``!pills <slot> <count>`` directive (docs/ARCHITECTURE.md §13). This module implements
 :class:`~tactidose.hardware.conformance.ConformanceTarget` on top of it::
 
     python -m tactidose.hardware.conformance_native build     # (re)build the harness binary
@@ -67,7 +68,10 @@ _PEEK_START_MS = 1000
 _PEEK_MAX_MS = 131072
 _BOOT_MODES = ("ok", "dead", "none")
 _SENSOR_MODES = ("ok", "dead", "stuck")
+_DROP_SENSOR_MODES = ("ok", "dead", "blocked")
 _BUTTONS = ("CONFIRM", "CANCEL")
+_MAX_CONTAINERS = 12
+_MAX_PILLS = 9999
 
 
 class HarnessError(RuntimeError):
@@ -265,6 +269,13 @@ class NativeTarget:
     def set_jam(self, on: bool) -> None:
         self._input(f"!jam {1 if on else 0}")
 
+    def set_pills(self, slot: int, count: int) -> None:
+        """v1.1: physical pill count of container ``slot`` (``!pills``; no lines, no time)."""
+        for name, value, limit in (("slot", slot, _MAX_CONTAINERS - 1), ("count", count, _MAX_PILLS)):
+            if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= limit:
+                raise ValueError(f"{name} must be an int in 0..{limit}, got {value!r}")
+        self._input(f"!pills {slot} {count}")
+
     def close(self) -> None:
         """Stop the harness (``!quit``); idempotent, never raises."""
         proc, self._proc = self._proc, None
@@ -320,12 +331,22 @@ class NativeTarget:
         """Simulated time as seen by the caller (harness clock + locally accumulated ticks)."""
         return self._sim_ms + self._pending_ms
 
+    def set_drop_sensor(self, mode: str) -> None:
+        """Physical drop sensor (IR break-beam): ``ok``, ``dead`` (never sees a pill) or
+        ``blocked`` (beam permanently interrupted). Extension ``!dropsensor``."""
+        if mode not in _DROP_SENSOR_MODES:
+            raise ValueError(f"drop sensor mode must be one of {_DROP_SENSOR_MODES}, got {mode!r}")
+        self._input(f"!dropsensor {mode}")
+
     def configure(self, **settings: object) -> None:
-        """Firmware settings for the following ``boot()`` calls (harness ``!set``).
+        """Firmware settings for the following ``reset()`` / ``boot()`` calls (harness ``!set``).
 
         Keys are those of the harness ``--set`` option (``homeBackoffSteps``, ``homeOffsetSteps``,
-        ``verifySlot``, ``debugLog``, ``holdWhenIdle``, ``autoHome``, ``settleMs``, ``fw`` ...) plus
-        ``millisOffset``. Booleans are sent as 1/0. :meth:`restore_defaults` undoes them."""
+        ``verifySlot``, ``debugLog``, ``holdWhenIdle``, ``autoHome``, ``settleMs``, ``fw``,
+        ``dropOpenMs``, ``dropSensor``, ``numSlots``, ``mechanism`` = ``carousel`` | ``servo``
+        ...) plus ``millisOffset``. ``mechanism`` and ``numSlots`` also reshape the simulated
+        mechanism at the next reset/boot. Booleans are sent as 1/0. :meth:`restore_defaults`
+        undoes them."""
         directives = [
             f"!set {key}={int(value) if isinstance(value, bool) else value}" for key, value in settings.items()
         ]

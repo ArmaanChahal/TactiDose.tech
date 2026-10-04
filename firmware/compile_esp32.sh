@@ -1,22 +1,26 @@
 #!/usr/bin/env bash
 # Compile-check the TactiDose reference firmware for a real ESP32 with arduino-cli, inside Docker.
-# Builds four variants with all warnings enabled: DRIVER_STEP_DIR and DRIVER_ULN2003 with the
-# shipped config.h, plus one alternate configuration of each (no EN pin, no cancel button, LED,
-# DIR_INVERT, no home sensor) so that every preprocessor branch is compiled.
+# Builds six variants with all warnings enabled: MECHANISM_CAROUSEL with DRIVER_STEP_DIR and
+# DRIVER_ULN2003 and MECHANISM_PER_CONTAINER_SERVO, each with the shipped config.h (+ drop sensor
+# for the servo variant) and with one alternate configuration (no EN pin, no cancel button, LED,
+# DIR_INVERT, no home sensor, drop sensor on/off and active-high ...) so that every preprocessor
+# branch is compiled.
 #
 #   bash firmware/compile_esp32.sh           Linux / macOS / WSL / Git Bash
 #   firmware\compile_esp32.ps1               Windows PowerShell (can export a corporate root CA)
 #
 # Environment (all optional):
 #   FQBN                      board, default esp32:esp32:esp32 ("ESP32 Dev Module")
-#   ESP32_CORE_VERSION        pin the esp32 core, e.g. 3.3.12 (default: latest)
+#   ESP32_CORE_VERSION        pin the esp32 core, e.g. 3.3.12 (default: the cached one, else latest)
+#   TACTIDOSE_ARDUINO_UPDATE  1 = refresh the indexes and install/upgrade the core + libraries even
+#                             if a cached copy exists (default: use the cache, no network needed)
 #   TACTIDOSE_EXTRA_CA_CERT   PEM file with an extra root CA, needed behind a TLS-inspecting proxy
 #                             (symptom: "SSL certificate problem: unable to get local issuer certificate")
 #   TACTIDOSE_ARDUINO_IMAGE   Docker image, default python:3.12 (needs bash, curl, python3)
 #   TACTIDOSE_ARDUINO_VOLUME  cache volume, default tactidose-arduino
 #
 # The first run downloads arduino-cli, the ESP32 core and toolchains (~1 GB) and the AccelStepper +
-# ESP32Servo libraries into the Docker volume; later runs only compile.
+# ESP32Servo libraries into the Docker volume; later runs only compile (offline).
 set -euo pipefail
 
 if [ "${1:-}" != "--in-container" ]; then
@@ -30,7 +34,7 @@ if [ "${1:-}" != "--in-container" ]; then
     src=$(cd "$here" && pwd -W)
     export MSYS_NO_PATHCONV=1 # keep "/fw" etc. as they are
   fi
-  args=(run --rm -v "$volume:/arduino" -v "$src:/fw:ro" -e FQBN -e ESP32_CORE_VERSION)
+  args=(run --rm -v "$volume:/arduino" -v "$src:/fw:ro" -e FQBN -e ESP32_CORE_VERSION -e TACTIDOSE_ARDUINO_UPDATE)
   if [ -n "${TACTIDOSE_EXTRA_CA_CERT:-}" ]; then
     ca="$TACTIDOSE_EXTRA_CA_CERT"
     [ "$windows" = 1 ] && ca="$(cd "$(dirname "$ca")" && pwd -W)/$(basename "$ca")"
@@ -48,6 +52,7 @@ fi
 export ARDUINO_DIRECTORIES_DATA=/arduino/data
 export ARDUINO_DIRECTORIES_DOWNLOADS=/arduino/downloads
 export ARDUINO_DIRECTORIES_USER=/arduino/user
+export ARDUINO_BUILD_CACHE_PATH=/arduino/build-cache
 export ARDUINO_BOARD_MANAGER_ADDITIONAL_URLS=https://espressif.github.io/arduino-esp32/package_esp32_index.json
 cli=/arduino/bin/arduino-cli
 if [ ! -x "$cli" ]; then
@@ -56,10 +61,22 @@ if [ ! -x "$cli" ]; then
     tar -xz -C /arduino/bin arduino-cli
 fi
 "$cli" version
-"$cli" core update-index
-"$cli" core install "esp32:esp32${ESP32_CORE_VERSION:+@$ESP32_CORE_VERSION}"
-"$cli" lib update-index
-"$cli" lib install AccelStepper ESP32Servo
+cores=$("$cli" core list 2>/dev/null || true)
+libs=$("$cli" lib list 2>/dev/null || true)
+cached=0
+if [ "${TACTIDOSE_ARDUINO_UPDATE:-0}" != 1 ] &&
+    grep -Eq "^esp32:esp32 +${ESP32_CORE_VERSION:-[0-9]}" <<<"$cores" &&
+    grep -q '^AccelStepper ' <<<"$libs" && grep -q '^ESP32Servo ' <<<"$libs"; then
+  cached=1
+fi
+if [ "$cached" = 1 ]; then
+  echo "using the cached core and libraries (TACTIDOSE_ARDUINO_UPDATE=1 refreshes them)"
+else
+  "$cli" core update-index
+  "$cli" core install "esp32:esp32${ESP32_CORE_VERSION:+@$ESP32_CORE_VERSION}"
+  "$cli" lib update-index
+  "$cli" lib install AccelStepper ESP32Servo
+fi
 "$cli" core list
 "$cli" lib list
 
@@ -68,8 +85,10 @@ fi
 variants=(
   "STEP_DIR||"
   "ULN2003|-DDRIVER_TYPE=2|"
-  "STEP_DIR_ALT||PIN_ENABLE=-1 PIN_CANCEL_BUTTON=-1 PIN_STATUS_LED=2 ENABLE_ACTIVE_LOW=0"
-  "ULN2003_ALT|-DDRIVER_TYPE=2|DIR_INVERT=1 HAS_HOME_SENSOR=0 PIN_STATUS_LED=2"
+  "PER_CONTAINER_SERVO|-DMECHANISM=2|HAS_DROP_SENSOR=1"
+  "STEP_DIR_ALT||PIN_ENABLE=-1 PIN_CANCEL_BUTTON=-1 PIN_STATUS_LED=2 ENABLE_ACTIVE_LOW=0 HAS_DROP_SENSOR=1"
+  "ULN2003_ALT|-DDRIVER_TYPE=2|DIR_INVERT=1 HAS_HOME_SENSOR=0 PIN_STATUS_LED=2 HAS_DROP_SENSOR=1 DROP_SENSOR_ACTIVE_LOW=0 PIN_DROP_SENSOR=35"
+  "PER_CONTAINER_SERVO_ALT|-DMECHANISM=2|PIN_CANCEL_BUTTON=-1 PIN_STATUS_LED=2 DEBUG_LOG=0"
 )
 status=0
 summary=()
@@ -96,7 +115,8 @@ for spec in "${variants[@]}"; do
   ours=$(grep -E "(/sketch|tactidose_esp32)/[^ :]*:[0-9]+(:[0-9]+)?: warning:" "$log" || true)
   count=$(printf '%s' "$ours" | grep -c . || true)
   [ -n "$ours" ] && printf '%s\n' "$ours"
-  summary+=("$name: $result, $count warning(s) in sketch files")
+  size=$(grep -Eo "Sketch uses [0-9]+ bytes \([0-9]+%\)" "$log" | head -n 1 || true)
+  summary+=("$name: $result, $count warning(s) in sketch files${size:+, $size}")
 done
 echo "=== summary ==="
 printf '%s\n' "${summary[@]}"

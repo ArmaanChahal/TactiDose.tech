@@ -1,15 +1,20 @@
-"""Medication catalog — confirmed records only (handoff §18 activation rule, §3).
+"""Medication catalog — confirmed records only (handoff §18 activation rule, §3), v2.
 
 There is no such thing as an unconfirmed ``Medication``: :meth:`MedicationCatalog.create`
-refuses anything not explicitly confirmed by a person, and every change to the
-label information (name / strength / instructions / warnings) must be
-re-confirmed, which re-stamps ``confirmed_at`` / ``confirmed_by``. Unconfirmed,
-machine-extracted data lives only in ``LabelScan`` (see ``onboarding``).
+refuses anything not explicitly confirmed by a person, and every change to the label
+information (name / strength / instructions / warnings) must be re-confirmed, which re-stamps
+``confirmed_at`` / ``confirmed_by``. Unconfirmed, machine-extracted data lives only in
+``LabelScan`` (see ``onboarding``).
 
-The catalog never decides dosage: it stores exactly the text a person entered.
-Archiving is the only delete: the medication becomes inactive, its compartment
-is cleared, its schedules are deactivated and its open (not yet accessed)
-SCHEDULED/DUE dose events are cancelled.
+Medications belong to one patient (``medications.user_id``). Every method takes an optional
+``patient_id``: when given, the medication must belong to that patient (otherwise
+``NotFoundError`` — other patients' records are never revealed) and new records are created
+for that patient; when omitted, the device's patient is used (wave-1 behaviour). Only
+doctor/family edit the catalog (the API enforces the role).
+
+The catalog never decides dosage: it stores exactly the text a person entered. Archiving is the
+only delete: the medication becomes inactive, its container is cleared (pill count 0), its
+schedules are deactivated and its open (not yet dropped) dose events are cancelled.
 """
 
 from __future__ import annotations
@@ -33,7 +38,9 @@ from tactidose.db.models import (
     LogCategory,
     Medication,
     MedicationSource,
+    Role,
     Schedule,
+    User,
 )
 from tactidose.db.session import Database
 from tactidose.hardware.protocol import compartment_number
@@ -77,6 +84,8 @@ MAX_CONFIRMED_BY = 120
 _CONTENT_FIELDS = ("name", "strength", "instructions_text", "warnings")
 #: Keys an API body may carry alongside the content fields; they are handled by keyword args.
 _META_FIELDS = frozenset({"confirmed", "confirmed_by"})
+#: Doses cancelled when their medication is archived (open = not dropped, not under review).
+_CANCEL_ON_ARCHIVE = (DoseStatus.SCHEDULED.value, DoseStatus.DUE.value, DoseStatus.HARDWARE_ERROR.value)
 
 
 # --------------------------------------------------------------------------- validation
@@ -122,8 +131,8 @@ def _clean_warnings(value: object) -> list[str]:
 def validate_medication_fields(fields: object, *, partial: bool) -> dict[str, Any]:
     """Validate/normalise label fields. ``partial`` = only the keys present (PATCH).
 
-    ``instructions`` is accepted as an alias of ``instructions_text``; the keys
-    ``confirmed`` / ``confirmed_by`` are ignored here (they are explicit arguments).
+    ``instructions`` is accepted as an alias of ``instructions_text``; the keys ``confirmed`` /
+    ``confirmed_by`` are ignored here (they are explicit arguments).
     """
     if not isinstance(fields, Mapping):
         raise ValidationError("Medication fields must be an object.")
@@ -165,13 +174,15 @@ def _clean_confirmed_by(value: object) -> str | None:
 def medication_to_dict(
     session: Session, med: Medication, settings: Settings, slots: dict[int, tuple[int, int]] | None = None
 ) -> dict[str, Any]:
-    """API.md ``Medication`` shape (``schedules`` lists the active schedules)."""
+    """API ``Medication`` shape (``schedules`` lists the active schedules)."""
     slot_map = slots if slots is not None else assigned_slots(session, settings)
     resolved = slot_map.get(med.medication_id)
     slot = resolved[0] if resolved is not None else None
+    number = compartment_number(slot) if slot is not None else None
     schedules = sorted((sc for sc in med.schedules if sc.active), key=lambda sc: (sc.time_of_day, sc.schedule_id))
     return {
         "medication_id": med.medication_id,
+        "patient_id": med.user_id,
         "name": med.name,
         "strength": med.strength,
         "instructions_text": med.instructions_text,
@@ -182,7 +193,8 @@ def medication_to_dict(
         "confirmed_at": iso(med.confirmed_at),
         "active": bool(med.active),
         "slot": slot,
-        "compartment_number": compartment_number(slot) if slot is not None else None,
+        "compartment_number": number,
+        "container_number": number,
         "schedules": [schedule_to_dict(sc) for sc in schedules],
     }
 
@@ -198,15 +210,18 @@ class MedicationCatalog:
         self.bus = bus
 
     # ------------------------------------------------------------------ queries
-    def list(self, include_inactive: bool = False) -> list[dict[str, Any]]:
+    def list(self, include_inactive: bool = False, *, patient_id: int | None = None) -> list[dict[str, Any]]:
         with self.db.session() as s:
-            dev = get_device(s, self.settings)
-            if dev is None:
-                return []
+            owner = patient_id
+            if owner is None:
+                dev = get_device(s, self.settings)
+                if dev is None:
+                    return []
+                owner = dev.user_id
             q = (
                 select(Medication)
                 .options(selectinload(Medication.schedules))
-                .where(Medication.user_id == dev.user_id)
+                .where(Medication.user_id == owner)
                 .order_by(func.lower(Medication.name), Medication.medication_id)
             )
             if not include_inactive:
@@ -214,14 +229,11 @@ class MedicationCatalog:
             slots = assigned_slots(s, self.settings)
             return [medication_to_dict(s, m, self.settings, slots) for m in s.scalars(q).all()]
 
-    def get(self, medication_id: int) -> dict[str, Any]:
+    def get(self, medication_id: int, *, patient_id: int | None = None) -> dict[str, Any]:
         with self.db.session() as s:
-            med = s.get(Medication, medication_id) if is_id(medication_id) else None
-            if med is None:
-                raise NotFoundError(f"Medication {medication_id} not found.")
-            return medication_to_dict(s, med, self.settings)
+            return medication_to_dict(s, self._get(s, medication_id, patient_id), self.settings)
 
-    # ------------------------------------------------------------------ commands
+    # ------------------------------------------------------------------ commands (doctor/family)
     def create(
         self,
         fields: dict[str, Any],
@@ -230,13 +242,15 @@ class MedicationCatalog:
         confirmed_by: str | None = None,
         source: str = "manual",
         scan_id: int | None = None,
+        patient_id: int | None = None,
     ) -> dict[str, Any]:
         with self.db.session() as s:
             med = self.create_record(
-                s, fields, confirmed=confirmed, confirmed_by=confirmed_by, source=source, scan_id=scan_id
+                s, fields, confirmed=confirmed, confirmed_by=confirmed_by, source=source, scan_id=scan_id,
+                patient_id=patient_id,
             )
             out = medication_to_dict(s, med, self.settings)
-        self._publish_data("medication", out["medication_id"])
+        self._publish_data("medication", out["medication_id"], out["patient_id"])
         return out
 
     def create_record(
@@ -248,11 +262,12 @@ class MedicationCatalog:
         confirmed_by: str | None = None,
         source: str = "manual",
         scan_id: int | None = None,
+        patient_id: int | None = None,
     ) -> Medication:
         """Insert a confirmed medication inside the caller's transaction (no commit, no publish).
 
-        Used by :meth:`create` and by onboarding, which must mark the scan CONFIRMED
-        in the same transaction.
+        Used by :meth:`create` and by onboarding, which must mark the scan CONFIRMED in the same
+        transaction.
         """
         _require_confirmed(confirmed)
         values = validate_medication_fields(fields, partial=False)
@@ -263,11 +278,20 @@ class MedicationCatalog:
             raise ValidationError(f"source must be one of {', '.join(sorted(valid_sources))}.")
         if scan_id is not None and (not is_id(scan_id) or session.get(LabelScan, scan_id) is None):
             raise NotFoundError(f"Label scan {scan_id} not found.")
-        dev, changes = ensure_device_rows(session, self.settings)
-        log_device_changes(session, self.settings.device_id, changes)
+        if patient_id is None:
+            dev, changes = ensure_device_rows(session, self.settings)
+            log_device_changes(session, self.settings.device_id, changes, at=self.clock.now())
+            owner = dev.user_id
+        else:
+            patient = session.get(User, patient_id) if is_id(patient_id) else None
+            if patient is None:
+                raise NotFoundError(f"Patient {patient_id} not found.")
+            if patient.role != Role.PATIENT.value:
+                raise ValidationError("Medications can only be added for a patient account.")
+            owner = patient.user_id
         now = self.clock.now()
         med = Medication(
-            user_id=dev.user_id,
+            user_id=owner,
             name=values["name"],
             strength=values["strength"],
             instructions_text=values["instructions_text"],
@@ -284,8 +308,10 @@ class MedicationCatalog:
         session.add(med)
         session.flush()
         log_event(session, self.settings.device_id, LogCategory.ADMIN, "MEDICATION_CREATED",
-                  {"medication_id": med.medication_id, "source": src, "scan_id": scan_id, "confirmed_by": by})
-        log.info("medication %s created (source=%s, confirmed by %s)", med.medication_id, src, by)
+                  {"medication_id": med.medication_id, "patient_id": owner, "source": src, "scan_id": scan_id,
+                   "confirmed_by": by}, at=now)
+        log.info("medication %s created for patient %s (source=%s, confirmed by %s)",
+                 med.medication_id, owner, src, by)
         return med
 
     def update(
@@ -295,12 +321,11 @@ class MedicationCatalog:
         *,
         confirmed: bool,
         confirmed_by: str | None = None,
+        patient_id: int | None = None,
     ) -> dict[str, Any]:
         values = validate_medication_fields(fields, partial=True)
         with self.db.session() as s:
-            med = s.get(Medication, medication_id) if is_id(medication_id) else None
-            if med is None:
-                raise NotFoundError(f"Medication {medication_id} not found.")
+            med = self._get(s, medication_id, patient_id)
             if not values:
                 return medication_to_dict(s, med, self.settings)
             # Any change to label information is a new human confirmation (handoff §18).
@@ -314,24 +339,25 @@ class MedicationCatalog:
             med.updated_at = now
             s.flush()
             log_event(s, self.settings.device_id, LogCategory.ADMIN, "MEDICATION_UPDATED",
-                      {"medication_id": med.medication_id, "fields": sorted(values), "confirmed_by": med.confirmed_by})
+                      {"medication_id": med.medication_id, "fields": sorted(values), "confirmed_by": med.confirmed_by},
+                      at=now)
             out = medication_to_dict(s, med, self.settings)
-        self._publish_data("medication", medication_id)
+        self._publish_data("medication", medication_id, out["patient_id"])
         return out
 
-    def archive(self, medication_id: int) -> None:
-        """Deactivate; clear its compartment; deactivate schedules; cancel open doses."""
+    def archive(self, medication_id: int, *, patient_id: int | None = None) -> None:
+        """Deactivate; clear its container; deactivate schedules; cancel open doses."""
         now = self.clock.now()
         payloads: list[dict[str, Any]] = []
         with self.db.session() as s:
-            med = s.get(Medication, medication_id) if is_id(medication_id) else None
-            if med is None:
-                raise NotFoundError(f"Medication {medication_id} not found.")
+            med = self._get(s, medication_id, patient_id)
+            owner = med.user_id
             med.active = False
             med.updated_at = now
             cleared = []
             for comp in s.scalars(select(Compartment).where(Compartment.medication_id == med.medication_id)).all():
                 comp.medication_id = None
+                comp.pill_count = 0     # pills of an archived medication are never dropped as another one
                 comp.loaded_at = None
                 cleared.append(comp.slot_number)
             deactivated = []
@@ -347,7 +373,8 @@ class MedicationCatalog:
                 .options(selectinload(DoseEvent.medication))
                 .where(
                     DoseEvent.medication_id == med.medication_id,
-                    DoseEvent.status.in_((DoseStatus.SCHEDULED.value, DoseStatus.DUE.value)),
+                    DoseEvent.status.in_(_CANCEL_ON_ARCHIVE),
+                    DoseEvent.needs_review.is_(False),
                 )
                 .order_by(DoseEvent.scheduled_at)
             ).all()
@@ -355,7 +382,9 @@ class MedicationCatalog:
                 previous = ev.status
                 changed = cas_transition(
                     s, ev.event_id, previous,
-                    {"status": DoseStatus.CANCELLED.value, "cancelled_at": now, "review_note": "medication archived"},
+                    {"status": DoseStatus.CANCELLED.value, "cancelled_at": now,
+                     "review_note": "medication archived", "next_attempt_at": None},
+                    require_no_review=True,
                 )
                 if changed is None:
                     continue
@@ -364,16 +393,27 @@ class MedicationCatalog:
                 payloads.append(dose_update_payload(changed, self.clock, previous=previous, action="cancelled"))
             log_event(s, self.settings.device_id, LogCategory.ADMIN, "MEDICATION_ARCHIVED",
                       {"medication_id": med.medication_id, "cleared_slots": cleared,
-                       "deactivated_schedules": deactivated, "cancelled_events": len(payloads)})
-        log.info("medication %s archived (slots %s cleared, %d dose(s) cancelled)", medication_id, cleared, len(payloads))
+                       "deactivated_schedules": deactivated, "cancelled_events": len(payloads)}, at=now)
+        log.info("medication %s archived (slots %s cleared, %d dose(s) cancelled)",
+                 medication_id, cleared, len(payloads))
         publish_all(self.bus, Topic.DOSE_UPDATED, payloads)
-        self._publish_data("medication", medication_id)
+        self._publish_data("medication", medication_id, owner)
         if cleared:
-            self._publish_data("compartment", None)
+            self._publish_data("compartment", None, owner)
         if deactivated:
-            self._publish_data("schedule", None)
+            self._publish_data("schedule", None, owner)
 
     # ------------------------------------------------------------------ internals
-    def _publish_data(self, entity: str, entity_id: int | None) -> None:
-        if self.bus is not None:
-            self.bus.publish(Topic.DATA_CHANGED, {"entity": entity, "id": entity_id})
+    @staticmethod
+    def _get(s: Session, medication_id: int, patient_id: int | None) -> Medication:
+        med = s.get(Medication, medication_id) if is_id(medication_id) else None
+        if med is None or (patient_id is not None and med.user_id != patient_id):
+            raise NotFoundError(f"Medication {medication_id} not found.")
+        return med
+
+    def _publish_data(self, entity: str, entity_id: int | None, patient_id: int | None) -> None:
+        if self.bus is None:
+            return
+        self.bus.publish(Topic.DATA_CHANGED, {"entity": entity, "id": entity_id, "patient_id": patient_id})
+        if patient_id is not None:
+            self.bus.publish(Topic.PATIENT_STATUS, {"patient_id": patient_id, "reason": entity})

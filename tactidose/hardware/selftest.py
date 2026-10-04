@@ -2,13 +2,15 @@
 
 * :func:`run_hw_test` - the handoff §29 "Integration" checklist, executed through the
   production :class:`~tactidose.hardware.serial_client.HardwareClient`: PING, STATUS, HOME,
-  every MOVE_SLOT, DISPENSE_SLOT + CLOSE_GATE (``repeat`` times), STOP during a move then
-  HOME, an unexpected command, and (``interactive``) the confirm/cancel buttons. Prints a
-  PASS/FAIL table and returns an exit code (CLI: ``python -m tactidose hw-test --port COM5``).
+  every MOVE_SLOT, DISPENSE_SLOT + CLOSE_GATE (``repeat`` times), one pill drop per container
+  (``DROP_SLOT n``, or the host's v1 emulation ``DISPENSE_SLOT n`` + ``CLOSE_GATE`` when the
+  firmware does not report ``proto >= 1.1``), STOP during a move then HOME, an unexpected
+  command, and (``interactive``) the confirm/cancel buttons. Prints a PASS/FAIL table and
+  returns an exit code (CLI: ``python -m tactidose hw-test --port COM5``).
 * :class:`SerialConformanceTarget` - ``ConformanceTarget`` for a real board in wall-clock time
   (``python -m tactidose.hardware.conformance --target serial --port COM5``).
 
-Both move the carousel and open the gate: keep hands clear and load candy/tokens only.
+Both move the carousel, open the gate and drop pills: keep hands clear and load candy/tokens only.
 """
 
 from __future__ import annotations
@@ -24,14 +26,18 @@ from typing import TYPE_CHECKING, Callable
 from tactidose.hardware.ports import format_ports, resolve_port
 from tactidose.hardware.protocol import (
     DEFAULT_BAUD,
+    CommandName,
     CommandResult,
     DeviceState,
     Err,
     Ev,
+    GateState,
     Message,
     MessageKind,
+    Ok,
     StatusReport,
     parse_message,
+    supports_drop_slot,
 )
 from tactidose.hardware.serial_client import HANDSHAKE_PING_ATTEMPTS, HardwareClient
 from tactidose.hardware.transports import PySerialTransport, Transport, TransportError
@@ -49,7 +55,8 @@ BUTTON_WAIT_S = 15.0
 EXIT_OK, EXIT_FAILED, EXIT_NO_DEVICE = 0, 1, 2
 
 _SAFETY_BANNER = (
-    "The carousel will move and the gate will open. Keep hands clear; use candy/tokens only."
+    "The carousel will move, the gate will open and one pill drops from every container. "
+    "Keep hands clear; use candy/tokens only."
 )
 
 
@@ -79,7 +86,13 @@ def _describe(result: CommandResult) -> str:
     lines = " / ".join(m.to_line() for m in result.messages) or result.hardware_result
     if not result.ok:
         lines = f"{result.hardware_result}" + (f" [{lines}]" if result.messages else "")
+    elif result.detail:
+        lines = f"{lines} [{result.detail}]"
     return f"{lines} ({result.elapsed_s:.2f} s)"
+
+
+def _protocol_label(proto: str | None) -> str:
+    return f"protocol {proto}" if proto else "protocol v1, no DROP_SLOT"
 
 
 class _HwTest:
@@ -151,6 +164,23 @@ class _HwTest:
         r = self.client.close_gate()
         ok = r.ok and r.code == "GATE_CLOSED" and self.wait_state(DeviceState.READY)
         return ok, _describe(r)
+
+    def drop(self, slot: int) -> tuple[bool, str]:
+        """One pill from container ``slot``: ``OK DROPPED n`` (v1.1) or ``OK GATE_OPEN`` + a
+        successful ``CLOSE_GATE`` (v1 emulation); the device must end READY with the gate closed."""
+        r = self.client.drop_slot(slot)
+        emulated = r.command.name is CommandName.DISPENSE_SLOT
+        ok = r.ok and r.code == (Ok.GATE_OPEN.value if emulated else Ok.DROPPED.value)
+        detail = _describe(r)
+        if r.code == Err.NO_PILL.value:
+            detail += (f" - no pill passed the drop sensor: load candy/tokens into container "
+                       f"{slot + 1} or check it for a jam")
+        if not ok:
+            return False, detail
+        if not (self.wait_state(DeviceState.READY) and self.client.snapshot().gate is GateState.CLOSED):
+            snap = self.client.snapshot()
+            return False, f"{detail}; afterwards state {snap.state.value}, gate {snap.gate.value}"
+        return True, detail
 
     def stop_during_move(self) -> tuple[bool, str]:
         current = self.client.snapshot().slot or 0
@@ -224,6 +254,10 @@ class _HwTest:
                 suffix = f" (run {i + 1}/{repeat})" if repeat > 1 else ""
                 self.check(f"DISPENSE_SLOT {slot}{suffix}", lambda slot=slot: self.dispense(slot))
                 self.check(f"CLOSE_GATE{suffix}", self.close_gate)
+            v11 = supports_drop_slot(self.client.snapshot().proto)
+            for slot in range(self.n):
+                name = f"DROP_SLOT {slot}" if v11 else f"DROP_SLOT {slot} (v1 emulation)"
+                self.check(name, lambda slot=slot: self.drop(slot))
             self.check("STOP during MOVE_SLOT", self.stop_during_move)
             self.check("HOME after STOP", self.home)
         self.check("Unknown command FOO", self.unknown_command)
@@ -302,7 +336,8 @@ def run_hw_test(
         raise
     finally:
         client.close()
-    _print_table(test.results, out, f"TactiDose hardware self-test - {label} (fw {snap.fw_version or '?'})")
+    _print_table(test.results, out, f"TactiDose hardware self-test - {label} "
+                                    f"(fw {snap.fw_version or '?'}, {_protocol_label(snap.proto)})")
     return EXIT_OK if all(r.ok for r in test.results) else EXIT_FAILED
 
 
@@ -323,8 +358,8 @@ class SerialConformanceTarget:
     supports_faults = False
     supports_buttons = False
     supports_boot = True
-    #: Not used by the frozen runner yet: lets it skip ``hardware_safe: false`` scenarios on
-    #: real boards even though this target can reboot the device (see the report).
+    #: Makes the runner skip ``hardware_safe: false`` scenarios on real boards even though this
+    #: target can reboot the device.
     real_hardware = True
 
     def __init__(
@@ -403,6 +438,9 @@ class SerialConformanceTarget:
 
     def set_jam(self, on: bool) -> None:
         raise NotImplementedError("cannot inject motor jams on real hardware")
+
+    def set_pills(self, slot: int, count: int) -> None:
+        raise NotImplementedError("cannot change the pill count of a real container from the host")
 
     def close(self) -> None:
         self._closed.set()

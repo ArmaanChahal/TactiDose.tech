@@ -1,19 +1,20 @@
 /**
- * SVG diagram of the medication carousel (handoff §5): N numbered sectors
- * (compartment k = protocol slot k-1, numbered clockwise from home), a fixed
- * access gate at the top, and the sector currently at the gate highlighted.
+ * SVG diagram of the simulated device for the demo panel: N numbered containers
+ * (container k = protocol slot k-1, numbered clockwise from home) with their pill
+ * counts, the fixed release gate / chute at the top, and the container at the gate
+ * highlighted.
  *
- * The disk rotates so the slot at the gate sits under the gate marker, like the
- * real device: rotation `angleDeg` means the sector centred at that angle (slot
- * k is centred at k × 360/N) is at the gate. Numbers stay upright.
- * Geometry helpers are pure and unit-tested; rendering uses createElementNS only.
+ * The disk rotates so the slot at the gate sits under the gate marker, like the real
+ * device: rotation `angleDeg` means the sector centred at that angle (slot k is centred
+ * at k × 360/N) is at the gate. Labels stay upright. Geometry helpers are pure and
+ * unit-tested; rendering uses createElementNS only.
  */
 
 import { s, uid } from './dom.js';
 
 export const R_OUT = 112;
 export const R_IN = 42;
-const R_LABEL = 80;
+const R_LABEL = 78;
 
 const round = (v) => Math.round(v * 100) / 100 || 0; // "|| 0" turns -0 into 0
 
@@ -46,6 +47,31 @@ export function sectorPath(slot, numSlots, rOut = R_OUT, rIn = R_IN) {
   return `M${x0} ${y0}A${rOut} ${rOut} 0 ${large} 1 ${x1} ${y1}L${x2} ${y2}A${rIn} ${rIn} 0 ${large} 0 ${x3} ${y3}Z`;
 }
 
+/**
+ * Pill counts per container from a `sim.physical` payload, whatever shape the
+ * simulator uses: [20, 19, 20], {"0": 20, "1": 19}, or containers/slots arrays of
+ * {slot, pills|pill_count|count}. Returns an array of numbers (or nulls) of length n.
+ */
+export function pillsFromPhysical(p, n) {
+  const out = Array.from({ length: Math.max(0, Number(n) || 0) }, () => null);
+  if (!p || typeof p !== 'object') return out;
+  const source = p.pills ?? p.pill_counts ?? p.pills_per_slot ?? p.containers ?? p.slots ?? null;
+  const put = (slot, value) => {
+    const i = Number(slot);
+    const v = Number(value);
+    if (Number.isInteger(i) && i >= 0 && i < out.length && Number.isFinite(v)) out[i] = v;
+  };
+  if (Array.isArray(source)) {
+    source.forEach((entry, i) => {
+      if (entry && typeof entry === 'object') put(entry.slot ?? i, entry.pills ?? entry.pill_count ?? entry.count);
+      else put(i, entry);
+    });
+  } else if (source && typeof source === 'object') {
+    for (const [slot, value] of Object.entries(source)) put(slot, value);
+  }
+  return out;
+}
+
 function prefersReducedMotion() {
   return typeof window !== 'undefined' && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
 }
@@ -55,18 +81,18 @@ export class CarouselView {
    * @param {HTMLElement} container element the SVG is appended to
    * @param {{numSlots?: number, label?: string}} [options]
    */
-  constructor(container, { numSlots = 6, label = 'Carousel diagram' } = {}) {
+  constructor(container, { numSlots = 3, label = 'Device diagram' } = {}) {
     this.container = container;
     this.label = label;
     this.angle = 0;
     this.target = 0;
     this.raf = null;
-    this.state = { slot: null, gate: 'UNKNOWN', targetSlot: null, moving: false, assigned: new Set() };
+    this.state = { slot: null, gate: 'UNKNOWN', targetSlot: null, moving: false, pills: [] };
     this.build(numSlots);
   }
 
   build(numSlots) {
-    this.n = Math.max(2, Number(numSlots) || 6);
+    this.n = Math.max(2, Number(numSlots) || 3);
     const titleId = uid('carousel-title');
     const descId = uid('carousel-desc');
     this.desc = s('desc', { id: descId });
@@ -74,17 +100,17 @@ export class CarouselView {
     this.sectors = [];
     this.labels = [];
     this.nums = [];
-    this.pips = [];
+    this.counts = [];
     for (let i = 0; i < this.n; i += 1) {
       const sector = s('path', { class: 'c-sector', d: sectorPath(i, this.n) });
       const [x, y] = polar(R_LABEL, slotAngle(i, this.n));
-      const num = s('text', { class: 'c-num', x: 0, y: -6, text: String(i + 1) });
-      const pip = s('circle', { class: 'c-pip', cx: 0, cy: 17, r: 0 });
-      const label = s('g', { class: 'c-label', 'data-x': x, 'data-y': y }, num, pip);
+      const num = s('text', { class: 'c-num', x: 0, y: -8, 'font-size': 26, text: String(i + 1) });
+      const count = s('text', { class: 'c-count', x: 0, y: 16, 'font-size': 13, text: '' });
+      const label = s('g', { class: 'c-label', 'data-x': x, 'data-y': y }, num, count);
       this.sectors.push(sector);
       this.labels.push(label);
       this.nums.push(num);
-      this.pips.push(pip);
+      this.counts.push(count);
       this.disk.append(sector);
     }
     for (const label of this.labels) this.disk.append(label);
@@ -92,7 +118,7 @@ export class CarouselView {
 
     const gateY = -R_OUT - 32;
     this.gateBar = s('rect', { class: 'c-gate-bar', x: -32, y: gateY + 3, width: 64, height: 16, rx: 3 });
-    this.gateText = s('text', { class: 'c-gate-text', x: 0, y: gateY - 10, text: 'GATE' });
+    this.gateText = s('text', { class: 'c-gate-text', x: 0, y: gateY - 10, 'font-size': 14, text: 'Gate' });
     const gate = s('g', { class: 'c-gate' },
       this.gateText,
       s('rect', { class: 'c-gate-frame', x: -38, y: gateY - 2, width: 76, height: 26, rx: 5 }),
@@ -117,14 +143,14 @@ export class CarouselView {
 
   /**
    * @param {{slot?: number|null, angleDeg?: number|null, gate?: string, targetSlot?: number|null,
-   *          moving?: boolean, assignedSlots?: Iterable<number>|null}} update
+   *          moving?: boolean, pills?: Array<number|null>}} update
    */
-  update({ slot, angleDeg = null, gate, targetSlot, moving, assignedSlots } = {}) {
+  update({ slot, angleDeg = null, gate, targetSlot, moving, pills } = {}) {
     if (slot !== undefined) this.state.slot = slot === null ? null : Number(slot);
     if (moving !== undefined) this.state.moving = Boolean(moving);
     if (gate !== undefined) this.state.gate = gate || 'UNKNOWN';
     if (targetSlot !== undefined) this.state.targetSlot = targetSlot === null ? null : Number(targetSlot);
-    if (assignedSlots) this.state.assigned = new Set(Array.from(assignedSlots, Number));
+    if (Array.isArray(pills)) this.state.pills = pills.map((p) => (p === null || p === undefined || !Number.isFinite(Number(p)) ? null : Number(p)));
     let angle = null;
     if (angleDeg !== null && angleDeg !== undefined && Number.isFinite(Number(angleDeg))) angle = Number(angleDeg);
     else if (this.state.slot !== null) angle = slotAngle(this.state.slot, this.n);
@@ -162,34 +188,38 @@ export class CarouselView {
   }
 
   render() {
-    const { slot, gate, targetSlot, assigned } = this.state;
+    const { slot, gate, targetSlot, pills } = this.state;
     for (let i = 0; i < this.n; i += 1) {
       const atGate = i === slot;
+      const count = pills[i];
       this.sectors[i].classList.toggle('is-at-gate', atGate);
       this.sectors[i].classList.toggle('is-target', i === targetSlot && !atGate);
+      this.sectors[i].classList.toggle('is-empty', count === 0);
       this.nums[i].classList.toggle('is-at-gate', atGate);
-      this.pips[i].classList.toggle('is-at-gate', atGate);
-      this.pips[i].setAttribute('r', assigned.has(i) ? '5' : '0');
+      this.counts[i].classList.toggle('is-at-gate', atGate);
+      this.counts[i].textContent = count === null || count === undefined ? '' : `${count} ${count === 1 ? 'pill' : 'pills'}`;
     }
     const open = gate === 'OPEN';
     const unknown = gate !== 'OPEN' && gate !== 'CLOSED';
     const gateY = -R_OUT - 32;
     this.gateBar.setAttribute('y', String(open ? gateY - 18 : gateY + 3));
     this.gateBar.classList.toggle('is-unknown', unknown);
-    this.gateText.textContent = open ? 'GATE OPEN' : unknown ? 'GATE ?' : 'GATE CLOSED';
+    this.gateText.textContent = open ? 'Gate open' : unknown ? 'Gate unknown' : 'Gate closed';
     this.gateText.setAttribute('y', String(open ? gateY - 26 : gateY - 10));
     this.desc.textContent = this.describe();
   }
 
   /** Text alternative, also used as the visible caption. */
   describe() {
-    const { slot, gate, targetSlot, moving } = this.state;
+    const { slot, gate, targetSlot, moving, pills } = this.state;
     const parts = [];
-    if (slot !== null && slot !== undefined) parts.push(`Compartment ${slot + 1} is at the gate.`);
+    if (slot !== null && slot !== undefined) parts.push(`Container ${slot + 1} is at the gate.`);
     else if (moving) parts.push('The carousel is turning.');
-    else parts.push('Position unknown (between compartments or not homed).');
-    if (targetSlot !== null && targetSlot !== undefined && targetSlot !== slot) parts.push(`Moving to compartment ${targetSlot + 1}.`);
+    else parts.push('Position unknown (between containers or not homed).');
+    if (targetSlot !== null && targetSlot !== undefined && targetSlot !== slot) parts.push(`Moving to container ${targetSlot + 1}.`);
     parts.push(gate === 'OPEN' ? 'Gate open.' : gate === 'CLOSED' ? 'Gate closed.' : 'Gate state unknown.');
+    const counts = (pills || []).map((p, i) => (p === null || p === undefined ? null : `container ${i + 1}: ${p}`)).filter(Boolean);
+    if (counts.length) parts.push(`Pills left — ${counts.join(', ')}.`);
     return parts.join(' ');
   }
 }

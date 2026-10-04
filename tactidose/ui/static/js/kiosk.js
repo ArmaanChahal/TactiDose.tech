@@ -1,316 +1,290 @@
 /**
- * Kiosk / touchscreen controller (index.html).
- *
- * Mirrors the backend: GET /api/state on load, on reconnect and every 15 s, plus
- * live SSE topics (assistant.state, device.state, assistant.spoken, dose.updated…).
- * Buttons and shortcuts only *request* actions via POST /api/intents — the
- * backend decides whether anything moves.
- *
- * Double-tap protection: while a request is in flight every button except
- * CANCEL is aria-disabled (focus is kept). CANCEL always stays available
- * because it must interrupt a dispense immediately.
+ * Optional kiosk screen (kiosk.html): a full-screen, voice-first device screen for the
+ * signed-in patient. One big status word, the next pill, three huge drop buttons (press
+ * twice to drop, so a single accidental touch never drops a pill), a Talk button and
+ * large captions. Replies and results are spoken. Same API and rules as the patient
+ * portal: POST /api/patients/{pid}/drops and POST /api/agent/chat.
  */
 
-import { get, postIntent } from './api.js';
+import { LONG_TIMEOUT_MS, get, post } from './api.js';
 import { EventStream, RECONNECTED } from './events.js';
-import { $$, announce, byId, debounce, errorText, initLiveRegions } from './dom.js';
+import { announce, byId, debounce, errorState, errorText, h, initLiveRegions, replaceChildren } from './dom.js';
 import { hydrateIcons, icon } from './icons.js';
-import { initThemeToggle } from './theme.js';
-import {
-  KIOSK_INTENTS,
-  deriveBanner,
-  doseDetailText,
-  intentForKey,
-  nextEventText,
-  suggestedIntent,
-  voiceText,
-} from './kiosk-state.js';
+import { initThemeCycleButton } from './theme.js';
+import { bindConnIndicator } from './conn.js';
+import { requireSession, watchSession } from './session.js';
+import { containerView, kioskBanner, nextPillText, outcomeView, remainingCooldown } from './status.js';
+import { notificationSpeech } from './notifications.js';
+import { displayTranscript } from './pcm.js';
+import { ReplySpeaker, VoiceInput, voiceInputAvailable } from './voice.js';
 
-const POLL_MS = 15000;
-const CAPTION_DEDUPE_MS = 2500;
-const CANCEL_DEBOUNCE_MS = 500;
-const CAPTION_KIND_ICON = { error: 'warning', warning: 'warning', success: 'check-circle', prompt: 'arrow-right' };
-
-const view = {
-  loaded: false,
-  serverOnline: true,
-  stateError: false,
-  device: null,
-  phase: 'IDLE',
-  awaiting: null,
-  due: null,
-  nowLocal: null,
-  voice: null,
-  demoMode: false,
-};
-
-const ui = {
-  banner: byId('status-banner'),
-  icon: byId('status-icon'),
-  word: byId('status-word'),
-  sep: byId('status-sep'),
-  detail: byId('status-detail'),
-  next: byId('next-event'),
-  doseDetail: byId('dose-detail'),
-  caption: byId('caption'),
-  captionAlert: byId('caption-alert'),
-  busy: byId('busy'),
-  conn: byId('conn-banner'),
-  voice: byId('voice-status'),
-  voiceIcon: byId('voice-icon'),
-  voiceWord: byId('voice-word'),
-  demoChip: byId('demo-chip'),
-};
-
-const buttons = $$('[data-intent]');
-let inFlight = null;
-let lastCancelAt = 0;
-let lastCaption = { text: '', at: 0 };
-let captionIsConnectionError = false;
-let lastBannerKey = '';
-
-// ------------------------------------------------------------------ rendering
-
-function render() {
-  const current = deriveBanner(view);
-  const bannerKey = `${current.key}|${current.detail}`;
-  if (bannerKey !== lastBannerKey) {
-    lastBannerKey = bannerKey;
-    ui.banner.dataset.tone = current.tone;
-    ui.icon.replaceChildren(icon(current.icon));
-    ui.word.textContent = current.word;
-    ui.sep.textContent = current.detail ? ' — ' : '';
-    ui.detail.textContent = current.detail;
-  }
-
-  ui.next.textContent = nextEventText(view);
-  const detail = doseDetailText(view);
-  ui.doseDetail.textContent = detail;
-  ui.doseDetail.hidden = !detail;
-
-  const suggested = suggestedIntent(view, current);
-  for (const btn of buttons) {
-    const on = btn.dataset.intent === suggested;
-    btn.classList.toggle('is-suggested', on);
-    const marker = btn.querySelector('.k-next');
-    if (marker) marker.hidden = !on;
-  }
-
-  const voice = voiceText(view.voice);
-  ui.voiceWord.textContent = voice.word;
-  ui.voiceIcon.replaceChildren(icon(voice.icon));
-  ui.voice.dataset.on = String(voice.on);
-
-  ui.conn.hidden = view.serverOnline !== false;
-  ui.demoChip.hidden = !view.demoMode;
-}
-
-/**
- * Show what TactiDose said. Errors go to the assertive region, everything else to
- * the polite one; replayed/initial captions update the screen without being announced.
- * The same sentence arriving twice (HTTP reply + assistant.spoken event) is shown
- * once; `force` re-announces an identical sentence (REPEAT).
- */
-function showCaption(text, kind = 'info', { quiet = false, force = false } = {}) {
-  if (!text) return;
-  const now = Date.now();
-  const duplicate = text === lastCaption.text && now - lastCaption.at < CAPTION_DEDUPE_MS;
-  if (duplicate && !force) return;
-  lastCaption = { text, at: now };
-  captionIsConnectionError = false;
-  const isError = kind === 'error';
-  const target = isError ? ui.captionAlert : ui.caption;
-  const other = isError ? ui.caption : ui.captionAlert;
-  other.replaceChildren();
-  other.hidden = true;
-  target.hidden = false;
-  target.dataset.kind = kind;
-  const politeness = isError ? 'assertive' : 'polite';
-  if (quiet) target.setAttribute('aria-live', 'off');
-  const iconName = CAPTION_KIND_ICON[kind];
-  const content = () => [...(iconName ? [icon(iconName)] : []), document.createTextNode(text)];
-  if (duplicate && target.textContent === text) {
-    // Identical text: empty the live region first so it is announced again.
-    target.replaceChildren();
-    setTimeout(() => target.replaceChildren(...content()), 60);
-  } else {
-    target.replaceChildren(...content());
-  }
-  if (quiet) setTimeout(() => target.setAttribute('aria-live', politeness), 1200);
-}
-
-function setServerOnline(online) {
-  if (view.serverOnline === online) return;
-  view.serverOnline = online;
-  if (online && captionIsConnectionError) {
-    // The caption still shows "Cannot reach the server…": replace it (this also announces it).
-    captionIsConnectionError = false;
-    showCaption('Connection restored.', 'info');
-  } else {
-    announce(online ? 'Connection restored.' : 'Connection lost. Reconnecting.', { assertive: !online });
-  }
-  render();
-}
-
-// ------------------------------------------------------------------ state
-
-function applyState(state) {
-  const firstLoad = !view.loaded;
-  view.loaded = true;
-  view.stateError = false;
-  view.device = state.device || null;
-  view.phase = state.assistant?.phase || 'IDLE';
-  view.awaiting = state.assistant?.awaiting || null;
-  view.due = state.due || null;
-  view.nowLocal = state.now_local || state.due?.now_local || null;
-  view.voice = state.voice || null;
-  view.demoMode = Boolean(state.demo_mode);
-  const last = state.assistant?.last_reply;
-  if (firstLoad && last?.text) showCaption(last.text, last.kind, { quiet: true });
-  render();
-}
-
-async function refreshState() {
-  try {
-    const state = await get('/api/state');
-    setServerOnline(true);
-    applyState(state);
-  } catch (err) {
-    if (err.network || err.timeout) {
-      setServerOnline(false);
-    } else {
-      // Server answered but cannot report state: fail closed (shown as offline / unavailable).
-      view.loaded = true;
-      view.stateError = true;
-      render();
-      console.error('TactiDose kiosk: /api/state failed', err);
-    }
-  }
-}
-
-const refreshSoon = debounce(refreshState, 300);
-
-// ------------------------------------------------------------------ intents
-
-function setBusy(intent) {
-  inFlight = intent;
-  for (const btn of buttons) {
-    if (btn.dataset.intent === 'CANCEL') continue;
-    if (intent) btn.setAttribute('aria-disabled', 'true');
-    else btn.removeAttribute('aria-disabled');
-  }
-  ui.busy.textContent = intent ? 'PLEASE WAIT…' : '';
-}
-
-async function sendIntent(intent) {
-  if (!KIOSK_INTENTS.includes(intent)) return;
-  const isCancel = intent === 'CANCEL';
-  if (isCancel) {
-    const now = Date.now();
-    if (now - lastCancelAt < CANCEL_DEBOUNCE_MS) return;
-    lastCancelAt = now;
-  } else if (inFlight) {
-    announce('Please wait.');
-    return;
-  } else {
-    setBusy(intent);
-  }
-  try {
-    const reply = await postIntent(intent, 'ui');
-    setServerOnline(true);
-    if (reply && reply.text) showCaption(reply.text, reply.kind || 'info', { force: intent === 'REPEAT' });
-  } catch (err) {
-    if (err.network) setServerOnline(false);
-    showCaption(errorText(err), 'error');
-    captionIsConnectionError = Boolean(err.network || err.timeout);
-  } finally {
-    if (!isCancel) setBusy(null);
-    refreshSoon();
-  }
-}
-
-for (const btn of buttons) {
-  btn.addEventListener('click', () => sendIntent(btn.dataset.intent));
-}
-
-// Remember how each control got focus: a button that merely kept focus after a
-// tap/click must not swallow Space/Enter (they stay the main button); only a
-// control reached with the keyboard keeps its native activation.
-let lastModality = 'keyboard';
-const keyboardFocus = new WeakSet();
-document.addEventListener('pointerdown', () => {
-  lastModality = 'pointer';
-}, true);
-document.addEventListener('keydown', (e) => {
-  if (e.key === 'Tab') lastModality = 'keyboard';
-}, true);
-document.addEventListener('focusin', (e) => {
-  if (lastModality === 'keyboard') keyboardFocus.add(e.target);
-  else keyboardFocus.delete(e.target);
-}, true);
-
-function keyboardFocused(el) {
-  return keyboardFocus.has(el);
-}
-
-document.addEventListener('keydown', (e) => {
-  if (e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey || e.repeat) return;
-  if (document.querySelector('dialog[open]')) return;
-  const target = e.target instanceof Element ? e.target : null;
-  const typing = Boolean(target && target.closest('input, textarea, select, [contenteditable="true"]'));
-  const control = target ? target.closest('button, a[href], [role="button"], summary') : null;
-  const onControl = Boolean(control && keyboardFocused(control));
-  const intent = intentForKey(e.key, { onControl, typing });
-  if (!intent) return;
-  e.preventDefault();
-  sendIntent(intent);
-});
-
-// ------------------------------------------------------------------ live events
-
-const stream = new EventStream();
-
-stream.onStatus((status) => {
-  if (status === 'open') setServerOnline(true);
-  if (status === 'reconnecting') refreshSoon();
-});
-
-stream.on(RECONNECTED, () => refreshState());
-
-stream.on('device.state', (snapshot) => {
-  view.device = snapshot;
-  render();
-});
-
-stream.on('assistant.state', (data) => {
-  view.phase = data.phase || 'IDLE';
-  view.awaiting = data.phase === 'AWAITING_CONFIRMATION' ? data.dose || view.awaiting : null;
-  render();
-  refreshSoon();
-});
-
-stream.on('assistant.spoken', (data, _env, meta) => {
-  showCaption(data.text, data.kind || 'info', { quiet: meta.replayed });
-});
-
-stream.on('voice.status', (data) => {
-  view.voice = data;
-  render();
-});
-
-for (const topic of ['dose.updated', 'clock.changed', 'data.changed']) {
-  stream.on(topic, () => refreshSoon());
-}
-
-// ------------------------------------------------------------------ start
+const CONFIRM_MS = 6000;
 
 initLiveRegions();
 hydrateIcons();
-initThemeToggle(byId('theme-toggle'), { upper: true });
-render();
-stream.start();
-refreshState();
-setInterval(refreshState, POLL_MS);
-document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible') refreshState();
+initThemeCycleButton(byId('theme-btn'));
+const stream = new EventStream();
+bindConnIndicator(byId('conn'), stream, { quietWhenOpen: true });
+const speaker = new ReplySpeaker();
+
+const state = {
+  pid: null,
+  status: null,
+  statusAt: 0,
+  online: true,
+  dropping: false,
+  armed: null,
+  armedTimer: null,
+  conversationId: null,
+  chatting: false,
+  lastBanner: '',
+  spokenDrops: new Set(),
+};
+
+function caption(text, { speak = true, assertive = false } = {}) {
+  byId('k-caption').textContent = text;
+  announce(text, { assertive });
+  if (speak && text) speaker.speak(text);
+}
+
+// ------------------------------------------------------------------ status
+
+function remaining() {
+  return remainingCooldown(state.status, (performance.now() - state.statusAt) / 1000);
+}
+
+function renderBanner() {
+  const b = kioskBanner({ status: state.status, remainingS: remaining(), dropping: state.dropping, online: state.online });
+  const word = byId('k-status-word');
+  word.textContent = b.word;
+  word.className = `status-word tone-${b.tone}`;
+  byId('k-status-detail').textContent = b.detail;
+  byId('k-status').dataset.state = b.key;
+  if (state.lastBanner === 'wait' && b.key === 'ready') announce('You can drop a pill now.');
+  state.lastBanner = b.key;
+}
+
+function renderDrops() {
+  const box = byId('k-drops');
+  const containers = (state.status?.containers || []).map(containerView).filter((v) => v.hasMed).sort((a, b) => a.slot - b.slot);
+  if (!containers.length) {
+    replaceChildren(box, h('p', { class: 'k-line' }, 'No containers are set up yet.'));
+    return;
+  }
+  const focused = box.contains(document.activeElement) ? document.activeElement.dataset.slot : undefined;
+  replaceChildren(box, containers.map((v) => {
+    const armed = state.armed === v.slot;
+    return h('button', {
+      type: 'button',
+      class: `k-btn k-btn-drop${armed ? ' is-armed' : ''}${v.canDrop ? '' : ' is-unavailable'}`,
+      dataset: { slot: v.slot },
+      'aria-disabled': v.canDrop ? null : 'true',
+      on: { click: () => pressDrop(v) },
+    },
+    h('span', { class: 'k-drop-num' }, String(v.number)),
+    h('span', { class: 'k-drop-text' },
+      h('span', { class: 'k-drop-action' }, armed ? 'Press again to drop' : v.canDrop ? 'Drop pill' : 'Empty'),
+      h('span', { class: 'k-drop-med' }, v.medName),
+      h('span', { class: 'k-drop-count' }, v.countText)));
+  }));
+  if (focused !== undefined) box.querySelector(`[data-slot="${focused}"]`)?.focus({ preventScroll: true });
+}
+
+function render() {
+  renderBanner();
+  byId('k-next').textContent = state.status ? `Next pill: ${nextPillText(state.status)}` : '';
+  renderDrops();
+}
+
+async function loadStatus() {
+  if (!state.pid) return;
+  try {
+    state.status = await get(`/api/patients/${state.pid}/status`);
+    state.statusAt = performance.now();
+    state.online = true;
+  } catch (err) {
+    state.online = !(err?.network || err?.timeout);
+    if (state.online && !state.status) byId('k-status-detail').textContent = errorText(err);
+  }
+  render();
+}
+
+const loadSoon = debounce(loadStatus, 300);
+
+// ------------------------------------------------------------------ drops (press twice)
+
+function disarm() {
+  clearTimeout(state.armedTimer);
+  state.armed = null;
+  renderDrops();
+}
+
+async function pressDrop(v) {
+  if (state.dropping) {
+    caption('A pill is already dropping. Please wait.', { speak: true });
+    return;
+  }
+  if (!v.canDrop) {
+    caption(v.blocked, { assertive: true });
+    return;
+  }
+  if (state.armed !== v.slot) {
+    clearTimeout(state.armedTimer);
+    state.armed = v.slot;
+    state.armedTimer = setTimeout(disarm, CONFIRM_MS);
+    renderDrops();
+    caption(`Press again to drop ${v.medName} from container ${v.number}.`);
+    return;
+  }
+  disarm();
+  state.dropping = true;
+  speaker.stop();
+  renderBanner();
+  caption('Dropping a pill. Please wait.', { speak: false });
+  try {
+    const outcome = await post(`/api/patients/${state.pid}/drops`, { slot: v.slot }, { timeoutMs: 75000 });
+    const view = outcomeView(outcome);
+    if (outcome?.drop_id) state.spokenDrops.add(outcome.drop_id);
+    caption(view.message, { assertive: !view.dropped });
+  } catch (err) {
+    const uncertain = err?.timeout || err?.network;
+    caption(uncertain
+      ? 'There was no answer from TactiDose. The pill may or may not have dropped. Ask your caregiver to check before trying again.'
+      : `The pill was not dropped: ${errorText(err)}`, { assertive: true });
+  } finally {
+    // Keep "Dropping" until the fresh status is in, then show the new state directly.
+    await loadStatus();
+    state.dropping = false;
+    render();
+  }
+}
+
+// ------------------------------------------------------------------ talk
+
+async function chat(text) {
+  if (state.chatting) return;
+  state.chatting = true;
+  byId('k-heard').textContent = `You said: ${displayTranscript(text)}`;
+  caption('Thinking…', { speak: false });
+  try {
+    const body = { text, input_mode: 'voice', speak: true };
+    if (state.conversationId) body.conversation_id = state.conversationId;
+    const reply = await post('/api/agent/chat', body, { timeoutMs: LONG_TIMEOUT_MS });
+    state.conversationId = reply?.conversation_id ?? state.conversationId;
+    for (const a of reply?.actions || []) if (a?.drop_id) state.spokenDrops.add(a.drop_id);
+    byId('k-caption').textContent = reply?.text || '';
+    announce(reply?.text || '');
+    if (reply?.text) speaker.speak(reply.text, reply.audio_url || null);
+    if ((reply?.actions || []).length) loadSoon();
+  } catch (err) {
+    caption(`The assistant could not answer: ${errorText(err)}. You can use the drop buttons.`, { assertive: true });
+  } finally {
+    state.chatting = false;
+  }
+}
+
+const talkBtn = byId('k-talk');
+const voice = new VoiceInput({
+  onState: (st, message) => {
+    const on = st === 'listening' || st === 'starting';
+    talkBtn.setAttribute('aria-pressed', on ? 'true' : 'false');
+    talkBtn.classList.toggle('is-listening', st === 'listening');
+    byId('k-talk-label').textContent = on ? 'Stop and send' : st === 'processing' ? 'Working…' : 'Talk';
+    if (message) caption(message, { speak: st === 'error' });
+  },
+  onInterim: (text) => {
+    byId('k-heard').textContent = `Hearing: ${displayTranscript(text)}`;
+  },
+  onResult: (text) => chat(text),
 });
+
+function toggleTalk() {
+  if (!voiceInputAvailable()) {
+    caption('Voice is not available on this screen. Use the drop buttons.');
+    return;
+  }
+  speaker.stop();
+  voice.toggle();
+}
+
+talkBtn.addEventListener('click', toggleTalk);
+byId('k-stop').addEventListener('click', async () => {
+  voice.cancel();
+  speaker.stop();
+  disarm();
+  try {
+    await post('/api/device/stop', {});
+    caption('Stopped.', { speak: true });
+  } catch (err) {
+    caption(`Could not stop the device: ${errorText(err)}`, { assertive: true });
+  }
+});
+
+document.addEventListener('keydown', (e) => {
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
+  const key = String(e.key).toLowerCase();
+  if (key === 'escape') {
+    voice.cancel();
+    speaker.stop();
+    disarm();
+    return;
+  }
+  if (key === 't') {
+    e.preventDefault();
+    toggleTalk();
+    return;
+  }
+  if (/^[1-9]$/.test(key)) {
+    const v = (state.status?.containers || []).map(containerView).find((c) => c.number === Number(key) && c.hasMed);
+    if (v) {
+      e.preventDefault();
+      pressDrop(v);
+    }
+  }
+});
+
+// ------------------------------------------------------------------ start
+
+async function start() {
+  let me;
+  try {
+    me = await requireSession({ roles: ['patient'] });
+  } catch (err) {
+    const box = byId('page-error');
+    box.hidden = false;
+    box.replaceChildren(errorState(err, () => window.location.reload(), icon('warning')));
+    return;
+  }
+  if (!me) return;
+  state.pid = me.patient?.patient_id ?? me.user.user_id;
+  byId('k-who').textContent = me.user.display_name;
+  watchSession(stream);
+  stream.onStatus((s) => {
+    if (s === 'reconnecting' || s === 'closed') state.online = false;
+    else if (s === 'open') state.online = true;
+    renderBanner();
+  });
+  stream.on('patient.status', loadSoon);
+  stream.on('drop.updated', loadSoon);
+  stream.on('device.state', (d) => {
+    if (state.status && d && typeof d === 'object') {
+      state.status = { ...state.status, device: d };
+      renderBanner();
+    }
+  });
+  stream.on('notification', (n, _env, meta) => {
+    if (meta?.replayed) return;
+    loadSoon();
+    const dropId = n?.data?.drop_id;
+    if (dropId !== undefined && state.spokenDrops.has(dropId)) return;
+    if (dropId !== undefined) state.spokenDrops.add(dropId);
+    if (!voice.active && !state.chatting) caption(notificationSpeech(n));
+  });
+  stream.on(RECONNECTED, loadStatus);
+  stream.start();
+  await loadStatus();
+  setInterval(renderBanner, 1000);
+  setInterval(loadStatus, 60000);
+}
+
+start();

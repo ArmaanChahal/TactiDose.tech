@@ -1,0 +1,98 @@
+/*
+ * Sign-in page: one centred column, large text (1.25rem), big buttons. Used by
+ * patients (possibly with low vision) as well as doctors and family.
+ */
+
+.login {
+  font-size: 1.25rem;
+}
+
+.login-main {
+  max-width: 38rem;
+  margin: 0 auto;
+  padding: 1.2rem 1rem 2.5rem;
+}
+
+.login-main h1 {
+  font-size: 1.7em;
+  margin-top: 0.4em;
+}
+
+.lead {
+  color: var(--fg-2);
+  font-size: 1.05em;
+}
+
+.login .card {
+  margin: 0 0 1.2rem;
+  border-width: 0.1875rem;
+}
+
+.login input[type="text"],
+.login input[type="email"],
+.login input[type="tel"],
+.login input[type="password"] {
+  min-height: 3.25rem;
+  width: 100%;
+}
+
+.login .password-row input {
+  width: auto;
+}
+
+.btn-big {
+  min-height: 3.5rem;
+  padding: 0.5em 1.2em;
+  font-size: 1.05em;
+}
+
+.login form .btn-big[type="submit"] {
+  width: 100%;
+}
+
+.mode-switch {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.6rem;
+  margin: 0 0 1rem;
+}
+
+.mode-switch .btn[aria-pressed="true"] {
+  background: var(--invert-bg);
+  border-color: var(--invert-bg);
+  color: var(--invert-fg);
+  box-shadow: none;
+}
+
+.demo-accounts {
+  margin-top: 1.2rem;
+  padding-top: 0.8rem;
+  border-top: var(--border-width) solid var(--border-subtle);
+}
+
+.demo-accounts h3 {
+  margin-bottom: 0.2em;
+}
+
+.share-codes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem 2rem;
+  margin: 0.5rem 0 1rem;
+}
+
+.share-code dt {
+  font-weight: 750;
+  color: var(--fg-2);
+  margin-bottom: 0.2em;
+}
+
+.share-code dd {
+  margin: 0;
+}
+
+@media (max-width: 30rem) {
+  .mode-switch {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

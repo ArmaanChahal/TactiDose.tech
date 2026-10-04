@@ -1,6 +1,10 @@
 /*
- * ArduinoHal.h -- tactidose::Hal for a real ESP32: AccelStepper (STEP/DIR driver or ULN2003 +
- * 28BYJ-48) and ESP32Servo. Pins and polarities come from config.h.
+ * ArduinoHal.h -- tactidose::Hal for a real ESP32. Pins, polarities and the mechanism come from
+ * config.h:
+ *   - MECHANISM_CAROUSEL: AccelStepper (STEP/DIR driver or ULN2003 + 28BYJ-48) + one release servo;
+ *   - MECHANISM_PER_CONTAINER_SERVO: one ESP32Servo per container, no stepper (stepper calls are no-ops).
+ * The optional drop sensor (IR break-beam) is latched by a pin interrupt so a pill that interrupts
+ * the beam for only a few ms between two loop() passes is never missed.
  *
  * REFERENCE FIRMWARE for a hackathon prototype -- adapt config.h to your wiring.
  * NOT a medical device: candy/tokens only.
@@ -14,9 +18,13 @@
 
 #if defined(ARDUINO)
 
-#include <AccelStepper.h>
 #include <Arduino.h>
 #include <ESP32Servo.h>
+
+#include "config.h"
+#if MECHANISM == MECHANISM_CAROUSEL
+#include <AccelStepper.h>
+#endif
 
 #include "Hal.h"
 #include "TactiDoseCore.h"
@@ -25,7 +33,7 @@ class ArduinoHal : public tactidose::Hal {
  public:
   ArduinoHal();
 
-  /* Call first in setup(): drivers released, gate servo commanded CLOSED, inputs, serial. */
+  /* Call first in setup(): drivers released, release servo(s) commanded CLOSED, inputs, serial. */
   void begin();
   /* Optional status LED (PIN_STATUS_LED): call from loop(). */
   void showState(tactidose::DeviceState state);
@@ -40,15 +48,20 @@ class ArduinoHal : public tactidose::Hal {
   long stepperCurrentPosition() override;
   void stepperSetCurrentPosition(long position) override;
   void stepperEnable(bool on) override;
-  void servoWrite(uint8_t degrees) override;
+  void servoWrite(uint8_t gate, uint8_t degrees) override;
   bool homeSensorActive() override;
   bool buttonPressed(tactidose::Button button) override;
+  bool dropSensorActive() override;
   int serialRead() override;
   void serialWriteLine(const char* line) override;
 
  private:
+#if MECHANISM == MECHANISM_CAROUSEL
   AccelStepper stepper_;
   Servo servo_;
+#else
+  Servo servos_[NUM_SLOTS];
+#endif
   bool ledOn_;
 };
 

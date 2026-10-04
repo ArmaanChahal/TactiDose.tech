@@ -4,18 +4,25 @@
  * REFERENCE FIRMWARE for a hackathon prototype: the hardware teammate adapts config.h and
  * ArduinoHal; this core should not need changes. NOT a medical device: candy/tokens only.
  *
- * Implements docs/SERIAL_PROTOCOL.md (v1) exactly: line parsing identical to
+ * Implements docs/SERIAL_PROTOCOL.md v1.1 exactly: line parsing identical to
  * tactidose/hardware/protocol.py parse_command, the states of §3, the replies of §5/§6, the
- * acceptance table of §7 and the device rules of §8. The same source is compiled for the ESP32
- * (Arduino) and natively for the conformance harness (firmware/native), which runs every
- * scenario of tactidose/hardware/conformance.json against it.
+ * acceptance table of §7, the device rules of §8 and DROP_SLOT (§12). The same source is compiled
+ * for the ESP32 (Arduino) and natively for the conformance harness (firmware/native), which runs
+ * every scenario of tactidose/hardware/conformance.json against it.
+ *
+ * Two mechanisms (protocol §12.6), selected by CoreConfig::mechanism:
+ *   - kCarousel: a stepper turns container n over one chute; one gate/trapdoor servo releases.
+ *   - kPerContainerServo: fixed containers with one release servo each and no stepper. HOME and
+ *     moves complete at once with the same message sequence; the "gate" is the servo of the
+ *     current container.
  *
  * Written in a conservative C++11 subset (no STL, no heap, no exceptions) so that it builds
  * with any Arduino-ESP32 core (2.x uses gnu++11, 3.x gnu++2b) and natively with -std=c++17.
  *
  * Design: loop() never blocks. Gate travel is modelled as an "atomic" phase (rule 8.2): while
  * the servo moves, serial input and button presses are held and processed afterwards (buttons
- * keep being debounced, so a short press during travel is not lost).
+ * keep being debounced, so a short press during travel is not lost). A DROP_SLOT release (open,
+ * hold, close, verdict) is atomic in the same way (§12.3).
  */
 #ifndef TACTIDOSE_CORE_H
 #define TACTIDOSE_CORE_H
@@ -33,7 +40,8 @@
 
 namespace tactidose {
 
-static const size_t kMaxLineLength = 64; /* SERIAL_PROTOCOL.md §1, excluding the terminator */
+static const char* const kProtocolVersion = "1.1"; /* STATUS proto=<...> (protocol §12.4) */
+static const size_t kMaxLineLength = 64;           /* SERIAL_PROTOCOL.md §1, excluding the terminator */
 static const uint8_t kMinSlots = 2;
 static const uint8_t kMaxSlots = 12;
 static const size_t kMaxSlotDigits = 3;
@@ -59,6 +67,7 @@ enum class Command : uint8_t {
   kOpenGate,
   kCloseGate,
   kStop,
+  kDropSlot, /* v1.1 */
 };
 
 enum class ErrorCode : uint8_t {
@@ -71,11 +80,17 @@ enum class ErrorCode : uint8_t {
   kInvalidState,
   kUnknownCommand,
   kStopped,
+  kNoPill, /* v1.1: the drop sensor saw no pill during the release */
+};
+
+enum class Mechanism : uint8_t {
+  kCarousel = 1,          /* MECHANISM_CAROUSEL in config.h */
+  kPerContainerServo = 2, /* MECHANISM_PER_CONTAINER_SERVO */
 };
 
 /* Result of parsing one host line (mirrors protocol.ParsedCommand). Exactly one of:
  *   empty                      -> blank line, ignore silently;
- *   error == kNone             -> valid command (slot >= 0 for MOVE_SLOT / DISPENSE_SLOT);
+ *   error == kNone             -> valid command (slot >= 0 for MOVE_SLOT / DISPENSE_SLOT / DROP_SLOT);
  *   error != kNone             -> reply "ERR <error>".
  * `command` is set whenever the command word was recognised, even with a bad argument. */
 struct ParsedLine {
@@ -96,16 +111,17 @@ const char* commandName(Command command);
 const char* errorName(ErrorCode code);
 
 /* Every tunable of the core. ConfigCheck.h fills it from config.h on the ESP32; the native
- * harness fills it from the conformance.json "harness" physics. Defaults = reference hardware
- * (NEMA17 200 steps x 16 microsteps, direct drive) and the Python simulator defaults. */
+ * harness fills it from the conformance.json "harness" physics. Defaults = the v2 reference
+ * hardware (3 containers on a NEMA17 carousel, 200 steps x 16 microsteps, direct drive). */
 struct CoreConfig {
-  const char* fwVersion = "1.0.0-ref"; /* no spaces: EVENT BOOT <fw>, STATUS fw=<fw> */
-  uint8_t numSlots = 6;
+  const char* fwVersion = "1.1.0-ref"; /* no spaces: EVENT BOOT <fw>, STATUS fw=<fw> */
+  Mechanism mechanism = Mechanism::kCarousel;
+  uint8_t numSlots = 3;
   float stepsPerRev = 3200.0f; /* (micro)steps per carousel revolution, may be fractional */
   float maxSpeed = 1600.0f;    /* steps/s */
   float acceleration = 3200.0f; /* steps/s^2 */
 
-  bool hasHomeSensor = true;    /* false: MVP dead-reckoning fallback (protocol §6) */
+  bool hasHomeSensor = true;    /* false: MVP dead-reckoning fallback (protocol §6); carousel only */
   bool autoHomeOnBoot = true;   /* false: stay in BOOT until the host sends HOME */
   int8_t homingDir = 1;         /* +1 / -1: step direction used to seek the sensor */
   float homingSpeed = 400.0f;   /* steps/s, first (fast) approach */
@@ -118,11 +134,13 @@ struct CoreConfig {
   uint16_t homeDebounceMs = 10;
   bool verifySlotWithHomeSensor = false; /* on arrival the sensor must be active iff slot == 0 */
 
-  uint16_t settleMs = 300;      /* rule 8.4 */
+  uint16_t settleMs = 300;      /* rule 8.4 (DISPENSE_SLOT and DROP_SLOT) */
   uint16_t gateTravelMs = 400;  /* rule 8.2, <= 600 */
   uint8_t servoClosedDeg = 20;
   uint8_t servoOpenDeg = 90;
   uint32_t gateMaxOpenMs = 120000; /* rule 8.7 */
+  uint16_t dropOpenMs = 500;       /* DROP_SLOT: hold the release open this long (§12.1) */
+  bool hasDropSensor = false;      /* IR break-beam in the chute -> ERR NO_PILL when nothing fell */
   uint16_t debounceMs = 30;        /* rule 8.8, buttons */
 
   float motionTimeoutFactor = 2.0f;    /* rule 8.6: limit = factor * expected + margin */
@@ -145,6 +163,7 @@ class TactiDoseCore {
   int slot() const { return slot_; }
   bool gateOpen() const { return gateOpen_; }
   bool gateMoving() const { return gateMoving_; }
+  bool releasing() const { return releasing_; }
   const CoreConfig& config() const { return cfg_; }
 
   /* Absolute step target of a slot: round(slot * stepsPerRev / numSlots) (protocol §2). */
@@ -155,9 +174,17 @@ class TactiDoseCore {
   uint32_t motionLimitMs(long distance, float maxSpeed) const;
 
  private:
-  enum class Motion : uint8_t { kNone, kMove, kDispense, kHoming };
+  enum class Motion : uint8_t { kNone, kMove, kDispense, kDrop, kHoming };
   enum class HomePhase : uint8_t { kIdle, kRelease, kSeek, kBackoff, kReapproach, kOffset, kDeadReckon };
-  enum class GateDone : uint8_t { kNone, kBootClosed, kOpened, kClosedToReady, kClosedForStop };
+  enum class GateDone : uint8_t {
+    kNone,
+    kBootClosed,
+    kOpened,
+    kClosedToReady,
+    kClosedForStop,
+    kReleaseOpened, /* DROP_SLOT: fully open, now hold */
+    kReleaseClosed, /* DROP_SLOT: closed again, now the verdict */
+  };
 
   struct Debouncer {
     bool stable;
@@ -182,11 +209,20 @@ class TactiDoseCore {
   void startHomePhase(HomePhase phase, int dir, float speed, long minTravel, long maxTravel, uint32_t now);
   void homeEdgeFound(uint32_t now);
   void finishHoming();
-  void startMove(int slot, bool dispense, uint32_t now);
+  void startMove(int slot, Motion kind, uint32_t now);
   void beginTimedMove(long target, float speed, uint32_t now);
   void arrive(uint32_t now);
   void startGateTravel(bool open, GateDone done, uint32_t now);
   void finishGateTravel(uint32_t now);
+  void startRelease(uint32_t now);
+  void finishRelease(uint32_t now);
+  void sampleDropSensor(uint32_t now);
+
+  bool carousel() const { return cfg_.mechanism != Mechanism::kPerContainerServo; }
+  uint8_t gateCount() const { return carousel() ? 1 : cfg_.numSlots; }
+  /* Release actuator of the container at the opening (per-container: that container's servo). */
+  uint8_t currentGate() const;
+  void closeAllGates();
 
   void interruptMotion();
   void enterReady();
@@ -215,6 +251,13 @@ class TactiDoseCore {
   uint32_t gateStartMs_;
   uint32_t gateOpenedMs_;
   uint32_t settleStartMs_;
+  Motion settleAction_; /* what follows the settle in AT_TARGET: kDispense (open) or kDrop (release) */
+
+  bool releasing_;      /* DROP_SLOT release in progress: serial input and buttons wait (§12.3) */
+  bool dropBeamClear_;  /* drop sensor seen clear during this release */
+  bool dropSeen_;       /* clear -> interrupted seen during this release = a pill passed */
+  uint32_t releaseStartMs_;
+  uint32_t dropSeenMs_; /* first clear -> interrupted transition (calibration debug line) */
 
   Motion motion_;
   uint32_t motionStartMs_;

@@ -1,12 +1,11 @@
 /**
- * Medication form binding, used for manual entry, editing, and reviewing a
- * label scan. The form must contain fields named: name, strength,
- * instructions_text, warnings (one per line), confirmed_by, and the checkbox
- * `confirmed` ("I confirm this information is correct").
+ * Medication form binding (care portal): manual entry, editing, and reviewing an
+ * UNCONFIRMED label scan. The form contains fields named name, strength,
+ * instructions_text, warnings (one per line) and the checkbox `confirmed`
+ * ("I confirm this information is correct").
  *
- * Nothing is submitted unless the person ticked the confirmation box: the body
- * always carries `confirmed: true` only because a human confirmed it
- * (handoff §18 activation rule).
+ * Nothing is submitted unless a person ticked the confirmation box: the body carries
+ * `confirmed: true` only because a human confirmed it (docs/API.md: 422 otherwise).
  */
 
 import { errorText } from './dom.js';
@@ -21,7 +20,7 @@ export function linesOf(text) {
 
 /**
  * Validate the current values. Returns {ok, body, error, field}. `body` matches
- * POST /api/medications and POST /api/onboarding/scans/{id}/confirm.
+ * POST/PATCH /api/patients/{pid}/medications and POST …/scans/{scan_id}/confirm.
  */
 export function readMedicationForm(form, { keepEmpty = false } = {}) {
   const value = (name) => (form.elements.namedItem(name)?.value ?? '').trim();
@@ -39,8 +38,6 @@ export function readMedicationForm(form, { keepEmpty = false } = {}) {
   }
   body.warnings = linesOf(form.elements.namedItem('warnings')?.value);
   body.confirmed = true;
-  const by = value('confirmed_by');
-  if (by) body.confirmed_by = by;
   return { ok: true, body };
 }
 
@@ -54,13 +51,12 @@ export function fillMedicationForm(form, values = {}) {
   set('strength', values.strength);
   set('instructions_text', values.instructions_text);
   set('warnings', Array.isArray(values.warnings) ? values.warnings.join('\n') : values.warnings || '');
-  if (values.confirmed_by !== undefined) set('confirmed_by', values.confirmed_by);
   const box = form.elements.namedItem('confirmed');
   if (box) box.checked = false;
 }
 
 /**
- * Wire submit handling: validation messages in `errorEl` (role=alert), the submit
+ * Wire submit handling: validation messages in `errorEl` (role=alert); the submit
  * button is disabled while `onSubmit(body)` runs; errors from the server are shown.
  */
 export function bindMedicationForm(form, { errorEl, onSubmit, keepEmpty = () => false }) {

@@ -1,25 +1,29 @@
 /**
- * Demo operator panel controller (demo.html): simulated voice, live transcript,
- * simulator faults/buttons with an animated carousel, raw hardware console,
- * demo clock travel, demo data helpers, scripted handoff §25 flows and a raw
- * state viewer. Every action goes through the documented HTTP API.
+ * Demo operator panel controller (demo.html, demo mode only). Requires a signed-in user
+ * (demo endpoints refuse anonymous calls); quick buttons switch between the seeded demo
+ * accounts. Panels: scripted checklists A–D, the simulated device (containers with pill
+ * counts, faults, buttons, restart, physical pills), the demo clock, a raw protocol
+ * console with the serial log, a live event feed and the demo-data reset.
  */
 
-import { get, post, postText } from './api.js';
+import { ApiError, get, post } from './api.js';
 import { EventStream, RECONNECTED, parseTimestamp } from './events.js';
-import { $$, byId, confirmDialog, createNotifier, debounce, errorState, errorText, h, initLiveRegions, prettyJson, replaceChildren } from './dom.js';
+import { $$, byId, confirmDialog, createNotifier, debounce, errorState, errorText, h, initLiveRegions, replaceChildren } from './dom.js';
 import { hydrateIcons, icon } from './icons.js';
-import { initThemeToggle } from './theme.js';
+import { initThemeCycleButton } from './theme.js';
 import { bindConnIndicator } from './conn.js';
-import { CarouselView } from './carousel.js';
+import { CarouselView, pillsFromPhysical } from './carousel.js';
 import { createLineLog } from './linelog.js';
 import { commandResultBox } from './hwview.js';
+import { requireSession, roleName, watchSession } from './session.js';
+import { DEMO_ACCOUNTS } from './authforms.js';
 import {
   addMinutesToLocal,
+  advanceLocalIso,
   clock12,
   dateKey,
   deviceOffsetFrom,
-  formatClock,
+  deviceWall,
   formatLongDate,
   formatOffset,
   normalizeTime,
@@ -27,170 +31,156 @@ import {
   time24To12,
 } from './format.js';
 import { createFlows } from './demo/flows.js';
+import { faultLabel, healthValue } from './demo/labels.js';
 
-/** Simulator fault names (docs/API.md, /api/demo/simulator). */
-export const FAULTS = Object.freeze([
-  ['home_sensor_dead', 'Home sensor dead', 'homing never finds home → HOME_TIMEOUT, FAULT'],
-  ['motor_jam', 'Motor jam', 'moves never finish → MOTOR_FAULT'],
-  ['unresponsive', 'Unresponsive', 'the device stops answering → timeouts'],
-  ['brownout_on_gate', 'Brown-out on gate open', 'the device resets when the gate opens'],
-  ['disconnect', 'Disconnect', 'the USB link drops'],
-]);
-
-const STATE_SOURCES = Object.freeze([
-  ['/api/state', 'Kiosk state — GET /api/state'],
-  ['/api/health', 'Health — GET /api/health'],
-  ['/api/hardware', 'Device snapshot — GET /api/hardware'],
-  ['/api/demo/simulator', 'Simulator — GET /api/demo/simulator'],
-  ['/api/demo/clock', 'Demo clock — GET /api/demo/clock'],
-]);
-
-const NOTICE_ICONS = { success: 'check-circle', error: 'warning', warning: 'warning', info: 'info' };
-const MAX_TRANSCRIPT = 250;
+const MAX_EVENTS = 80;
+const FEED_TOPICS = Object.freeze(['notification', 'drop.updated', 'patient.status', 'agent.message', 'report.updated', 'device.event', 'system.notice', 'clock.changed']);
 
 initLiveRegions();
 hydrateIcons();
-initThemeToggle(byId('theme-toggle'));
-const notify = createNotifier(byId('notices'), { iconFor: (kind) => icon(NOTICE_ICONS[kind] || 'info') });
+initThemeCycleButton(byId('theme-btn'));
+const notify = createNotifier(byId('notices'), { iconFor: (kind) => icon({ success: 'check-circle', error: 'warning', warning: 'warning' }[kind] || 'info') });
 const stream = new EventStream();
 bindConnIndicator(byId('conn'), stream);
 
-let offsetMin = null;
+let me = null;
+const recentEvents = [];
 
-// ------------------------------------------------------------------ simulated voice
+// ------------------------------------------------------------------ session & account switch
 
-const voiceText = byId('voice-text');
-const voiceReply = byId('voice-reply');
-const pendingPhrases = new Set();
-
-function renderReply(reply) {
-  voiceReply.dataset.kind = reply?.kind || 'info';
-  replaceChildren(voiceReply,
-    h('div', { class: 'reply-text' }, reply?.text || '(no reply text)'),
-    h('div', { class: 'muted' }, [reply?.intent, reply?.kind, reply?.spoken === false ? 'not spoken' : null].filter(Boolean).join(' · ')),
-    h('details', {}, h('summary', {}, 'Outcome JSON'), h('pre', { class: 'json' }, prettyJson(reply?.outcome ?? {}))));
+function renderSession() {
+  const who = me?.user ? `${me.user.display_name} (${roleName(me.user.role)})` : 'Nobody';
+  byId('session-who').textContent = `Signed in as ${who}.`;
+  replaceChildren(byId('switch-buttons'), DEMO_ACCOUNTS.map((a) => h('button', {
+    type: 'button',
+    class: `btn btn-small${me?.user?.email === a.email ? ' is-current' : ''}`,
+    'aria-pressed': me?.user?.email === a.email ? 'true' : 'false',
+    on: { click: () => switchTo(a) },
+  }, icon('user'), `Use ${a.label}`)));
 }
 
-async function say(text, button = null) {
-  if (pendingPhrases.has(text)) return;
-  pendingPhrases.add(text);
-  button?.setAttribute('aria-disabled', 'true');
-  voiceReply.dataset.kind = 'info';
-  replaceChildren(voiceReply, h('div', { class: 'muted' }, `Sending “${text}”…`));
+async function switchTo(account) {
+  const password = byId('switch-password').value;
+  byId('switch-status').textContent = `Signing in as ${account.label}…`;
   try {
-    renderReply(await postText(text, 'keyboard'));
+    await post('/api/auth/logout', {}, { redirectOn401: false }).catch(() => null);
+    await post('/api/auth/login', { email: account.email, password }, { redirectOn401: false });
+    window.location.reload();
   } catch (err) {
-    voiceReply.dataset.kind = 'error';
-    replaceChildren(voiceReply, errorState(err, null, icon('warning')));
-  } finally {
-    pendingPhrases.delete(text);
-    button?.removeAttribute('aria-disabled');
+    byId('switch-status').textContent = err instanceof ApiError && err.status === 401
+      ? 'That password was not accepted for the demo account. Check the demo password, or sign in on the sign-in page.'
+      : errorText(err);
   }
 }
 
-byId('voice-form').addEventListener('submit', (e) => {
-  e.preventDefault();
-  const text = voiceText.value.trim();
-  if (!text) {
-    voiceText.focus();
-    return;
+async function loadHealth() {
+  try {
+    const health = await get('/api/health', { redirectOn401: false });
+    const parts = [];
+    for (const [key, label] of [['hardware', 'Hardware'], ['agent', 'Agent'], ['tts', 'Voice'], ['smtp', 'Email']]) {
+      if (health && health[key] !== undefined) parts.push(`${label}: ${healthValue(health[key])}`);
+    }
+    byId('session-mode').textContent = parts.join(' · ');
+  } catch {
+    byId('session-mode').textContent = 'Server status unavailable.';
   }
-  say(text);
-  voiceText.select();
-});
-
-for (const btn of $$('[data-phrase]')) {
-  btn.addEventListener('click', () => say(btn.dataset.phrase, btn));
 }
 
-// ------------------------------------------------------------------ transcript
+// ------------------------------------------------------------------ live event feed
 
-const transcript = byId('transcript');
+function summarize(topic, d) {
+  switch (topic) {
+    case 'notification': return `${d.kind || ''}: ${d.title || ''}${d.body ? ` — ${d.body}` : ''}`;
+    case 'drop.updated': return `drop ${d.drop_id ?? '?'} ${d.status || ''}${d.reason ? ` (${d.reason})` : ''} · ${d.source || ''} · container ${d.container_number ?? '?'}`;
+    case 'patient.status': return `patient ${d.patient_id ?? '?'} changed${d.reason ? `: ${d.reason}` : ''}`;
+    case 'agent.message': return `conversation ${d.conversation_id ?? '?'} · ${d.role || ''} message ${d.message_id ?? ''}`;
+    case 'report.updated': return `report ${d.report_id ?? '?'} ${d.status || ''}`;
+    case 'device.event': return `${d.code || ''} ${d.line ? `(${d.line})` : ''}`;
+    case 'system.notice': return `${d.level || 'info'}: ${d.message || ''}`;
+    case 'clock.changed': return `clock ${d.now_local || ''}`;
+    default: return JSON.stringify(d);
+  }
+}
 
-function timeOf(envelope) {
-  const ms = parseTimestamp(envelope?.ts);
+function addEvent(topic, data, env) {
+  recentEvents.push({ topic, data, at: Date.now() });
+  if (recentEvents.length > 200) recentEvents.shift();
+  const list = byId('events');
+  const ms = parseTimestamp(env?.ts);
   const d = Number.isFinite(ms) ? new Date(ms) : new Date();
-  return [d.getHours(), d.getMinutes(), d.getSeconds()].map((n) => String(n).padStart(2, '0')).join(':');
+  const time = [d.getHours(), d.getMinutes(), d.getSeconds()].map((n) => String(n).padStart(2, '0')).join(':');
+  list.append(h('li', {}, h('span', { class: 't' }, time), h('span', { class: 'topic' }, topic), h('span', {}, summarize(topic, data || {}))));
+  while (list.children.length > MAX_EVENTS) list.firstElementChild.remove();
+  list.scrollTop = list.scrollHeight;
 }
 
-function addTranscript(kind, who, text, envelope, extraClass = null) {
-  const stick = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 48;
-  transcript.append(h('li', { class: extraClass },
-    h('span', { class: 't' }, timeOf(envelope)),
-    h('span', { class: `who who-${kind}` }, who),
-    h('span', {}, text)));
-  while (transcript.children.length > MAX_TRANSCRIPT) transcript.firstElementChild.remove();
-  if (stick) transcript.scrollTop = transcript.scrollHeight;
-}
-
-byId('transcript-clear').addEventListener('click', () => transcript.replaceChildren());
-
-stream.on('assistant.spoken', (d, env) => {
-  const meta = [d.kind, d.audio].filter(Boolean).join(', ');
-  addTranscript('said', 'TactiDose said', `${d.text || ''}${meta ? ` (${meta})` : ''}`, env);
-});
-stream.on('voice.heard', (d, env) => {
-  const confidence = Number.isFinite(Number(d.confidence)) ? ` ${Math.round(Number(d.confidence) * 100)}%` : '';
-  const verdict = d.accepted ? 'accepted' : 'ignored';
-  addTranscript('heard', 'Heard', `“${d.text || ''}”${confidence} → ${d.intent || 'no intent'} (${verdict})`, env, d.accepted ? null : 'is-ignored');
-});
-stream.on('assistant.intent', (d, env) => {
-  addTranscript('intent', 'Intent', `${d.intent || '?'} from ${d.source || '?'}${d.text ? ` (“${d.text}”)` : ''}`, env);
-});
+for (const topic of FEED_TOPICS) stream.on(topic, (d, env) => addEvent(topic, d, env));
+byId('events-clear').addEventListener('click', () => byId('events').replaceChildren());
 
 // ------------------------------------------------------------------ simulator
 
-const carousel = new CarouselView(byId('sim-carousel'), { numSlots: 6, label: 'Simulated carousel' });
+const carousel = new CarouselView(byId('sim-carousel'), { numSlots: 3, label: 'Simulated pill device' });
 const simCaption = byId('sim-caption');
-const simPhysical = byId('sim-physical');
 const simStatus = byId('sim-status');
-const simUnavailable = byId('sim-unavailable');
 const simButtons = [byId('sim-press-confirm'), byId('sim-press-cancel'), byId('sim-reboot')];
 const faultInputs = new Map();
 let simAvailable = false;
+let numSlots = 3;
 
-for (const [name, label, desc] of FAULTS) {
-  const id = `fault-${name}`;
-  const input = h('input', { type: 'checkbox', id, disabled: true });
-  input.addEventListener('change', () => setFault(name, label, input));
-  faultInputs.set(name, input);
-  byId('sim-faults').append(h('div', { class: 'check-row' }, input,
-    h('label', { for: id }, label, h('span', { class: 'fault-desc' }, ` — ${desc}`))));
+function renderFaults(faults) {
+  const box = byId('sim-faults');
+  for (const name of Object.keys(faults || {})) {
+    if (faultInputs.has(name)) continue;
+    const id = `fault-${name}`;
+    const [label, desc] = faultLabel(name);
+    const input = h('input', { type: 'checkbox', id });
+    input.addEventListener('change', () => setFault(name, label, input));
+    faultInputs.set(name, input);
+    box.append(h('div', { class: 'check-row' }, input,
+      h('label', { for: id }, label, desc ? h('span', { class: 'fault-desc' }, ` — ${desc}`) : null)));
+  }
+  for (const [name, input] of faultInputs) {
+    input.checked = Boolean(faults?.[name]);
+    input.disabled = !simAvailable;
+  }
+}
+
+function renderPillSlots(n) {
+  const select = byId('pills-slot');
+  if (select.options.length === n) return;
+  const keep = select.value;
+  select.replaceChildren(...Array.from({ length: n }, (_, i) => h('option', { value: String(i) }, `Container ${i + 1}`)));
+  if (keep && Number(keep) < n) select.value = keep;
 }
 
 function renderPhysical(p) {
   if (!p) return;
-  if (Number(p.num_slots)) carousel.setNumSlots(Number(p.num_slots));
+  if (Number(p.num_slots)) {
+    numSlots = Number(p.num_slots);
+    carousel.setNumSlots(numSlots);
+  }
+  renderPillSlots(numSlots);
   const gate = p.gate_open === true ? 'OPEN' : p.gate_open === false ? 'CLOSED' : 'UNKNOWN';
   carousel.update({
     angleDeg: p.angle_deg,
     slot: p.slot ?? null,
     gate,
     targetSlot: p.target_slot ?? null,
-    moving: ['MOVING', 'HOMING', 'AT_TARGET'].includes(p.state),
+    moving: Boolean(p.moving) || ['MOVING', 'HOMING', 'AT_TARGET'].includes(p.state),
+    pills: pillsFromPhysical(p, numSlots),
   });
   simCaption.textContent = `${carousel.describe()}${p.state ? ` Firmware state: ${p.state}.` : ''}`;
-  const rows = [
-    ['Angle', Number.isFinite(Number(p.angle_deg)) ? `${Number(p.angle_deg).toFixed(1)}°` : '–'],
-    ['At the gate', p.slot === null || p.slot === undefined ? 'between compartments' : `compartment ${Number(p.slot) + 1} (slot ${p.slot})`],
-    ['Gate', gate.toLowerCase()],
-    ['State', p.state || '–'],
-  ];
-  for (const [key, value] of Object.entries(p)) {
-    if (['angle_deg', 'slot', 'gate_open', 'state'].includes(key)) continue;
-    rows.push([key, typeof value === 'object' ? JSON.stringify(value) : String(value)]);
-  }
-  replaceChildren(simPhysical, rows.flatMap(([k, v]) => [h('dt', {}, k), h('dd', {}, v)]));
+  if (p.faults) renderFaults(p.faults);
+  const rows = Object.entries(p).filter(([k]) => k !== 'faults')
+    .map(([k, v]) => [k, typeof v === 'object' && v !== null ? JSON.stringify(v) : String(v)]);
+  replaceChildren(byId('sim-physical'), rows.flatMap(([k, v]) => [h('dt', {}, k), h('dd', {}, v)]));
 }
 
 function renderSim(sim) {
   simAvailable = Boolean(sim?.available);
-  simUnavailable.hidden = simAvailable;
-  for (const [name, input] of faultInputs) {
-    input.checked = Boolean(sim?.faults?.[name]);
-    input.disabled = !simAvailable;
-  }
+  byId('sim-unavailable').hidden = simAvailable;
   for (const btn of simButtons) btn.disabled = !simAvailable;
+  renderFaults(sim?.faults || {});
   if (sim?.physical) renderPhysical(sim.physical);
 }
 
@@ -227,13 +217,23 @@ async function setFault(name, label, input) {
   }
 }
 
-byId('sim-press-confirm').addEventListener('click', () => simAction({ press: 'CONFIRM' }, 'CONFIRM button pressed.'));
-byId('sim-press-cancel').addEventListener('click', () => simAction({ press: 'CANCEL' }, 'CANCEL button pressed.'));
-byId('sim-reboot').addEventListener('click', () => simAction({ reboot: true }, 'Device rebooting…'));
+byId('sim-press-confirm').addEventListener('click', () => simAction({ press: 'CONFIRM' }, 'The Confirm button was pressed.'));
+byId('sim-press-cancel').addEventListener('click', () => simAction({ press: 'CANCEL' }, 'The Cancel button was pressed.'));
+byId('sim-reboot').addEventListener('click', () => simAction({ reboot: true }, 'The device is restarting…'));
+byId('pills-form').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const slot = Number(byId('pills-slot').value);
+  const count = Number(byId('pills-count').value);
+  if (!Number.isInteger(count) || count < 0) {
+    simStatus.textContent = 'Enter a whole number of pills.';
+    return;
+  }
+  simAction({ pills: { slot, count } }, `Container ${slot + 1} now physically holds ${count} pills.`);
+});
 
 stream.on('sim.physical', (p) => renderPhysical(p));
 
-// ------------------------------------------------------------------ hardware console
+// ------------------------------------------------------------------ device console
 
 const hwResult = byId('hw-result');
 const hwLine = byId('hw-line');
@@ -248,7 +248,7 @@ async function sendLine(line) {
   }
   replaceChildren(hwResult, h('p', { class: 'muted' }, `Sending ${text}…`));
   try {
-    replaceChildren(hwResult, commandResultBox(text, await post('/api/hardware/command', { line: text })));
+    replaceChildren(hwResult, commandResultBox(text, await post('/api/demo/command', { line: text }, { timeoutMs: 60000 })));
   } catch (err) {
     replaceChildren(hwResult, errorState(err, null, icon('warning')));
   }
@@ -261,7 +261,15 @@ byId('hw-form').addEventListener('submit', (e) => {
 for (const btn of $$('[data-line]')) btn.addEventListener('click', () => sendLine(btn.dataset.line));
 byId('hw-stop').addEventListener('click', async () => {
   try {
-    replaceChildren(hwResult, commandResultBox('STOP', await post('/api/hardware/stop', {})));
+    replaceChildren(hwResult, commandResultBox('Stop', await post('/api/device/stop', {})));
+  } catch (err) {
+    replaceChildren(hwResult, errorState(err, null, icon('warning')));
+  }
+});
+byId('hw-reconnect').addEventListener('click', async () => {
+  try {
+    const resp = await post('/api/device/reconnect', {});
+    replaceChildren(hwResult, h('div', { class: `result-box ${resp?.ok ? 'is-ok' : 'is-fail'}` }, resp?.ok ? 'Reconnecting to the device.' : 'Reconnect was refused (a command is running, or there is no device).'));
   } catch (err) {
     replaceChildren(hwResult, errorState(err, null, icon('warning')));
   }
@@ -277,15 +285,6 @@ hwPause.addEventListener('click', () => {
 
 stream.on('device.line', (_d, env) => hwLog.add(env));
 
-async function prefillLog() {
-  try {
-    const events = await get('/api/log?limit=100&topics=device.line');
-    for (const ev of Array.isArray(events) ? events : []) hwLog.add(ev);
-  } catch {
-    /* the live stream still fills the log */
-  }
-}
-
 // ------------------------------------------------------------------ demo clock
 
 const clockTime = byId('clock-time');
@@ -294,23 +293,23 @@ const clockStatus = byId('clock-status');
 let clockState = null;
 let clockFetchedAt = 0;
 
-function elapsedMinutes() {
-  return (performance.now() - clockFetchedAt) / 60000;
+function elapsedS() {
+  return (performance.now() - clockFetchedAt) / 1000;
+}
+
+function nowLocal() {
+  return clockState?.now_local ? advanceLocalIso(clockState.now_local, elapsedS()) : null;
 }
 
 function tickClock() {
-  if (!clockState) return;
-  const p = parseIso(clockState.now_local);
-  if (!p) return;
-  const now = new Date(p.wallMs + elapsedMinutes() * 60000);
-  clockTime.textContent = clock12(now.getUTCHours(), now.getUTCMinutes(), now.getUTCSeconds());
+  const p = parseIso(nowLocal());
+  if (p) clockTime.textContent = clock12(p.hour, p.minute, p.second);
 }
 
 function renderClock(clock) {
   if (!clock?.now_local) return;
   clockState = clock;
   clockFetchedAt = performance.now();
-  offsetMin = deviceOffsetFrom(clock.now_local);
   const travel = clock.travelling ? `time travel ${formatOffset(clock.offset_s)}` : 'real time';
   clockMeta.textContent = `${formatLongDate(dateKey(clock.now_local))} · ${clock.tz || 'device time zone'} · ${travel}`;
   tickClock();
@@ -329,18 +328,55 @@ const loadClockSoon = debounce(loadClock, 250);
 async function travel(body, doneText) {
   clockStatus.textContent = 'Changing the demo clock…';
   try {
-    renderClock(await post('/api/demo/clock', body));
+    const clock = await post('/api/demo/clock', body);
+    renderClock(clock);
     clockStatus.textContent = doneText;
+    return clock;
   } catch (err) {
     clockStatus.textContent = errorText(err);
     notify(errorText(err), 'error');
+    throw err;
   }
+}
+
+/**
+ * Move the clock to a device-local wall time "YYYY-MM-DDTHH:MM" (`{local_datetime}`),
+ * falling back to `{offset_minutes}` if the server does not take local_datetime.
+ */
+async function travelTo(localMinute, minutesAhead, doneText) {
+  const wanted = parseIso(localMinute);
+  try {
+    const clock = await travel({ local_datetime: localMinute }, doneText);
+    const got = parseIso(clock?.now_local);
+    if (got && wanted && Math.abs(got.wallMs - wanted.wallMs) < 3 * 60000) return clock;
+  } catch (err) {
+    if (!(err instanceof ApiError) || ![400, 422].includes(err.status)) throw err;
+  }
+  const base = Math.round((Number(clockState?.offset_s) || 0) / 60);
+  return travel({ offset_minutes: base + Math.ceil(minutesAhead) }, doneText);
 }
 
 function plusMinutes(minutes) {
   if (!clockState) return;
-  const target = addMinutesToLocal(clockState.now_local, minutes + elapsedMinutes());
-  travel({ local_datetime: target }, `Moved forward ${minutes} minutes.`);
+  const target = addMinutesToLocal(clockState.now_local, minutes + elapsedS() / 60);
+  travelTo(target, minutes, `Moved forward ${minutes} minutes.`).catch(() => {});
+}
+
+/** Used by checklists B and C: move the clock just past a running cooldown. */
+async function skipCooldown(status) {
+  if (!clockState) await loadClock();
+  const offset = deviceOffsetFrom(status.now_local);
+  const minutes = Math.ceil((Number(status.cooldown_remaining_s) || 0) / 60) + 1;
+  let target = null;
+  if (status.next_manual_allowed_at) {
+    const w = deviceWall(status.next_manual_allowed_at, offset);
+    if (w) {
+      const iso = `${w.year}-${String(w.month).padStart(2, '0')}-${String(w.day).padStart(2, '0')}T${String(w.hour).padStart(2, '0')}:${String(w.minute).padStart(2, '0')}:00`;
+      target = addMinutesToLocal(iso, 1);
+    }
+  }
+  if (!target) target = addMinutesToLocal(nowLocal() || status.now_local, minutes);
+  return travelTo(target, minutes, 'Moved the clock past the cooldown.');
 }
 
 byId('clock-form').addEventListener('submit', (e) => {
@@ -350,23 +386,20 @@ byId('clock-form').addEventListener('submit', (e) => {
     clockStatus.textContent = 'Enter a time first.';
     return;
   }
-  travel({ local_time: t }, `Travelled to ${time24To12(t)}.`);
+  travel({ local_time: t }, `Travelled to ${time24To12(t)}.`).catch(() => {});
 });
 byId('clock-plus15').addEventListener('click', () => plusMinutes(15));
 byId('clock-plus60').addEventListener('click', () => plusMinutes(60));
-byId('clock-reset').addEventListener('click', () => travel({ reset: true }, 'Back to real time.'));
+byId('clock-reset').addEventListener('click', () => travel({ reset: true }, 'Back to real time.').catch(() => {}));
 byId('clock-next').addEventListener('click', async () => {
   clockStatus.textContent = 'Jumping to the next scheduled dose…';
   try {
     const resp = await post('/api/demo/jump-to-next-dose', {});
     renderClock(resp?.clock);
-    const due = resp?.due?.due || [];
-    if (due.length) {
-      const d = due[0];
-      clockStatus.textContent = `${due.length} dose${due.length === 1 ? '' : 's'} due now — ${d.medication_name}, ${formatClock(d.scheduled_local)}, compartment ${d.compartment_number ?? '?'}.`;
-    } else {
-      clockStatus.textContent = resp?.due?.next_upcoming ? 'Jumped, but no dose is dispensable yet.' : 'No upcoming scheduled dose was found.';
-    }
+    const next = resp?.next;
+    clockStatus.textContent = next
+      ? `Now at the next dose: ${next.medication_name}, container ${next.container_number ?? '?'}. It drops automatically in a moment.`
+      : 'No upcoming scheduled dose was found.';
   } catch (err) {
     clockStatus.textContent = errorText(err);
     notify(errorText(err), 'error');
@@ -378,60 +411,11 @@ setInterval(tickClock, 1000);
 
 // ------------------------------------------------------------------ demo data
 
-const doseMed = byId('dose-med');
-const doseResult = byId('dose-now-result');
-
-async function loadMeds() {
-  try {
-    const meds = await get('/api/medications?include_inactive=false');
-    const keep = doseMed.value;
-    const options = [h('option', { value: '' }, 'Any medication (first eligible)')];
-    for (const m of Array.isArray(meds) ? meds : []) {
-      const where = m.compartment_number ? `compartment ${m.compartment_number}` : 'no compartment';
-      options.push(h('option', { value: String(m.medication_id) }, `${m.name} · ${where}`));
-    }
-    doseMed.replaceChildren(...options);
-    if (keep && Array.from(doseMed.options).some((o) => o.value === keep)) doseMed.value = keep;
-  } catch (err) {
-    doseMed.replaceChildren(h('option', { value: '' }, `Could not load medications (${errorText(err)})`));
-  }
-}
-
-const loadMedsSoon = debounce(loadMeds, 300);
-
-byId('dose-now').addEventListener('click', async () => {
-  doseResult.textContent = 'Creating a dose that is due now…';
-  try {
-    const body = doseMed.value ? { medication_id: Number(doseMed.value) } : {};
-    const resp = await post('/api/demo/dose-now', body);
-    const ev = resp?.event;
-    if (!ev) {
-      doseResult.textContent = 'The server did not return a dose.';
-      return;
-    }
-    const where = ev.compartment_number ? `compartment ${ev.compartment_number}` : 'NO compartment assigned — assign one before dispensing';
-    doseResult.textContent = `Created dose_${ev.event_id}: ${ev.medication_name}, due ${formatClock(ev.scheduled_local)}, ${where}.`;
-  } catch (err) {
-    doseResult.textContent = errorText(err);
-    notify(errorText(err), 'error');
-  }
-});
-
-byId('demo-seed').addEventListener('click', async () => {
-  try {
-    const resp = await post('/api/demo/seed', {});
-    doseResult.textContent = resp?.created ? 'Demo data created.' : 'Demo data was already present.';
-    loadMeds();
-  } catch (err) {
-    notify(errorText(err), 'error');
-  }
-});
-
 byId('demo-reset').addEventListener('click', async () => {
   const reseed = byId('reset-reseed').checked;
   const { ok } = await confirmDialog({
     title: 'Reset the demo data?',
-    message: `All dose events are cleared${reseed ? ' and the demo medications are seeded again' : ''}. The demo clock returns to real time. This cannot be undone.`,
+    message: `Drops, doses, notifications, conversations and reports are cleared${reseed ? ', and the demo accounts and medications are seeded again' : ''}. The clock returns to real time. This cannot be undone.`,
     confirmLabel: 'Reset demo data',
     danger: true,
     iconEl: icon('warning'),
@@ -439,83 +423,49 @@ byId('demo-reset').addEventListener('click', async () => {
   if (!ok) return;
   try {
     await post('/api/demo/reset', { reseed });
+    byId('reset-status').textContent = 'Demo data reset.';
     notify('Demo data reset.', 'success');
     flows.resetAll();
-    loadMeds();
     loadClock();
     loadSim();
-    loadRaw();
   } catch (err) {
+    byId('reset-status').textContent = errorText(err);
     notify(errorText(err), 'error');
   }
 });
 
-stream.on('data.changed', (d, _env, meta) => {
-  if (meta.replayed) return;
-  if (!d?.entity || ['medication', 'compartment'].includes(d.entity)) loadMedsSoon();
-});
-
-// ------------------------------------------------------------------ raw state viewer
-
-const stateSource = byId('state-source');
-const stateJson = byId('state-json');
-const stateAuto = byId('state-auto');
-stateSource.replaceChildren(...STATE_SOURCES.map(([path, label]) => h('option', { value: path }, label)));
-
-async function loadRaw() {
-  const path = stateSource.value;
-  try {
-    const data = await get(path);
-    if (path === stateSource.value) stateJson.textContent = prettyJson(data);
-  } catch (err) {
-    stateJson.textContent = `Error: ${errorText(err)}`;
-  }
-}
-
-const loadRawSoon = debounce(loadRaw, 600);
-stateSource.addEventListener('change', loadRaw);
-byId('state-refresh').addEventListener('click', loadRaw);
-stream.on('*', (_d, env, meta) => {
-  if (!stateAuto.checked || meta.replayed) return;
-  if (env?.topic === 'device.line' || env?.topic === 'sim.physical') return;
-  loadRawSoon();
-});
-
-// ------------------------------------------------------------------ scripted flows
+// ------------------------------------------------------------------ checklists
 
 const flows = createFlows(byId('flows'), {
+  session: () => me,
+  recent: (topic) => recentEvents.filter((e) => e.topic === topic).map((e) => e.data),
+  renderClock,
+  skipCooldown,
   notify,
-  selectedMedication: () => (doseMed.value ? Number(doseMed.value) : null),
-  offsetMin: () => offsetMin,
 });
 
 // ------------------------------------------------------------------ start
 
-async function loadHealth() {
+async function start() {
   try {
-    const health = await get('/api/health');
-    const cfg = health?.config || {};
-    if (Number(cfg.num_slots)) carousel.setNumSlots(Number(cfg.num_slots));
-    const badge = byId('mode-badge');
-    badge.textContent = `Hardware: ${cfg.hardware_mode || health?.hardware?.mode || '?'} · demo mode ${cfg.demo_mode === false ? 'off' : 'on'}`;
-    if (cfg.demo_mode === false) notify('Demo mode is off on the server: demo controls will be refused.', 'warning');
+    me = await requireSession();
   } catch (err) {
-    byId('mode-badge').textContent = 'Server unreachable';
+    const box = byId('page-error');
+    box.hidden = false;
+    box.replaceChildren(errorState(err, () => window.location.reload(), icon('warning')));
+    return;
   }
-}
-
-stream.on(RECONNECTED, () => {
+  if (!me) return;
+  renderSession();
+  watchSession(stream);
+  stream.on(RECONNECTED, () => {
+    loadSim();
+    loadClock();
+  });
+  stream.start();
   loadHealth();
   loadSim();
   loadClock();
-  loadMeds();
-  loadRaw();
-});
+}
 
-stream.start();
-loadHealth();
-loadSim();
-loadClock();
-loadMeds();
-loadRaw();
-prefillLog();
+start();
