@@ -18,6 +18,7 @@ import { notificationSpeech } from './notifications.js';
 import { displayTranscript } from './pcm.js';
 import { ReplySpeaker, VoiceInput, voiceInputAvailable } from './voice.js';
 import { speakAfter } from './wellbeing.js';
+import { cancelPendingSpeech, speakNatural } from './speech.js';
 import { createGuidedDemo } from './guided.js';
 
 const CONFIRM_MS = 6000;
@@ -53,7 +54,7 @@ let guided = null;
 function caption(text, { speak = true, assertive = false } = {}) {
   byId('k-caption').textContent = text;
   announce(text, { assertive });
-  if (speak && text) speaker.speak(text);
+  if (speak && text) speakNatural(speaker, text);   // server voice (ElevenLabs if set)
 }
 
 // ------------------------------------------------------------------ status
@@ -184,7 +185,10 @@ async function chat(text) {
     for (const a of reply?.actions || []) if (a?.drop_id) state.spokenDrops.add(a.drop_id);
     byId('k-caption').textContent = reply?.text || '';
     announce(reply?.text || '');
-    if (reply?.text) speaker.speak(reply.text, reply.audio_url || null);
+    if (reply?.text) {
+      cancelPendingSpeech();
+      speaker.speak(reply.text, reply.audio_url || null);
+    }
     if ((reply?.actions || []).length) loadSoon();
   } catch (err) {
     caption(`The assistant could not answer: ${errorText(err)}. You can use the drop buttons.`, { assertive: true });
@@ -306,7 +310,8 @@ async function start() {
     const dropId = n?.data?.drop_id;
     if (dropId !== undefined && state.spokenDrops.has(dropId)) return;
     if (dropId !== undefined) state.spokenDrops.add(dropId);
-    if (!voice.active && !state.chatting && !state.guided) caption(notificationSpeech(n));
+    // A drop or chat of this screen is still waiting: its own answer is spoken, not this too.
+    if (!voice.active && !state.chatting && !state.guided && !state.dropping) caption(notificationSpeech(n));
   });
   stream.on('wellbeing.prompt', (d, _env, meta) => {
     if (meta?.replayed || !d?.offer_id || !d.text || state.offered.has(d.offer_id)) return;

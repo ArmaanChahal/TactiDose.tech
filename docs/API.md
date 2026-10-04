@@ -138,6 +138,7 @@ caregivers *read* them through the endpoints above but never create conversation
 | `POST /api/agent/chat` | `{text, conversation_id?, input_mode?: "text"\|"voice", speak?: bool}` | `AgentReply` (`audio_url` set when `speak` and TTS is available) |
 | `POST /api/agent/transcribe` | raw 16-bit little-endian mono PCM at 16 kHz (`Content-Type: application/octet-stream`, ≤ 30 s) | `{text, confidence, engine: "vosk"}`; 503 if the offline recognizer is unavailable |
 | `GET /api/agent/audio/{audio_id}.wav` | – | `audio/wav` (short-lived, only for the requesting patient) |
+| `POST /api/agent/speak` | `{text}` (≤ 600 chars) | `{audio_url}`: the server voice (ElevenLabs → cache → offline OS voice) for the page's own announcements such as "pill dropped"; `null` = no server voice, the browser speaks |
 
 With the optional well-being check-in installed, `POST /api/agent/chat` first offers the text to
 `tactidose/wellbeing.py`. A check-in turn comes back in the same shape with `model: "wellbeing"`,
