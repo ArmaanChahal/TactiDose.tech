@@ -45,7 +45,6 @@ tactidose/
 │   ├── scheduler.py          schedules -> dose_events (unchanged semantics) + caregiver-only editing    [domain]
 │   ├── compartments.py       containers: assignment + inventory (refill, thresholds)                    [domain]
 │   ├── catalog.py · onboarding.py · errors.py · safety.py (v1 helpers kept where useful)               [domain]
-│   ├── dispense.py           v1 DoseService — superseded by drops.py; kept only for the optional kiosk [domain]
 │   └── analytics.py          local adherence analytics (used by reports and the optional dashboard)    [integrations]
 ├── agent/
 │   ├── service.py            AgentService (implements AgentServiceAPI): conversation store + routing    [agent]
@@ -64,7 +63,7 @@ tactidose/
 │   ├── service.py            AuthService (implements AuthServiceAPI): register/login/sessions/links    [platform]
 │   └── deps.py               FastAPI dependencies: current_user, require_patient_access, ...            [platform]
 ├── api/                      routers per docs/API.md v2, SSE with per-user filtering                   [platform]
-├── voice/ · audio/ · integrations/ · core/{assistant,phrases}.py   (wave 1, reused)                      [agent / extras]
+├── voice/ · audio/ · integrations/ · core/phrases.py   (wave 1, reused; v1 core/assistant.py removed)    [agent / extras]
 └── ui/static/                login, patient portal, care portal, demo panel, optional kiosk           [ui]
 firmware/                     reference ESP32 firmware (+DROP_SLOT, 3 containers)                        [hardware]
 ```
@@ -100,8 +99,10 @@ to the hardware):
    `last_drop_at` is the latest `DROPPED` *or* `UNCERTAIN` drop of **any** pill on the device ⇒
    `COOLDOWN` with `cooldown_remaining_s` / `next_allowed_at`. Cooldown 0 disables the check.
 5. **Scheduled satisfaction** (source `schedule`) — the dose event is already `DISPENSED/TAKEN`, or
-   the same medication was `DROPPED/UNCERTAIN` at/after `scheduled_at − dose_early_minutes` ⇒
-   `ALREADY_SATISFIED` (the event is linked to that earlier drop and marked `DISPENSED`).
+   the same medication was `DROPPED/UNCERTAIN` at/after `min(scheduled_at − dose_early_minutes,
+   scheduled_at − min_dose_interval_minutes)` ⇒ `ALREADY_SATISFIED` (the event is linked to that
+   earlier drop and marked `DISPENSED`). Example: a manual drop at 07:20 satisfies the 08:00 dose
+   (window opens 07:30, minimum interval 60 min), so no second pill drops at 08:00.
 6. **Inventory** — `pill_count <= 0` ⇒ `EMPTY` (+ `EMPTY` notification).
 7. **Concurrency** — the drop lock is held ⇒ `IN_PROGRESS`.
 8. **Hardware readiness** — not connected / `FAULT` ⇒ `DEVICE_UNAVAILABLE`; `SAFE_STOP`/unhomed ⇒
@@ -117,7 +118,7 @@ report `proto ≥ 1.1`), and finalise the row from `protocol.drop_certainty(resu
 | DROPPED | `DROPPED` | `pill_count − 1` | `DISPENSED`, `drop_id`, `dispensed_at` | PILL_DROPPED (+ LOW_STOCK / EMPTY when crossing thresholds) |
 | NOT_DROPPED (`ERR …`) | `FAILED`, reason = code | unchanged | scheduled: `HARDWARE_ERROR`, retry at `now + auto_drop_retry_minutes` while in window | DROP_FAILED |
 | `ERR NO_PILL` | `FAILED`, reason `NO_PILL` | set to 0 (the container is physically empty) | as above | EMPTY |
-| UNCERTAIN | `UNCERTAIN`, `needs_review=True` | unchanged until reviewed | scheduled: `HARDWARE_ERROR`, `needs_review`, **no retry** | DROP_UNCERTAIN to caregivers |
+| UNCERTAIN | `UNCERTAIN`, `needs_review=True` | unchanged until reviewed | scheduled: `HARDWARE_ERROR`, `needs_review`, **no retry** | DROP_UNCERTAIN to patient and caregivers |
 
 A manual/agent `DROPPED` drop also satisfies today's matching due/scheduled dose of that medication
 whose window has opened (so the auto-drop will not repeat it).
@@ -147,7 +148,7 @@ the patient and caregivers.
      `tools.py` bound to *this* patient (the model never chooses the patient id);
   4. store every tool call (`role="tool"`, `tool_name`, `tool_args`, `tool_result`) and the final
      reply (`role="assistant"`, `model`);
-  5. publish `agent` + (for drops) `drop` events; return `AgentReply`.
+  5. publish `agent` events (drop events come from DropService, never from the agent); return `AgentReply`.
 * **Tools** (JSON-schema function declarations):
   `get_patient_status()` → PatientStatus (containers, cooldown remaining, last drop, today's doses,
   next scheduled); `get_recent_drops(days≤14)`; `request_pill(container_number? | medication_name?,
@@ -238,9 +239,9 @@ portal also speaks "pill dropped" when audio is enabled.
 settings, clock, bus, db = Settings(), Clock(settings.timezone), EventBus(), Database(settings)
 hardware, sim     = create_hardware(settings, bus=bus, clock=clock)
 notifications     = NotificationService(db, settings, clock, bus=bus)
-compartments      = CompartmentService(db, settings, bus=bus)
+compartments      = CompartmentService(db, settings, bus=bus, clock=clock)
 catalog           = MedicationCatalog(db, settings, clock, bus=bus)
-scheduler         = Scheduler(db, clock, settings, bus=bus)
+scheduler         = Scheduler(db, clock, settings, bus=bus, notifications=notifications)
 drops             = DropService(db, hardware, clock, settings, notifications=notifications, bus=bus)
 auth              = AuthService(db, settings, clock, bus=bus)
 agent             = AgentService(db, drops, clock, settings, bus=bus)          # provider per settings
@@ -278,12 +279,12 @@ startup: create_all → seed (demo) → drops.recover_on_startup() → scheduler
 **Domain (`medication/`)** — all services are thread-safe, start no threads, raise
 `errors.ValidationError` (422) / `NotFoundError` (404) / `ConflictError` (409) for caregiver ops and
 never raise for expected dose/hardware failures. Serializers: `scheduler.schedule_to_dict`,
-`catalog.medication_to_dict`, `compartments.compartment_to_dict`, `dispense.event_view`,
+`catalog.medication_to_dict`, `compartments.compartment_to_dict`, `drops.drop_to_view` / `drops.dose_to_view`,
 `onboarding.scan_to_dict`. Schedule edits keep still-matching occurrences, delete stale untouched
 future events, cancel other stale open ones, and reset `Schedule.created_at` (no invented past
 MISSED doses). `log_event(..., at=clock.now())` keeps audit rows on the demo clock.
 
-**Voice/audio (`voice/`, `audio/`, `core/assistant.py`)** — `Topic.SPOKEN` is published only by
+**Voice/audio (`voice/`, `audio/`; the v1 `core/assistant.py` was replaced by `agent/voice_loop.py`)** — `Topic.SPOKEN` is published only by
 `SpeakerService` (once per utterance, right before playback). The physical cancel button only
 *enqueues* CANCEL (the firmware already stopped locally); UI/voice/API cancel calls `interrupt()`
 synchronously. `VoiceRecognizer.start()` blocks while the Vosk model loads (1–16 s): call it last,
@@ -304,8 +305,20 @@ browsers refuse ES modules. SSE: `event: <topic>` + JSON data, `Cache-Control: n
 20 pills per container) and the optional `!peek <max_ms>` speed-up used by `NativeTarget`.
 `!boot none` leaves the physical sensor mode unchanged.
 
-**Known gaps entering v2** — the Python simulator, HardwareClient, `commands.build` and the
-firmware core do not implement `DROP_SLOT` yet (10 sim tests + the native DROP scenarios fail
-until the hardware engineer finishes); `medication/dispense.py` (v1 consent/gate flow) and
-`core/assistant.py` (v1 dialogue) are superseded by `drops.py` and `agent/` and must not drive the
-hardware in the v2 app.
+**v2 status (after wave 2)** — `DROP_SLOT` is implemented in the simulator, the host client, `commands`
+and the firmware (both mechanisms); all 32 conformance scenarios pass on the simulator and the native
+core. `hardware.drop_slot()` returns at `OK DROPPED n` / `ERR NO_PILL`; against v1 firmware it holds
+the command lock for the whole `DISPENSE_SLOT` + `drop_close_delay_ms` + `CLOSE_GATE` emulation.
+Simulator fault `brownout_on_release` resets the board after `OK GATE_OPEN` (host: UNCERTAIN).
+`sim.set_pills()` changes the *physical* simulated count only, never `compartments.pill_count`.
+The v1 consent/gate flow (`medication/dispense.py`) and the v1 assistant (`core/assistant.py`) were
+deleted: `DropService` is the only code path that drops pills.
+
+**Notifications beyond §10** — `DEVICE_ALERT` once per scheduled dose whose auto-drop is refused as
+`DEVICE_UNAVAILABLE`; scheduled requests DENIED for `EMPTY`, `NO_MEDICATION`, `UNKNOWN_MEDICATION`
+or `DEVICE_UNAVAILABLE` set `next_attempt_at = now + auto_drop_retry_minutes` on the DUE dose and
+retry until the window closes. `NotificationService.notify(..., user_ids=[...])` targets single
+accounts (used for REPORT_READY / REPORT_SENT to the creator).
+
+**Accounts** — sessions and lockouts use the clock *without* the demo travel offset, so time travel
+never signs anyone out. Login and link-code attempts are rate-limited (5 failures → 30 s, HTTP 429).

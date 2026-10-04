@@ -34,8 +34,8 @@ anyway, and re-synchronises with `PING` + `STATUS` after connecting.
 
 ## 2. Slots and positions
 
-* Slots are numbered `0 … N-1` where `N = NUM_SLOTS` (default **6**, allowed 2–12;
-  must match on both sides — the device reports it in `STATUS`).
+* Slots are numbered `0 … N-1` where `N = NUM_SLOTS` (**3** on the v2 device; the conformance
+  harness uses 6; allowed 2–12; must match on both sides — the device reports it in `STATUS`).
 * **Slot 0 is the home position** (the compartment at the access gate right after homing).
 * Slot `k` is centred at `k × 360/N` degrees from home.
 * Firmware computes targets from the *absolute* home reference
@@ -307,6 +307,9 @@ Failures: every `MOVE_SLOT` failure (`ERR INVALID_SLOT`, `NOT_HOMED`, `BUSY`, `I
 
 Acceptance (§7): same row as `DISPENSE_SLOT`. Argument validation first (`ERR INVALID_SLOT` in every state).
 
+During the release the device is busy: `STATUS`, `PING` and every other input received meanwhile are
+answered after `OK DROPPED n` / `ERR NO_PILL` and `OK READY`.
+
 ### 12.3 Interruption
 
 * `STOP` / cancel button **during motion or settle** → `ERR STOPPED`, `OK STOPPED` — the release
@@ -324,6 +327,8 @@ Acceptance (§7): same row as `DISPENSE_SLOT`. Argument validation first (`ERR I
 
 * Device reports `proto ≥ 1.1` → the host sends `DROP_SLOT n` (timeout 30 s).
 * Otherwise (v1 firmware) → `DISPENSE_SLOT n`, wait `drop_close_delay_ms` (default 1.5 s), `CLOSE_GATE`.
+  On a dropper, every gate opening (`DISPENSE_SLOT`, `OPEN_GATE`) releases one pill, so raw `OPEN_GATE`
+  from the demo console also drops a pill and bypasses the drop rules — demo operators only.
 * `OK DROPPED n` → the host decrements that container's pill count. `ERR NO_PILL` → the host sets it
   to 0 and notifies "container empty". No sensor → `OK DROPPED` means "release cycle completed".
 

@@ -39,7 +39,7 @@ The UI in `tactidose/ui/static/` uses only these endpoints.
   "hardware": "OK DROPPED" | null }
 
 // PillDropView (one row of pill_drops)
-{ "drop_id": 41, "requested_at": "...", "completed_at": "...", "requested_local": "...",
+{ "drop_id": 41, "patient_id": 1, "requested_at": "...", "completed_at": "...", "requested_local": "...",
   "slot": 0, "container_number": 1, "medication_id": 3, "medication_name": "Vitamin C (demo candy)",
   "source": "manual", "status": "DROPPED", "reason": null, "hardware_result": "OK DROPPED",
   "pill_count_before": 12, "pill_count_after": 11, "dose_event_id": 17, "conversation_id": null,
@@ -71,7 +71,7 @@ The UI in `tactidose/ui/static/` uses only these endpoints.
 
 // AgentReply
 { "conversation_id": 5, "text": "Your Vitamin C was dropped at 8:00 AM, so I can't give another one yet...",
-  "actions": [DropOutcome], "model": "gemini-3.8-flash" | "rules", "audio_url": "/api/agent/audio/abc123.wav" | null,
+  "actions": [DropOutcome], "model": "gemini-3.8-flash" | "rules" | "rules (fallback)" | "rules (safety)", "audio_url": "/api/agent/audio/abc123.wav" | null,
   "messages": [Message] }
 
 // Message (conversation log)
@@ -92,11 +92,11 @@ The UI in `tactidose/ui/static/` uses only these endpoints.
 | Method & path | Body | Response |
 |---|---|---|
 | `POST /api/auth/register` | `{email, password (≥ 8 chars), display_name, role: "patient"\|"doctor"\|"family", phone?}` | 201 `{user, token, patient?: {patient_id, link_code}}` (logs in; sets cookie). 409 if the email exists; 403 if registration is disabled. |
-| `POST /api/auth/login` | `{email, password}` | `{user, token}` (sets cookie). 401 on bad credentials (same message for unknown email and wrong password). |
+| `POST /api/auth/login` | `{email, password}` | `{user, token}` (sets cookie). 401 on bad credentials (same message for unknown email and wrong password); 429 with `Retry-After` after 5 failures for one email (30 s lockout). |
 | `POST /api/auth/logout` | – | `{ok: true}` (revokes the session, clears cookie) |
 | `GET /api/auth/me` | – | `{user, patient?: {patient_id, link_code, device_id}, patients?: [CarePatient]}` — `patient` for patients, `patients` for caregivers |
 | `GET /api/care/patients` *(caregiver)* | – | `[CarePatient]` where `CarePatient = {patient_id, display_name, relationship, last_drop: PillDropView\|null, unread_alerts: int, adherence_7d: float\|null}` |
-| `POST /api/care/links` *(caregiver)* | `{patient_id, link_code}` | 201 `CarePatient` — link by the patient's database ID + the link code shown in the patient portal. 404/403 on mismatch. |
+| `POST /api/care/links` *(caregiver)* | `{patient_id, link_code}` | 201 `CarePatient` — link by the patient's database ID + the link code shown in the patient portal. 404/403 on mismatch; 429 with `Retry-After` after 5 wrong codes (30 s). |
 | `DELETE /api/care/links/{patient_id}` *(caregiver)* | – | `{ok: true}` |
 
 ## Patient data (`/api/patients/{pid}/…`)
@@ -144,7 +144,7 @@ caregivers *read* them through the endpoints above but never create conversation
 |---|---|---|
 | `GET /api/reports/{rid}` | – | `ReportMeta` |
 | `GET /api/reports/{rid}/pdf` | – | `application/pdf` (inline; `?download=1` for attachment) |
-| `POST /api/reports/{rid}/send` | `{to_email?: str}` — omitted = every linked doctor's email | `{deliveries: [Delivery]}` — `SENT` via SMTP, `SAVED` (no SMTP configured: .eml written to `data/outbox/`), `FAILED` |
+| `POST /api/reports/{rid}/send` | `{to_email?: str}` — omitted = every linked doctor's email | `{deliveries: [Delivery]}` — `SENT` via SMTP, `SAVED` (no SMTP configured: .eml written to `data/outbox/`), `FAILED`; 422 when no address is given and no doctor is linked |
 
 Access to `/api/reports/{rid}…` follows the report's patient (patient themself or linked caregivers).
 
@@ -165,10 +165,10 @@ Access to `/api/reports/{rid}…` follows the report's patient (patient themself
 | `POST /api/device/stop` | – | same (patient or caregiver; always allowed) |
 | `POST /api/device/reconnect` *(caregiver)* | – | `{ok, device}` |
 | `POST /api/demo/command` *(demo)* | `{line: "DROP_SLOT 1"}` | `{ok, result, device}` |
-| `GET/POST /api/demo/clock` *(demo)* | `{local_time: "08:00"}` \| `{offset_minutes: 30}` \| `{reset: true}` | `{now_local, now_utc, offset_s, travelling, tz}` (runs a scheduler tick) |
+| `GET/POST /api/demo/clock` *(demo)* | `{local_time: "08:00"}` (today) \| `{local_datetime: "2026-10-05T08:00"}` \| `{offset_minutes: 30}` (absolute offset from real time) \| `{reset: true}` | `{now_local, now_utc, offset_s, travelling, tz}` (runs a scheduler tick). Sessions ignore demo travel, so jumping never signs anyone out. |
 | `POST /api/demo/jump-to-next-dose` *(demo)* | – | `{clock, next: DoseView\|null}` |
-| `GET/POST /api/demo/simulator` *(demo)* | `{fault, enabled}` \| `{press: "CONFIRM"\|"CANCEL"}` \| `{reboot: true}` \| `{pills: {slot, count}}` | `{available, physical, faults}` |
-| `POST /api/demo/reset` *(demo)* | `{reseed?: bool}` | `{ok}` |
+| `GET/POST /api/demo/simulator` *(demo)* | `{fault, enabled}` \| `{press: "CONFIRM"\|"CANCEL"}` \| `{reboot: true}` \| `{pills: {slot, count}}` | `{available, physical:{angle_deg, slot, target_slot, gate_open, state, releasing, pills:[physical count per container], pills_dropped, drop_sensor, proto, num_slots, fw_version, ...}, faults:{home_sensor_dead, motor_jam, unresponsive, brownout_on_gate, brownout_on_release, disconnect}}` — simulated *physical* pill counts are separate from the database's `pill_count` |
+| `POST /api/demo/reset` *(demo)* | `{reseed?: bool}` | `{ok}` — wipes drops, doses, conversations, reports, notifications **and sessions** (everyone, including the operator, must sign in again) |
 
 ## Optional extras (kept from the handoff, off the main flow)
 
@@ -178,7 +178,7 @@ Access to `/api/reports/{rid}…` follows the report's patient (patient themself
 | `POST /api/patients/{pid}/scans/{scan_id}/confirm` *(caregiver)* / `…/reject` | human-reviewed fields → confirmed `Medication` |
 | `GET /api/analytics/summary?patient_id=&days=` | local adherence analytics |
 | `GET /api/analytics/snowflake` / `POST …/sync` | Snowflake outbox status / force sync (when configured) |
-| `GET /api/health` | `{ok, version, db, hardware, agent, tts, smtp, time}` (no auth) |
+| `GET /api/health` | `{ok, version, demo_mode, db, hardware, agent, tts, smtp, time, ...}` (no auth; no personal data) |
 
 ## Pages
 

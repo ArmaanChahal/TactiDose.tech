@@ -6,7 +6,7 @@ be built and tested independently (with fakes) and wired together in
 
 Layering (arrows = "may call")::
 
-    voice/ ──► core/assistant ──► medication/ (DoseServiceAPI) ──► hardware/ (HardwareController)
+    voice/ ──► agent/ (AgentServiceAPI) ──► medication/drops (DropServiceAPI) ──► hardware/ (HardwareController)
        ▲              │                     │
     audio/ ◄──────────┘ (Speaker)           └──► db/ (+ outbox -> integrations/snowflake)
     integrations/gemini (LabelExtractor) ◄── medication/onboarding
@@ -579,6 +579,11 @@ class PatientStatus:
 @runtime_checkable
 class DropServiceAPI(Protocol):
     """Deterministic drop logic (medication/drops.py). Never raises for expected failures.
+
+    The Protocol lists what the agent needs. ``medication.drops.DropService`` also provides the
+    caregiver/app surface used by the API: ``recover_on_startup``, ``resolve_drop``, ``skip_dose``,
+    ``get_settings`` / ``update_settings``, ``list_doses``, ``next_scheduled_dose``,
+    ``create_demo_dose_now``.
 
     Rules applied to every request (ARCHITECTURE v2 §5): the patient has a device; the slot
     holds an active, confirmed medication; pill_count > 0; global cooldown for
