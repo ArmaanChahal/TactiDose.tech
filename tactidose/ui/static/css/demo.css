@@ -1,0 +1,361 @@
+/*
+ * Demo operator panel: dense multi-card grid (the operator is sighted and on a
+ * laptop), same theme tokens and focus rules as the other pages.
+ */
+
+.demo {
+  font-size: 1rem;
+}
+
+.icon-slot {
+  display: inline-flex;
+  align-items: center;
+  vertical-align: -0.12em;
+}
+
+.demo-main {
+  padding: 12px 16px 28px;
+  max-width: 1900px;
+  margin: 0 auto;
+}
+
+.proto-note {
+  display: flex;
+  gap: 0.5em;
+  align-items: flex-start;
+  color: var(--fg-2);
+  font-size: 0.95em;
+}
+
+.demo-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 440px), 1fr));
+  gap: 14px;
+  align-items: start;
+}
+
+.demo-grid .wide {
+  grid-column: 1 / -1;
+}
+
+.card h2 {
+  display: flex;
+  align-items: center;
+  gap: 0.45em;
+  font-size: 1.2em;
+  margin-bottom: 0.6em;
+}
+
+.card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.card-head h2 {
+  margin: 0 0 0.6em;
+}
+
+.inline-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3em;
+  margin-bottom: 0.8em;
+}
+
+.inline-row {
+  display: flex;
+  gap: 8px;
+}
+
+.inline-row input {
+  flex: 1;
+  min-width: 0;
+}
+
+.phrases {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 0.8em;
+}
+
+.reply {
+  border-left: 4px solid var(--border);
+  padding: 0.3em 0.7em;
+  min-height: 2.2em;
+}
+
+.reply[data-kind="error"] {
+  border-left-color: var(--danger-fg);
+}
+
+.reply[data-kind="warning"] {
+  border-left-color: var(--warn-fg);
+}
+
+.reply[data-kind="success"] {
+  border-left-color: var(--ok-fg);
+}
+
+.reply-text {
+  font-weight: 650;
+}
+
+.reply details {
+  margin-top: 0.3em;
+}
+
+.reply summary {
+  cursor: pointer;
+  color: var(--fg-2);
+}
+
+.json {
+  margin: 0.4em 0 0;
+  padding: 0.6em 0.8em;
+  max-height: 420px;
+  overflow: auto;
+  background: var(--bg);
+  border: 2px solid var(--border-subtle);
+  border-radius: var(--radius);
+  font-size: 0.85em;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.transcript {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 360px;
+  overflow-y: auto;
+  border: 2px solid var(--border-subtle);
+  border-radius: var(--radius);
+  background: var(--bg);
+}
+
+.transcript li {
+  display: grid;
+  grid-template-columns: auto auto 1fr;
+  gap: 0.6em;
+  align-items: baseline;
+  padding: 0.35em 0.6em;
+  border-bottom: 1px solid var(--surface-2);
+}
+
+.transcript .t {
+  color: var(--fg-3);
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+}
+
+.transcript .who {
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.transcript .who-said { color: var(--ok-fg); }
+.transcript .who-heard { color: var(--info-fg); }
+.transcript .who-intent { color: var(--warn-fg); }
+
+.transcript .is-ignored {
+  color: var(--fg-3);
+}
+
+.sim-layout {
+  display: grid;
+  grid-template-columns: minmax(200px, 300px) minmax(0, 1fr);
+  gap: 14px;
+  align-items: start;
+}
+
+.sim-figure {
+  margin: 0;
+}
+
+.faults {
+  display: grid;
+  gap: 2px;
+  margin-bottom: 10px;
+}
+
+.faults .check-row {
+  min-height: 40px;
+}
+
+.faults .fault-desc {
+  color: var(--fg-3);
+  font-weight: 400;
+  font-size: 0.9em;
+}
+
+.hw-quick {
+  margin-bottom: 10px;
+}
+
+.hw-result .result-box ol {
+  margin: 0.3em 0 0;
+  padding-left: 1.4em;
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+}
+
+.result-box {
+  border: 2px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.5em 0.7em;
+  background: var(--bg);
+}
+
+.result-box.is-ok { border-color: var(--ok-fg); }
+.result-box.is-fail { border-color: var(--danger-fg); }
+
+.log-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px 12px;
+  margin: 14px 0 6px;
+}
+
+.log-head h3 {
+  margin: 0;
+  font-size: 1.05em;
+}
+
+.clock-time {
+  font-size: 2.6em;
+  font-weight: 800;
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.data-result {
+  min-height: 1.4em;
+  margin-top: 0.6em;
+}
+
+.reset-box {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 16px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 2px solid var(--border-subtle);
+}
+
+.filter-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+}
+
+/* ------------------------------------------------------------------ scripted flows */
+
+.flows {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 420px), 1fr));
+  gap: 14px;
+}
+
+.flow {
+  border: 2px solid var(--border-subtle);
+  border-radius: var(--radius);
+  padding: 0.8em 0.9em;
+  background: var(--bg);
+}
+
+.flow h3 {
+  margin: 0 0 0.3em;
+  font-size: 1.08em;
+}
+
+.steps {
+  list-style: none;
+  margin: 0.6em 0 0.8em;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.step {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.2em 0.6em;
+  padding: 0.35em 0.5em;
+  border: 2px solid transparent;
+  border-radius: 8px;
+}
+
+.step-icon {
+  display: inline-flex;
+  padding-top: 0.15em;
+}
+
+.step-main {
+  min-width: 0;
+}
+
+.step-label {
+  font-weight: 650;
+}
+
+.step-state {
+  font-weight: 800;
+  margin-left: 0.4em;
+  font-size: 0.85em;
+}
+
+.step-detail {
+  color: var(--fg-2);
+  font-size: 0.92em;
+  overflow-wrap: anywhere;
+}
+
+.step-ui:empty {
+  display: none;
+}
+
+.step-ui {
+  margin-top: 0.5em;
+  padding: 0.6em;
+  border: 2px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.step[data-status="running"] { border-color: var(--warn-fg); }
+.step[data-status="running"] .step-icon,
+.step[data-status="running"] .step-state { color: var(--warn-fg); }
+.step[data-status="waiting"] { border-color: var(--accent); }
+.step[data-status="waiting"] .step-icon,
+.step[data-status="waiting"] .step-state { color: var(--warn-fg); }
+.step[data-status="done"] .step-icon,
+.step[data-status="done"] .step-state { color: var(--ok-fg); }
+.step[data-status="failed"] { border-color: var(--danger-fg); }
+.step[data-status="failed"] .step-icon,
+.step[data-status="failed"] .step-state { color: var(--danger-fg); }
+.step[data-status="pending"] .step-icon,
+.step[data-status="skipped"] .step-icon,
+.step[data-status="pending"] .step-state,
+.step[data-status="skipped"] .step-state { color: var(--fg-3); }
+
+.step-ui .field {
+  margin-bottom: 0.6em;
+}
+
+.step-ui .unconfirmed-banner {
+  font-size: 1em;
+  padding: 0.5em 0.7em;
+}
+
+@media (max-width: 700px) {
+  .sim-layout {
+    grid-template-columns: 1fr;
+  }
+}

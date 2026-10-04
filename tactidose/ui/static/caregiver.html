@@ -1,0 +1,362 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <title>TactiDose — Caregiver setup</title>
+  <link rel="icon" href="/static/img/favicon.svg" type="image/svg+xml">
+  <script src="/static/js/theme-init.js"></script>
+  <link rel="stylesheet" href="/static/css/base.css">
+  <link rel="stylesheet" href="/static/css/caregiver.css">
+  <script type="module" src="/static/js/caregiver.js"></script>
+</head>
+<body class="cg">
+  <a class="skip-link" href="#main">Skip to content</a>
+
+  <header class="app-header">
+    <p class="brand"><span class="brand-name">TactiDose</span> <span class="brand-sub">Caregiver setup</span></p>
+    <nav class="app-nav" aria-label="Pages">
+      <a href="/">Kiosk</a>
+      <a href="/demo">Demo panel</a>
+    </nav>
+    <div class="header-tools">
+      <span id="conn" class="conn conn-connecting" role="status">Connecting…</span>
+      <div class="who">
+        <label for="caregiver-name">Your name</label>
+        <input id="caregiver-name" type="text" autocomplete="name" maxlength="120" placeholder="for the log">
+      </div>
+      <button type="button" id="pin-forget" class="btn btn-small" hidden>Forget PIN</button>
+      <button type="button" id="theme-toggle" class="btn btn-small">Theme: dark</button>
+    </div>
+  </header>
+
+  <main id="main" class="cg-main">
+    <h1 class="cg-title">Caregiver setup</h1>
+    <p class="proto-note"><span class="icon-slot" data-icon="info"></span> Hackathon prototype for demonstration with candy or tokens only — not a medical device. Nothing here prescribes or changes doses; it only stores information you confirm.</p>
+
+    <div id="notices" class="notices"></div>
+
+    <div class="tablist-wrap">
+      <div id="tabs" class="tablist" role="tablist" aria-label="Caregiver sections">
+        <button type="button" role="tab" id="tab-today" data-tab="today" aria-controls="panel-today" aria-selected="true"><span class="icon-slot" data-icon="calendar"></span> Today</button>
+        <button type="button" role="tab" id="tab-medications" data-tab="medications" aria-controls="panel-medications" aria-selected="false" tabindex="-1"><span class="icon-slot" data-icon="list"></span> Medications</button>
+        <button type="button" role="tab" id="tab-scan" data-tab="scan" aria-controls="panel-scan" aria-selected="false" tabindex="-1"><span class="icon-slot" data-icon="camera"></span> Scan label</button>
+        <button type="button" role="tab" id="tab-compartments" data-tab="compartments" aria-controls="panel-compartments" aria-selected="false" tabindex="-1"><span class="icon-slot" data-icon="gate"></span> Compartments</button>
+        <button type="button" role="tab" id="tab-schedules" data-tab="schedules" aria-controls="panel-schedules" aria-selected="false" tabindex="-1"><span class="icon-slot" data-icon="clock"></span> Schedules</button>
+        <button type="button" role="tab" id="tab-device" data-tab="device" aria-controls="panel-device" aria-selected="false" tabindex="-1"><span class="icon-slot" data-icon="terminal"></span> Device</button>
+        <button type="button" role="tab" id="tab-analytics" data-tab="analytics" aria-controls="panel-analytics" aria-selected="false" tabindex="-1"><span class="icon-slot" data-icon="chart"></span> Analytics</button>
+      </div>
+    </div>
+
+    <!-- ============================================================ TODAY -->
+    <section id="panel-today" class="panel" role="tabpanel" aria-labelledby="tab-today" tabindex="0">
+      <div class="panel-head">
+        <h2 id="today-heading">Doses</h2>
+        <div class="date-nav">
+          <button type="button" id="today-prev" class="btn btn-small" aria-label="Previous day">◀ Previous</button>
+          <label for="today-date" class="visually-hidden">Date</label>
+          <input type="date" id="today-date">
+          <button type="button" id="today-next" class="btn btn-small" aria-label="Next day">Next ▶</button>
+          <button type="button" id="today-today" class="btn btn-small">Today</button>
+          <button type="button" id="today-refresh" class="btn btn-small">Refresh</button>
+        </div>
+      </div>
+      <p id="today-summary" class="summary" aria-live="polite"></p>
+      <div id="today-list"></div>
+    </section>
+
+    <!-- ============================================================ MEDICATIONS -->
+    <section id="panel-medications" class="panel" role="tabpanel" aria-labelledby="tab-medications" tabindex="0" hidden>
+      <div class="panel-head">
+        <h2>Medications</h2>
+        <div class="check-row">
+          <input type="checkbox" id="meds-show-archived">
+          <label for="meds-show-archived">Show archived</label>
+        </div>
+      </div>
+      <p class="hint">Only confirmed information is saved. A medication must be assigned to a compartment and scheduled before it can be dispensed.</p>
+      <div id="meds-list"></div>
+
+      <div class="form-card" id="med-form-card">
+        <h3 id="med-form-title">Add a medication</h3>
+        <form id="med-form" class="med-form" novalidate aria-labelledby="med-form-title">
+          <div class="field">
+            <label for="med-name">Name <span class="field-hint">(required — exactly as printed)</span></label>
+            <input id="med-name" name="name" type="text" required maxlength="200" autocomplete="off">
+          </div>
+          <div class="field">
+            <label for="med-strength">Strength</label>
+            <input id="med-strength" name="strength" type="text" maxlength="120" autocomplete="off">
+          </div>
+          <div class="field">
+            <label for="med-instructions">Instructions</label>
+            <textarea id="med-instructions" name="instructions_text" rows="3"></textarea>
+          </div>
+          <div class="field">
+            <label for="med-warnings">Warnings <span class="field-hint">(one per line)</span></label>
+            <textarea id="med-warnings" name="warnings" rows="3"></textarea>
+          </div>
+          <div class="field">
+            <label for="med-confirmed-by">Confirmed by</label>
+            <input id="med-confirmed-by" name="confirmed_by" type="text" maxlength="120" autocomplete="name">
+          </div>
+          <div class="confirm-box">
+            <input type="checkbox" id="med-confirm" name="confirmed" required>
+            <label for="med-confirm">I confirm this information is correct</label>
+          </div>
+          <p id="med-form-error" class="form-error" role="alert" hidden></p>
+          <div class="btn-row">
+            <button type="submit" class="btn btn-primary" id="med-submit">Save medication</button>
+            <button type="button" class="btn" id="med-cancel-edit" hidden>Cancel editing</button>
+          </div>
+        </form>
+      </div>
+    </section>
+
+    <!-- ============================================================ SCAN LABEL -->
+    <section id="panel-scan" class="panel" role="tabpanel" aria-labelledby="tab-scan" tabindex="0" hidden>
+      <h2>Scan a medication label</h2>
+      <p class="hint">The label photo is read by AI to pre-fill a draft. The draft is <strong>UNCONFIRMED</strong>: nothing is saved until you check every field against the label and confirm it.</p>
+
+      <div class="scan-grid">
+        <div class="scan-capture card">
+          <h3>1. Take or choose a photo</h3>
+          <div class="camera-box">
+            <video id="scan-video" class="scan-video" playsinline muted hidden></video>
+            <p id="camera-status" class="muted">Camera is off.</p>
+          </div>
+          <div class="btn-row">
+            <button type="button" id="camera-start" class="btn"><span class="icon-slot" data-icon="camera"></span> Start camera</button>
+            <button type="button" id="camera-capture" class="btn btn-primary" disabled>Capture photo</button>
+            <button type="button" id="camera-stop" class="btn" disabled>Stop camera</button>
+          </div>
+          <div class="field upload-field">
+            <label for="scan-file">Or upload a photo <span class="field-hint">(JPEG, PNG or WebP, up to 8 MB)</span></label>
+            <input type="file" id="scan-file" accept="image/jpeg,image/png,image/webp">
+          </div>
+          <img id="scan-preview" class="scan-preview" alt="The label photo being scanned" hidden>
+          <p id="scan-status" class="scan-status" role="status"></p>
+        </div>
+
+        <div class="scan-result">
+          <div id="scan-failed" class="card scan-failed" hidden>
+            <h3><span class="icon-slot" data-icon="warning"></span> Could not read the label</h3>
+            <p id="scan-failed-message"></p>
+            <button type="button" id="scan-manual" class="btn btn-primary">Enter the information manually</button>
+          </div>
+
+          <div id="scan-review" class="card scan-review" hidden>
+            <h3 id="scan-review-title">2. Review the draft</h3>
+            <div class="unconfirmed-banner" role="note"><span class="icon-slot" data-icon="warning"></span> UNCONFIRMED — review every field against the label</div>
+            <div id="scan-notes" class="scan-notes"></div>
+            <form id="scan-form" class="med-form" novalidate aria-labelledby="scan-review-title">
+              <div class="field">
+                <label for="scan-name">Name <span class="field-hint">(required — exactly as printed)</span></label>
+                <input id="scan-name" name="name" type="text" required maxlength="200" autocomplete="off">
+              </div>
+              <div class="field">
+                <label for="scan-strength">Strength</label>
+                <input id="scan-strength" name="strength" type="text" maxlength="120" autocomplete="off">
+              </div>
+              <div class="field">
+                <label for="scan-instructions">Instructions</label>
+                <textarea id="scan-instructions" name="instructions_text" rows="3"></textarea>
+              </div>
+              <div class="field">
+                <label for="scan-warnings">Warnings <span class="field-hint">(one per line)</span></label>
+                <textarea id="scan-warnings" name="warnings" rows="3"></textarea>
+              </div>
+              <div class="field">
+                <label for="scan-confirmed-by">Confirmed by</label>
+                <input id="scan-confirmed-by" name="confirmed_by" type="text" maxlength="120" autocomplete="name">
+              </div>
+              <div class="confirm-box">
+                <input type="checkbox" id="scan-confirm" name="confirmed" required>
+                <label for="scan-confirm">I confirm this information is correct</label>
+              </div>
+              <p id="scan-form-error" class="form-error" role="alert" hidden></p>
+              <div class="btn-row">
+                <button type="submit" class="btn btn-primary" id="scan-submit">Confirm and save</button>
+                <button type="button" class="btn btn-danger" id="scan-reject">Reject scan</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      </div>
+
+      <h3>Scans waiting for review</h3>
+      <div id="scan-pending"></div>
+    </section>
+
+    <!-- ============================================================ COMPARTMENTS -->
+    <section id="panel-compartments" class="panel" role="tabpanel" aria-labelledby="tab-compartments" tabindex="0" hidden>
+      <h2>Compartments</h2>
+      <div class="comp-grid">
+        <figure class="card carousel-card">
+          <div id="comp-carousel"></div>
+          <figcaption>
+            <p id="comp-caption" class="carousel-caption" aria-live="polite"></p>
+            <p class="muted legend-line"><span class="legend-pip" aria-hidden="true"></span> dot = a medication is assigned · highlighted = at the gate · compartment 1 is the home position</p>
+          </figcaption>
+        </figure>
+        <div class="comp-side">
+          <p class="hint">Assign each medication to one compartment (assigning it to a new compartment moves it). To load candy, press <strong>Present for loading</strong>: the carousel turns that compartment to the gate and opens it. Keep hands clear while it moves.</p>
+          <div id="comp-list"></div>
+          <div class="btn-row comp-stop-row">
+            <button type="button" id="comp-stop" class="btn btn-danger"><span class="icon-slot" data-icon="stop"></span> STOP carousel</button>
+            <span id="comp-result" class="muted" role="status"></span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============================================================ SCHEDULES -->
+    <section id="panel-schedules" class="panel" role="tabpanel" aria-labelledby="tab-schedules" tabindex="0" hidden>
+      <div class="panel-head">
+        <h2>Schedules</h2>
+        <div class="check-row">
+          <input type="checkbox" id="sched-show-inactive">
+          <label for="sched-show-inactive">Show inactive</label>
+        </div>
+      </div>
+      <p class="hint">Times are in the device's time zone. A dose can be dispensed from shortly before its time until its window closes; after that it is recorded as missed.</p>
+      <div id="sched-list"></div>
+
+      <div class="form-card">
+        <h3 id="sched-form-title">Add a schedule</h3>
+        <form id="sched-form" class="sched-form" novalidate aria-labelledby="sched-form-title">
+          <div class="field">
+            <label for="sched-med">Medication</label>
+            <select id="sched-med" name="medication_id" required></select>
+          </div>
+          <div class="field">
+            <label for="sched-time">Time</label>
+            <input type="time" id="sched-time" name="time_of_day" required step="60">
+          </div>
+          <fieldset class="freq">
+            <legend>How often</legend>
+            <div class="check-row">
+              <input type="radio" id="sched-daily" name="frequency" value="DAILY" checked>
+              <label for="sched-daily">Every day</label>
+            </div>
+            <div class="check-row">
+              <input type="radio" id="sched-weekly" name="frequency" value="WEEKLY">
+              <label for="sched-weekly">Only on selected days</label>
+            </div>
+          </fieldset>
+          <fieldset id="sched-days" class="days" disabled>
+            <legend>Days</legend>
+            <div class="days-grid">
+              <div class="check-row"><input type="checkbox" id="day-MON" name="days" value="MON"><label for="day-MON">Mon</label></div>
+              <div class="check-row"><input type="checkbox" id="day-TUE" name="days" value="TUE"><label for="day-TUE">Tue</label></div>
+              <div class="check-row"><input type="checkbox" id="day-WED" name="days" value="WED"><label for="day-WED">Wed</label></div>
+              <div class="check-row"><input type="checkbox" id="day-THU" name="days" value="THU"><label for="day-THU">Thu</label></div>
+              <div class="check-row"><input type="checkbox" id="day-FRI" name="days" value="FRI"><label for="day-FRI">Fri</label></div>
+              <div class="check-row"><input type="checkbox" id="day-SAT" name="days" value="SAT"><label for="day-SAT">Sat</label></div>
+              <div class="check-row"><input type="checkbox" id="day-SUN" name="days" value="SUN"><label for="day-SUN">Sun</label></div>
+            </div>
+          </fieldset>
+          <div class="check-row" id="sched-active-row" hidden>
+            <input type="checkbox" id="sched-active" name="active" checked>
+            <label for="sched-active">Active</label>
+          </div>
+          <p id="sched-form-error" class="form-error" role="alert" hidden></p>
+          <div class="btn-row">
+            <button type="submit" class="btn btn-primary" id="sched-submit">Save schedule</button>
+            <button type="button" class="btn" id="sched-cancel-edit" hidden>Cancel editing</button>
+          </div>
+        </form>
+      </div>
+    </section>
+
+    <!-- ============================================================ DEVICE -->
+    <section id="panel-device" class="panel" role="tabpanel" aria-labelledby="tab-device" tabindex="0" hidden>
+      <h2>Device</h2>
+      <div class="device-grid">
+        <div class="card">
+          <div id="device-table"></div>
+        </div>
+        <div class="card">
+          <h3>Controls</h3>
+          <p class="hint">Homing turns the carousel back to compartment 1. Keep hands clear. STOP is always allowed.</p>
+          <div class="btn-row">
+            <button type="button" id="dev-home" class="btn"><span class="icon-slot" data-icon="home"></span> Home</button>
+            <button type="button" id="dev-close-gate" class="btn"><span class="icon-slot" data-icon="gate"></span> Close gate</button>
+            <button type="button" id="dev-reconnect" class="btn"><span class="icon-slot" data-icon="plug"></span> Reconnect</button>
+            <button type="button" id="dev-stop" class="btn btn-danger"><span class="icon-slot" data-icon="stop"></span> STOP</button>
+          </div>
+          <div id="device-result" class="device-result" role="status"></div>
+        </div>
+      </div>
+
+      <div class="log-head">
+        <h3 id="device-log-title">Serial log</h3>
+        <div class="btn-row">
+          <div class="check-row">
+            <input type="checkbox" id="log-hide-hb" checked>
+            <label for="log-hide-hb">Hide heartbeat (PING / STATUS)</label>
+          </div>
+          <button type="button" id="log-pause" class="btn btn-small" aria-pressed="false">Pause</button>
+          <button type="button" id="log-clear" class="btn btn-small">Clear</button>
+        </div>
+      </div>
+      <ol id="device-log" class="line-log" aria-labelledby="device-log-title" tabindex="0"></ol>
+    </section>
+
+    <!-- ============================================================ ANALYTICS -->
+    <section id="panel-analytics" class="panel" role="tabpanel" aria-labelledby="tab-analytics" tabindex="0" hidden>
+      <h2>Adherence analytics</h2>
+      <div class="filter-row">
+        <label for="an-days">Period</label>
+        <select id="an-days">
+          <option value="7" selected>Last 7 days</option>
+          <option value="14">Last 14 days</option>
+          <option value="30">Last 30 days</option>
+        </select>
+        <button type="button" id="an-refresh" class="btn btn-small">Refresh</button>
+        <span id="an-source" class="muted"></span>
+      </div>
+
+      <div id="an-body">
+        <div id="an-tiles" class="tiles"></div>
+
+        <figure class="card chart-card" aria-labelledby="an-chart-title">
+          <figcaption class="chart-head">
+            <h3 id="an-chart-title">Doses taken, by day</h3>
+            <p id="an-chart-sub" class="muted">Share of scheduled doses confirmed as taken. Below each day: taken / scheduled.</p>
+          </figcaption>
+          <div id="an-chart" class="chart-host"></div>
+          <details class="table-toggle">
+            <summary>Show the data as a table</summary>
+            <div id="an-chart-table"></div>
+          </details>
+        </figure>
+
+        <div class="an-tables">
+          <div class="card">
+            <div id="an-windows"></div>
+          </div>
+          <div class="card">
+            <div id="an-errors"></div>
+          </div>
+        </div>
+      </div>
+
+      <h3>Snowflake (cloud analytics)</h3>
+      <div class="card">
+        <div id="sf-status"></div>
+        <div class="btn-row">
+          <button type="button" id="sf-sync" class="btn">Sync now</button>
+          <button type="button" id="sf-report-btn" class="btn">Run report queries</button>
+        </div>
+        <div id="sf-report"></div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="app-footer">
+    <p>TactiDose.tech prototype · demo with candy or tokens only · AI may read labels, but only confirmed information is saved and only deterministic rules decide what is dispensed.</p>
+  </footer>
+</body>
+</html>

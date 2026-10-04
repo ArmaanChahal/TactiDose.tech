@@ -1,0 +1,554 @@
+/*
+ * Kiosk / touchscreen view (handoff §21). The primary user is blind or has low
+ * vision: voice and the tactile buttons come first, this screen is secondary.
+ * Very large text (base >= 32px, status >= 56px), few large buttons (>= 96px tall),
+ * every state shown as words + icon. Layout works from 800×480 to 1920×1080:
+ *   - wide landscape (>= 1100px wide, > 640px tall): status left, 2×3 buttons right;
+ *   - narrow or short landscape (e.g. 800×480, 1024×600): stacked, 3×2 buttons;
+ *   - portrait: stacked, 2×3 buttons.
+ * The caption box is the flexible part: long messages scroll inside it instead
+ * of pushing the buttons off screen.
+ */
+
+.kiosk {
+  --k-font-base: clamp(32px, 1.25vw + 22px, 46px);
+  --k-font-status: clamp(56px, 3vw + 32px, 100px);
+  --k-font-small: clamp(24px, 0.5vw + 20px, 30px);
+  --k-btn-min-h: clamp(96px, 17vh, 200px);
+  --k-gap: clamp(8px, 1.2vw, 22px);
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  height: 100dvh;
+  min-height: 0;
+  overflow-y: auto;
+  font-size: var(--k-font-base);
+  line-height: 1.2;
+}
+
+.kiosk .icon-slot {
+  display: inline-flex;
+  align-items: center;
+}
+
+.kiosk .icon-slot .icon {
+  width: 1em;
+  height: 1em;
+  vertical-align: 0;
+}
+
+/* ------------------------------------------------------------------ connection banner */
+
+.k-conn-banner {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4em;
+  padding: 4px 12px;
+  background: var(--due-bg);
+  color: var(--due-fg);
+  font-size: var(--k-font-small);
+  font-weight: 900;
+  text-align: center;
+}
+
+/* ------------------------------------------------------------------ header */
+
+.k-header {
+  flex: none;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 22px;
+  padding: 4px var(--k-gap);
+  border-bottom: 3px solid var(--border-subtle);
+  font-size: var(--k-font-small);
+}
+
+.k-brand {
+  margin: 0;
+  font-size: var(--k-font-small);
+  font-weight: 900;
+  letter-spacing: 0.02em;
+}
+
+.k-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3em;
+  margin: 0;
+  font-weight: 800;
+  color: var(--fg-2);
+  white-space: nowrap;
+}
+
+.k-chip[data-on="false"] {
+  color: var(--fg-3);
+}
+
+.k-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-left: auto;
+}
+
+.k-small-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35em;
+  min-height: 48px;
+  padding: 2px 14px;
+  border: 3px solid var(--fg);
+  border-radius: 12px;
+  background: var(--surface-2);
+  color: var(--fg);
+  font-size: var(--k-font-small);
+  font-weight: 800;
+  text-decoration: none;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.k-small-btn .icon {
+  width: 0.95em;
+  height: 0.95em;
+}
+
+/* ------------------------------------------------------------------ main layout */
+
+.k-main {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+  gap: var(--k-gap);
+  padding: var(--k-gap);
+  align-items: stretch;
+}
+
+.k-status {
+  display: flex;
+  flex-direction: column;
+  gap: calc(var(--k-gap) * 0.8);
+  min-width: 0;
+  min-height: 0;
+}
+
+/* ------------------------------------------------------------------ status banner */
+
+.status-banner {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 0.25em;
+  padding: 0.12em 0.3em;
+  border: 6px solid transparent;
+  border-radius: 18px;
+  font-size: var(--k-font-status);
+  min-width: 0;
+}
+
+.status-icon {
+  display: inline-flex;
+  flex: none;
+}
+
+.status-icon .icon {
+  width: 1em;
+  height: 1em;
+}
+
+.status-text {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  column-gap: 0.5em;
+  min-width: 0;
+}
+
+.status-word {
+  font-size: var(--k-font-status);
+  font-weight: 900;
+  line-height: 1.04;
+}
+
+.status-detail {
+  flex-basis: 100%;
+  font-size: var(--k-font-base);
+  font-weight: 800;
+  line-height: 1.15;
+}
+
+.status-detail:empty {
+  display: none;
+}
+
+.status-banner[data-tone="ok"] {
+  background: var(--surface);
+  color: var(--fg);
+  border-color: var(--fg);
+}
+
+.status-banner[data-tone="due"] {
+  background: var(--due-bg);
+  color: var(--due-fg);
+  border-color: var(--due-fg);
+}
+
+.status-banner[data-tone="caution"] {
+  background: var(--caution-bg);
+  color: var(--caution-fg);
+  border-color: var(--caution-fg);
+  border-image: repeating-linear-gradient(45deg, #ffd400 0 14px, #000000 14px 28px) 6;
+}
+
+.status-banner[data-tone="ready"] {
+  background: var(--invert-bg);
+  color: var(--invert-fg);
+  border-color: var(--invert-bg);
+}
+
+.status-banner[data-tone="alert"] {
+  background: var(--danger-bg);
+  color: var(--danger-bg-fg);
+  border-color: var(--danger-bg-fg);
+}
+
+.status-banner[data-tone="offline"] {
+  background: var(--offline-bg);
+  color: var(--offline-fg);
+  border-color: var(--offline-fg);
+  border-style: dashed;
+}
+
+/* ------------------------------------------------------------------ next event + caption */
+
+.next-event {
+  flex: none;
+  margin: 0;
+  font-weight: 900;
+}
+
+.next-event:empty {
+  display: none;
+}
+
+.dose-detail {
+  flex: none;
+  margin: 0;
+  font-weight: 700;
+  color: var(--fg-2);
+}
+
+.caption-box {
+  flex: 1 1 auto;
+  min-height: 1.4em;
+  overflow-y: auto;
+  border-top: 3px solid var(--border-subtle);
+  padding-top: calc(var(--k-gap) * 0.6);
+  min-width: 0;
+}
+
+.caption-label {
+  margin: 0 0 4px;
+  font-size: var(--k-font-small);
+  font-weight: 800;
+  color: var(--fg-3);
+  letter-spacing: 0.04em;
+}
+
+.caption {
+  margin: 0;
+  font-weight: 650;
+  overflow-wrap: break-word;
+}
+
+.caption .icon {
+  width: 0.9em;
+  height: 0.9em;
+  margin-right: 0.25em;
+  vertical-align: -0.1em;
+}
+
+.caption[data-kind="warning"] .icon {
+  color: var(--warn-fg);
+}
+
+.caption[data-kind="success"] .icon {
+  color: var(--ok-fg);
+}
+
+.caption-alert {
+  color: var(--danger-fg);
+  font-weight: 800;
+}
+
+/* ------------------------------------------------------------------ buttons */
+
+.k-actions {
+  min-width: 0;
+}
+
+.k-actions:focus {
+  outline: none;
+}
+
+.k-buttons {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: calc(var(--k-gap) * 0.8);
+}
+
+.k-btn {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 0.3em;
+  min-height: var(--k-btn-min-h);
+  padding: 6px 8px;
+  border: 5px solid var(--fg-3);
+  border-radius: 18px;
+  background: var(--surface-2);
+  color: var(--fg);
+  font-size: var(--k-font-base);
+  font-weight: 900;
+  line-height: 1.05;
+  text-align: center;
+  cursor: pointer;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.k-btn-label {
+  overflow-wrap: normal;
+  word-break: normal;
+  hyphens: none;
+}
+
+.k-btn .icon {
+  width: 1em;
+  height: 1em;
+}
+
+.k-btn:hover {
+  border-color: var(--fg);
+}
+
+.k-btn:active {
+  transform: translateY(2px);
+}
+
+.k-btn:focus-visible {
+  outline-width: 6px;
+  outline-offset: 4px;
+}
+
+.k-btn.is-suggested {
+  border-color: var(--accent);
+  border-width: 9px;
+  padding: 2px 4px;
+}
+
+/* "Next step" marker: corner arrow that never changes the button's size. */
+.k-next {
+  position: absolute;
+  top: 4px;
+  right: 6px;
+  display: inline-flex;
+  font-size: 0.8em;
+}
+
+.k-btn-cancel {
+  background: var(--danger-bg);
+  color: var(--danger-bg-fg);
+  border-color: var(--fg);
+}
+
+.k-btn[aria-disabled="true"] {
+  opacity: 0.5;
+  cursor: progress;
+}
+
+.k-busy {
+  margin: calc(var(--k-gap) * 0.5) 0 0;
+  font-size: var(--k-font-small);
+  font-weight: 900;
+  color: var(--fg-2);
+}
+
+/* ------------------------------------------------------------------ footer */
+
+.k-footer {
+  flex: none;
+  padding: 4px var(--k-gap) 6px;
+  border-top: 3px solid var(--border-subtle);
+  font-size: var(--k-font-small);
+  color: var(--fg-2);
+}
+
+.k-shortcuts {
+  margin: 0;
+  font-weight: 800;
+}
+
+.k-shortcuts kbd {
+  font-size: 0.9em;
+  font-weight: 900;
+  color: var(--fg);
+}
+
+.k-keys-short {
+  display: none;
+}
+
+.k-busy:empty {
+  display: none;
+}
+
+/* ------------------------------------------------------------------ responsive */
+
+@media (max-width: 1100px) {
+  .k-demo-chip {
+    display: none;
+  }
+}
+
+@media (max-width: 900px) {
+  .k-brand {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+  }
+
+}
+
+@media (max-width: 1279px) {
+  .k-keys-long {
+    display: none;
+  }
+
+  .k-keys-short {
+    display: inline;
+  }
+}
+
+/* Stacked layout: portrait, narrow, or short landscape screens. */
+@media (orientation: portrait), (max-width: 1099px), (max-height: 640px) {
+  /* The status column shrinks (and scrolls inside) before the buttons ever do. */
+  .k-main {
+    display: flex;
+    flex-direction: column;
+    min-height: calc(var(--k-btn-min-h) * 2 + 100px);
+  }
+
+  .k-status {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+  }
+
+  .k-actions {
+    flex: none;
+  }
+
+  .status-detail {
+    flex-basis: auto;
+  }
+}
+
+@media (orientation: portrait) {
+  .kiosk {
+    --k-btn-min-h: clamp(96px, 11vh, 160px);
+  }
+
+  .k-main {
+    min-height: calc(var(--k-btn-min-h) * 3 + 120px);
+  }
+}
+
+/* Landscape stacked: one wide row of 3 buttons per line, icon above the label. */
+@media (orientation: landscape) and (max-width: 1099px), (orientation: landscape) and (max-height: 640px) {
+  .kiosk {
+    --k-btn-min-h: 96px;
+  }
+
+  .k-buttons {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .k-btn {
+    flex-direction: column;
+    gap: 2px;
+  }
+}
+
+/* Short screens: the caption label is kept for screen readers only. */
+@media (max-height: 640px) {
+  .k-header {
+    padding-top: 2px;
+    padding-bottom: 2px;
+  }
+
+  .k-small-btn {
+    min-height: 44px;
+  }
+
+  .k-footer {
+    padding-top: 2px;
+    padding-bottom: 3px;
+  }
+
+  .k-main {
+    padding-top: 6px;
+    padding-bottom: 6px;
+  }
+
+  .status-banner {
+    padding: 2px 0.3em;
+    border-width: 5px;
+  }
+
+  .caption-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+  }
+
+  .caption-box {
+    padding-top: 4px;
+  }
+
+  .k-busy {
+    margin: 4px 0 0;
+  }
+}
+
+@media (max-height: 520px) {
+  .dose-detail {
+    display: none !important;
+  }
+}
+
+@media (forced-colors: active) {
+  .status-banner,
+  .k-btn,
+  .k-small-btn {
+    border-color: CanvasText;
+    border-image: none;
+  }
+
+  .k-btn.is-suggested {
+    border-color: Highlight;
+  }
+}

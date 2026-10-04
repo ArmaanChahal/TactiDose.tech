@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+# Compile-check the TactiDose reference firmware for a real ESP32 with arduino-cli, inside Docker.
+# Builds both driver variants (DRIVER_STEP_DIR and DRIVER_ULN2003) with all warnings enabled.
+#
+#   bash firmware/compile_esp32.sh           Linux / macOS / WSL / Git Bash
+#   firmware\compile_esp32.ps1               Windows PowerShell (can export a corporate root CA)
+#
+# Environment (all optional):
+#   FQBN                      board, default esp32:esp32:esp32 ("ESP32 Dev Module")
+#   ESP32_CORE_VERSION        pin the esp32 core, e.g. 3.3.12 (default: latest)
+#   TACTIDOSE_EXTRA_CA_CERT   PEM file with an extra root CA, needed behind a TLS-inspecting proxy
+#                             (symptom: "SSL certificate problem: unable to get local issuer certificate")
+#   TACTIDOSE_ARDUINO_IMAGE   Docker image, default python:3.12 (needs bash, curl, python3)
+#   TACTIDOSE_ARDUINO_VOLUME  cache volume, default tactidose-arduino
+#
+# The first run downloads arduino-cli, the ESP32 core and toolchains (~1 GB) and the AccelStepper +
+# ESP32Servo libraries into the Docker volume; later runs only compile.
+set -euo pipefail
+
+if [ "${1:-}" != "--in-container" ]; then
+  here=$(cd "$(dirname "$0")" && pwd)
+  image="${TACTIDOSE_ARDUINO_IMAGE:-python:3.12}"
+  volume="${TACTIDOSE_ARDUINO_VOLUME:-tactidose-arduino}"
+  windows=0
+  case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) windows=1 ;; esac
+  src="$here"
+  if [ "$windows" = 1 ]; then
+    src=$(cd "$here" && pwd -W)
+    export MSYS_NO_PATHCONV=1 # keep "/fw" etc. as they are
+  fi
+  args=(run --rm -v "$volume:/arduino" -v "$src:/fw:ro" -e FQBN -e ESP32_CORE_VERSION)
+  if [ -n "${TACTIDOSE_EXTRA_CA_CERT:-}" ]; then
+    ca="$TACTIDOSE_EXTRA_CA_CERT"
+    [ "$windows" = 1 ] && ca="$(cd "$(dirname "$ca")" && pwd -W)/$(basename "$ca")"
+    args+=(-v "$ca:/ca/extra-ca.pem:ro")
+  fi
+  exec docker "${args[@]}" "$image" bash /fw/compile_esp32.sh --in-container
+fi
+
+# ------------------------------------------------------------------ inside the container
+FQBN="${FQBN:-esp32:esp32:esp32}"
+if [ -f /ca/extra-ca.pem ]; then
+  cp /ca/extra-ca.pem /usr/local/share/ca-certificates/tactidose-extra-ca.crt
+  update-ca-certificates >/dev/null 2>&1
+fi
+export ARDUINO_DIRECTORIES_DATA=/arduino/data
+export ARDUINO_DIRECTORIES_DOWNLOADS=/arduino/downloads
+export ARDUINO_DIRECTORIES_USER=/arduino/user
+export ARDUINO_BOARD_MANAGER_ADDITIONAL_URLS=https://espressif.github.io/arduino-esp32/package_esp32_index.json
+cli=/arduino/bin/arduino-cli
+if [ ! -x "$cli" ]; then
+  mkdir -p /arduino/bin
+  curl -fsSL https://downloads.arduino.cc/arduino-cli/arduino-cli_latest_Linux_64bit.tar.gz |
+    tar -xz -C /arduino/bin arduino-cli
+fi
+"$cli" version
+"$cli" core update-index
+"$cli" core install "esp32:esp32${ESP32_CORE_VERSION:+@$ESP32_CORE_VERSION}"
+"$cli" lib update-index
+"$cli" lib install AccelStepper ESP32Servo
+"$cli" core list
+"$cli" lib list
+
+rm -rf /tmp/sketch
+mkdir -p /tmp/sketch
+cp -r /fw/tactidose_esp32 /tmp/sketch/
+status=0
+for variant in STEP_DIR ULN2003; do
+  props=()
+  [ "$variant" = ULN2003 ] && props=(--build-property "compiler.cpp.extra_flags=-DDRIVER_TYPE=2")
+  echo "=== $FQBN, DRIVER_TYPE=DRIVER_$variant ==="
+  log="/tmp/compile-$variant.log"
+  if ! "$cli" compile --fqbn "$FQBN" --warnings all --build-path "/tmp/build-$variant" "${props[@]}" \
+      /tmp/sketch/tactidose_esp32 2>&1 | tee "$log"; then
+    status=1
+  fi
+  # Warnings that point into the sketch (our code), as opposed to the core or the libraries.
+  ours=$(grep -E "(/sketch/|tactidose_esp32/)[^ :]*:[0-9]+(:[0-9]+)?: warning:" "$log" || true)
+  echo "=== DRIVER_$variant: $(printf '%s' "$ours" | grep -c . || true) warning(s) in sketch files ==="
+  [ -n "$ours" ] && printf '%s\n' "$ours"
+done
+exit "$status"

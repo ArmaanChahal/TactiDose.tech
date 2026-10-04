@@ -1,0 +1,226 @@
+/*
+ * ArduinoHal.cpp -- tactidose::Hal on a real ESP32 (AccelStepper + ESP32Servo).
+ *
+ * REFERENCE FIRMWARE for a hackathon prototype -- adapt config.h to your wiring.
+ * NOT a medical device: candy/tokens only.
+ */
+#if defined(ARDUINO)
+
+#include "ArduinoHal.h"
+
+#include "config.h"
+
+#ifndef ALLOW_STRAPPING_PINS
+/* 1 = permit strapping pins (0, 2, 5, 12, 15) for motor/servo signals. Only if you have no
+ * alternative and have checked that the boot-time level/toggling on that pin is harmless. */
+#define ALLOW_STRAPPING_PINS 0
+#endif
+
+/* ------------------------------------------------------------------ compile-time pin checks */
+
+#if defined(CONFIG_IDF_TARGET_ESP32) /* classic ESP32 (ESP32-WROOM/WROVER, "ESP32 Dev Module") */
+namespace {
+constexpr bool isFlashPin(int p) { return p >= 6 && p <= 11; }
+constexpr bool isInputOnly(int p) { return p >= 34 && p <= 39; }
+constexpr bool isStrapping(int p) { return p == 0 || p == 2 || p == 5 || p == 12 || p == 15; }
+constexpr bool isUart0(int p) { return p == 1 || p == 3; }
+constexpr bool okOutput(int p) { return p < 0 || (p <= 39 && !isFlashPin(p) && !isInputOnly(p) && !isUart0(p)); }
+constexpr bool okCriticalOutput(int p) {
+  return okOutput(p) && (ALLOW_STRAPPING_PINS != 0 || p < 0 || !isStrapping(p));
+}
+constexpr bool okInput(int p, bool pullup) {
+  return p < 0 || (p <= 39 && !isFlashPin(p) && !isUart0(p) && !(pullup && isInputOnly(p)));
+}
+
+constexpr int kUsedPins[] = {
+#if DRIVER_TYPE == DRIVER_STEP_DIR
+    PIN_STEP, PIN_DIR, PIN_ENABLE,
+#else
+    PIN_IN1, PIN_IN2, PIN_IN3, PIN_IN4,
+#endif
+    PIN_SERVO,
+#if HAS_HOME_SENSOR
+    PIN_HOME_SENSOR,
+#endif
+    PIN_CONFIRM_BUTTON, PIN_CANCEL_BUTTON, PIN_STATUS_LED};
+constexpr int kUsedPinCount = static_cast<int>(sizeof(kUsedPins) / sizeof(kUsedPins[0]));
+constexpr bool pinsDistinct(int i, int j) {
+  return i >= kUsedPinCount   ? true
+         : j >= kUsedPinCount ? pinsDistinct(i + 1, i + 2)
+         : (kUsedPins[i] >= 0 && kUsedPins[i] == kUsedPins[j]) ? false
+                                                                : pinsDistinct(i, j + 1);
+}
+}  // namespace
+
+#if DRIVER_TYPE == DRIVER_STEP_DIR
+static_assert(PIN_STEP >= 0 && PIN_DIR >= 0, "PIN_STEP and PIN_DIR are required");
+static_assert(okCriticalOutput(PIN_STEP) && okCriticalOutput(PIN_DIR) && okCriticalOutput(PIN_ENABLE),
+              "STEP/DIR/ENABLE pin: not 6-11 (flash), 34-39 (input-only), 1/3 (USB serial) or a strapping pin "
+              "0/2/5/12/15 (set ALLOW_STRAPPING_PINS 1 to override)");
+#else
+static_assert(PIN_IN1 >= 0 && PIN_IN2 >= 0 && PIN_IN3 >= 0 && PIN_IN4 >= 0, "PIN_IN1..PIN_IN4 are required");
+static_assert(okCriticalOutput(PIN_IN1) && okCriticalOutput(PIN_IN2) && okCriticalOutput(PIN_IN3) &&
+                  okCriticalOutput(PIN_IN4),
+              "ULN2003 IN1..IN4 pin: not 6-11 (flash), 34-39 (input-only), 1/3 (USB serial) or a strapping pin "
+              "0/2/5/12/15 (set ALLOW_STRAPPING_PINS 1 to override)");
+#endif
+static_assert(PIN_SERVO >= 0 && okCriticalOutput(PIN_SERVO),
+              "PIN_SERVO: not 6-11, 34-39, 1/3 or a strapping pin (the gate could twitch open during boot)");
+static_assert(okOutput(PIN_STATUS_LED), "PIN_STATUS_LED: not 6-11 (flash), 34-39 (input-only) or 1/3");
+#if HAS_HOME_SENSOR
+static_assert(PIN_HOME_SENSOR >= 0 && okInput(PIN_HOME_SENSOR, HOME_SENSOR_PULLUP != 0),
+              "PIN_HOME_SENSOR: not 6-11 or 1/3; GPIO 34-39 have no internal pull-up (set HOME_SENSOR_PULLUP 0 "
+              "and fit an external 10k pull-up)");
+#endif
+static_assert(PIN_CONFIRM_BUTTON >= 0 && okInput(PIN_CONFIRM_BUTTON, BUTTON_PULLUP != 0),
+              "PIN_CONFIRM_BUTTON: required; not 6-11 or 1/3; GPIO 34-39 need BUTTON_PULLUP 0 + external pull-up");
+static_assert(okInput(PIN_CANCEL_BUTTON, BUTTON_PULLUP != 0),
+              "PIN_CANCEL_BUTTON: not 6-11 or 1/3; GPIO 34-39 need BUTTON_PULLUP 0 + external pull-up");
+static_assert(pinsDistinct(0, 1), "two functions share one GPIO in config.h");
+#endif  // CONFIG_IDF_TARGET_ESP32 (other variants: re-check the pin plan by hand)
+
+/* ------------------------------------------------------------------ construction */
+
+#if DRIVER_TYPE == DRIVER_STEP_DIR
+ArduinoHal::ArduinoHal() : stepper_(AccelStepper::DRIVER, PIN_STEP, PIN_DIR, 0xff, 0xff, false), ledOn_(false) {}
+#elif DIR_INVERT
+/* Reversed coil order = reversed rotation. */
+ArduinoHal::ArduinoHal()
+    : stepper_(AccelStepper::HALF4WIRE, PIN_IN4, PIN_IN2, PIN_IN3, PIN_IN1, false), ledOn_(false) {}
+#else
+/* AccelStepper needs the 28BYJ-48 coils in the order IN1, IN3, IN2, IN4. */
+ArduinoHal::ArduinoHal()
+    : stepper_(AccelStepper::HALF4WIRE, PIN_IN1, PIN_IN3, PIN_IN2, PIN_IN4, false), ledOn_(false) {}
+#endif
+
+void ArduinoHal::begin() {
+  /* 1. Motor outputs to a defined, released state before anything else. */
+#if DRIVER_TYPE == DRIVER_STEP_DIR
+  pinMode(PIN_STEP, OUTPUT);
+  digitalWrite(PIN_STEP, LOW);
+  pinMode(PIN_DIR, OUTPUT);
+  digitalWrite(PIN_DIR, LOW);
+#if PIN_ENABLE >= 0
+  stepper_.setEnablePin(PIN_ENABLE);
+#endif
+  stepper_.setPinsInverted(DIR_INVERT != 0, false, ENABLE_ACTIVE_LOW != 0);
+  stepper_.setMinPulseWidth(STEP_PULSE_US);
+#else
+  const uint8_t coils[] = {PIN_IN1, PIN_IN2, PIN_IN3, PIN_IN4};
+  for (uint8_t pin : coils) {
+    pinMode(pin, OUTPUT);
+    digitalWrite(pin, LOW);
+  }
+#endif
+  stepper_.disableOutputs();
+
+  /* 2. Gate servo: command CLOSED right away; the core waits GATE_TRAVEL_MS before EVENT BOOT. */
+  ESP32PWM::allocateTimer(0);
+  servo_.setPeriodHertz(50);
+  servo_.attach(PIN_SERVO, SERVO_MIN_PULSE_US, SERVO_MAX_PULSE_US);
+  servo_.write(SERVO_CLOSED_DEG);
+
+  /* 3. Inputs. */
+#if HAS_HOME_SENSOR
+  pinMode(PIN_HOME_SENSOR, HOME_SENSOR_PULLUP ? INPUT_PULLUP : INPUT);
+#endif
+  pinMode(PIN_CONFIRM_BUTTON, BUTTON_PULLUP ? INPUT_PULLUP : INPUT);
+#if PIN_CANCEL_BUTTON >= 0
+  pinMode(PIN_CANCEL_BUTTON, BUTTON_PULLUP ? INPUT_PULLUP : INPUT);
+#endif
+#if PIN_STATUS_LED >= 0
+  pinMode(PIN_STATUS_LED, OUTPUT);
+  digitalWrite(PIN_STATUS_LED, LOW);
+#endif
+
+  /* 4. Host link. A large TX buffer keeps Serial.println from blocking loop() (and the stepper). */
+#if !ARDUINO_USB_CDC_ON_BOOT
+  Serial.setTxBufferSize(512);
+#endif
+  Serial.begin(SERIAL_BAUD);
+}
+
+void ArduinoHal::showState(tactidose::DeviceState state) {
+#if PIN_STATUS_LED >= 0
+  const uint32_t now = ::millis();
+  bool on;
+  switch (state) {
+    case tactidose::DeviceState::kReady:
+    case tactidose::DeviceState::kGateOpen:
+      on = true;
+      break;
+    case tactidose::DeviceState::kFault:
+      on = (now / 125U) % 2U == 0U;
+      break;
+    case tactidose::DeviceState::kHoming:
+    case tactidose::DeviceState::kMoving:
+    case tactidose::DeviceState::kAtTarget:
+      on = (now / 500U) % 2U == 0U;
+      break;
+    default: /* BOOT, SAFE_STOP: short blip once a second */
+      on = (now % 1000U) < 100U;
+      break;
+  }
+  if (on != ledOn_) {
+    ledOn_ = on;
+    digitalWrite(PIN_STATUS_LED, on ? HIGH : LOW);
+  }
+#else
+  (void)state;
+#endif
+}
+
+/* ------------------------------------------------------------------ tactidose::Hal */
+
+uint32_t ArduinoHal::millis() { return static_cast<uint32_t>(::millis()); }
+
+void ArduinoHal::stepperSetMaxSpeed(float stepsPerSecond) { stepper_.setMaxSpeed(stepsPerSecond); }
+
+void ArduinoHal::stepperSetAcceleration(float stepsPerSecondSquared) {
+  stepper_.setAcceleration(stepsPerSecondSquared);
+}
+
+void ArduinoHal::stepperMoveTo(long absolutePosition) { stepper_.moveTo(absolutePosition); }
+
+bool ArduinoHal::stepperRun() { return stepper_.run(); }
+
+long ArduinoHal::stepperDistanceToGo() { return stepper_.distanceToGo(); }
+
+/* AccelStepper::stop() decelerates; an emergency stop must not take more steps. */
+void ArduinoHal::stepperStop() { stepper_.setCurrentPosition(stepper_.currentPosition()); }
+
+long ArduinoHal::stepperCurrentPosition() { return stepper_.currentPosition(); }
+
+void ArduinoHal::stepperSetCurrentPosition(long position) { stepper_.setCurrentPosition(position); }
+
+void ArduinoHal::stepperEnable(bool on) {
+  if (on) {
+    stepper_.enableOutputs();
+  } else {
+    stepper_.disableOutputs();
+  }
+}
+
+void ArduinoHal::servoWrite(uint8_t degrees) { servo_.write(degrees); }
+
+bool ArduinoHal::homeSensorActive() {
+#if HAS_HOME_SENSOR
+  const int level = digitalRead(PIN_HOME_SENSOR);
+  return HOME_SENSOR_ACTIVE_LOW ? level == LOW : level == HIGH;
+#else
+  return false;
+#endif
+}
+
+bool ArduinoHal::buttonPressed(tactidose::Button button) {
+  const int pin = button == tactidose::Button::kConfirm ? PIN_CONFIRM_BUTTON : PIN_CANCEL_BUTTON;
+  if (pin < 0) return false;
+  const int level = digitalRead(pin);
+  return BUTTON_ACTIVE_LOW ? level == LOW : level == HIGH;
+}
+
+int ArduinoHal::serialRead() { return Serial.read(); /* -1 when nothing is waiting */ }
+
+void ArduinoHal::serialWriteLine(const char* line) { Serial.println(line); }
+
+#endif  // ARDUINO

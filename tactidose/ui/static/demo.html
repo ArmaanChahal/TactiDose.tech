@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <title>TactiDose — Demo operator panel</title>
+  <link rel="icon" href="/static/img/favicon.svg" type="image/svg+xml">
+  <script src="/static/js/theme-init.js"></script>
+  <link rel="stylesheet" href="/static/css/base.css">
+  <link rel="stylesheet" href="/static/css/demo.css">
+  <script type="module" src="/static/js/demo.js"></script>
+</head>
+<body class="demo">
+  <a class="skip-link" href="#main">Skip to content</a>
+
+  <header class="app-header">
+    <p class="brand"><span class="brand-name">TactiDose</span> <span class="brand-sub">Demo operator panel</span></p>
+    <nav class="app-nav" aria-label="Pages">
+      <a href="/">Kiosk</a>
+      <a href="/caregiver">Caregiver setup</a>
+    </nav>
+    <div class="header-tools">
+      <span id="conn" class="conn conn-connecting" role="status">Connecting…</span>
+      <span id="mode-badge" class="badge tone-neutral">Mode: …</span>
+      <button type="button" id="theme-toggle" class="btn btn-small">Theme: dark</button>
+    </div>
+  </header>
+
+  <main id="main" class="demo-main">
+    <h1 class="visually-hidden">Demo operator panel</h1>
+    <p class="proto-note"><span class="icon-slot" data-icon="info"></span> For the demo operator. Use candy or tokens only. These controls simulate voice, buttons and faults — they never bypass the backend's dose rules except the raw hardware console, which talks to the device directly.</p>
+    <div id="notices" class="notices"></div>
+
+    <div class="demo-grid">
+      <!-- ======================================================== simulated voice -->
+      <section class="card" aria-labelledby="voice-title">
+        <h2 id="voice-title"><span class="icon-slot" data-icon="mic"></span> Simulated voice</h2>
+        <form id="voice-form" class="inline-form">
+          <label for="voice-text">Say (typed)</label>
+          <div class="inline-row">
+            <input id="voice-text" type="text" autocomplete="off" maxlength="200" placeholder="What do I take now?">
+            <button type="submit" class="btn btn-primary">Send</button>
+          </div>
+        </form>
+        <div class="phrases" role="group" aria-label="Quick phrases">
+          <button type="button" class="btn btn-small" data-phrase="What do I take now?">What do I take now?</button>
+          <button type="button" class="btn btn-small" data-phrase="Dispense">Dispense</button>
+          <button type="button" class="btn btn-small" data-phrase="Taken">Taken</button>
+          <button type="button" class="btn btn-small" data-phrase="Repeat">Repeat</button>
+          <button type="button" class="btn btn-small" data-phrase="Cancel">Cancel</button>
+          <button type="button" class="btn btn-small" data-phrase="Help">Help</button>
+          <button type="button" class="btn btn-small" data-phrase="I haven't taken it">I haven't taken it</button>
+        </div>
+        <div id="voice-reply" class="reply" role="status"></div>
+      </section>
+
+      <!-- ======================================================== transcript -->
+      <section class="card" aria-labelledby="transcript-title">
+        <div class="card-head">
+          <h2 id="transcript-title"><span class="icon-slot" data-icon="list"></span> Live transcript</h2>
+          <button type="button" id="transcript-clear" class="btn btn-small">Clear</button>
+        </div>
+        <ol id="transcript" class="transcript" tabindex="0" aria-labelledby="transcript-title"></ol>
+      </section>
+
+      <!-- ======================================================== simulator -->
+      <section class="card" aria-labelledby="sim-title">
+        <h2 id="sim-title"><span class="icon-slot" data-icon="gate"></span> Simulator</h2>
+        <p id="sim-unavailable" class="state-msg" hidden>The simulator is not available: the server is not in simulator mode (TACTIDOSE_HARDWARE_MODE=sim).</p>
+        <div class="sim-layout">
+          <figure class="sim-figure">
+            <div id="sim-carousel"></div>
+            <figcaption id="sim-caption" class="carousel-caption" aria-live="polite"></figcaption>
+          </figure>
+          <div class="sim-controls">
+            <dl id="sim-physical" class="facts"></dl>
+            <fieldset id="sim-faults" class="faults">
+              <legend>Fault injection</legend>
+            </fieldset>
+            <div class="btn-row">
+              <button type="button" id="sim-press-confirm" class="btn">Press CONFIRM button</button>
+              <button type="button" id="sim-press-cancel" class="btn">Press CANCEL button</button>
+              <button type="button" id="sim-reboot" class="btn">Reboot device</button>
+            </div>
+            <p id="sim-status" class="muted" role="status"></p>
+          </div>
+        </div>
+      </section>
+
+      <!-- ======================================================== hardware console -->
+      <section class="card" aria-labelledby="hw-title">
+        <h2 id="hw-title"><span class="icon-slot" data-icon="terminal"></span> Hardware console</h2>
+        <form id="hw-form" class="inline-form">
+          <label for="hw-line">Protocol command</label>
+          <div class="inline-row">
+            <input id="hw-line" type="text" class="mono" list="hw-commands" autocomplete="off" maxlength="64" spellcheck="false" placeholder="MOVE_SLOT 3">
+            <button type="submit" class="btn btn-primary">Send</button>
+          </div>
+          <datalist id="hw-commands">
+            <option value="PING"></option>
+            <option value="STATUS"></option>
+            <option value="HOME"></option>
+            <option value="MOVE_SLOT 0"></option>
+            <option value="MOVE_SLOT 3"></option>
+            <option value="DISPENSE_SLOT 2"></option>
+            <option value="OPEN_GATE"></option>
+            <option value="CLOSE_GATE"></option>
+            <option value="STOP"></option>
+          </datalist>
+        </form>
+        <div class="btn-row hw-quick" role="group" aria-label="Quick commands">
+          <button type="button" class="btn btn-small mono" data-line="PING">PING</button>
+          <button type="button" class="btn btn-small mono" data-line="STATUS">STATUS</button>
+          <button type="button" class="btn btn-small mono" data-line="HOME">HOME</button>
+          <button type="button" class="btn btn-small mono" data-line="CLOSE_GATE">CLOSE_GATE</button>
+          <button type="button" id="hw-stop" class="btn btn-small btn-danger"><span class="icon-slot" data-icon="stop"></span> STOP</button>
+        </div>
+        <div id="hw-result" class="hw-result" role="status"></div>
+        <div class="log-head">
+          <h3 id="hw-log-title">Serial log</h3>
+          <div class="btn-row">
+            <div class="check-row">
+              <input type="checkbox" id="hw-hide-hb" checked>
+              <label for="hw-hide-hb">Hide heartbeat</label>
+            </div>
+            <button type="button" id="hw-pause" class="btn btn-small" aria-pressed="false">Pause</button>
+            <button type="button" id="hw-clear" class="btn btn-small">Clear</button>
+          </div>
+        </div>
+        <ol id="hw-log" class="line-log" tabindex="0" aria-labelledby="hw-log-title"></ol>
+      </section>
+
+      <!-- ======================================================== demo clock -->
+      <section class="card" aria-labelledby="clock-title">
+        <h2 id="clock-title"><span class="icon-slot" data-icon="clock"></span> Demo clock</h2>
+        <p id="clock-time" class="clock-time">--:--</p>
+        <p id="clock-meta" class="muted"></p>
+        <form id="clock-form" class="inline-form">
+          <label for="clock-set">Travel to time</label>
+          <div class="inline-row">
+            <input type="time" id="clock-set" step="60" required>
+            <button type="submit" class="btn">Go</button>
+          </div>
+        </form>
+        <div class="btn-row">
+          <button type="button" id="clock-plus15" class="btn">+15 min</button>
+          <button type="button" id="clock-plus60" class="btn">+60 min</button>
+          <button type="button" id="clock-next" class="btn btn-primary">Jump to next dose</button>
+          <button type="button" id="clock-reset" class="btn">Reset to real time</button>
+        </div>
+        <p id="clock-status" class="muted" role="status"></p>
+      </section>
+
+      <!-- ======================================================== demo data -->
+      <section class="card" aria-labelledby="data-title">
+        <h2 id="data-title"><span class="icon-slot" data-icon="calendar"></span> Demo data</h2>
+        <div class="field">
+          <label for="dose-med">Medication for the dose</label>
+          <select id="dose-med"></select>
+        </div>
+        <div class="btn-row">
+          <button type="button" id="dose-now" class="btn btn-primary">Create dose due now</button>
+          <button type="button" id="demo-seed" class="btn">Seed demo data</button>
+        </div>
+        <p id="dose-now-result" class="data-result" role="status"></p>
+        <div class="reset-box">
+          <div class="check-row">
+            <input type="checkbox" id="reset-reseed" checked>
+            <label for="reset-reseed">Re-seed demo medications after reset</label>
+          </div>
+          <button type="button" id="demo-reset" class="btn btn-danger">Reset demo data…</button>
+        </div>
+      </section>
+
+      <!-- ======================================================== scripted flows -->
+      <section class="card wide" aria-labelledby="flows-title">
+        <h2 id="flows-title"><span class="icon-slot" data-icon="play"></span> Scripted demo flows (handoff §25)</h2>
+        <p class="muted">Each checklist calls the real APIs in order and ticks the steps off. Steps marked "your turn" wait for the operator — a person always confirms label data.</p>
+        <div id="flows" class="flows"></div>
+      </section>
+
+      <!-- ======================================================== raw state -->
+      <section class="card wide" aria-labelledby="state-title">
+        <h2 id="state-title"><span class="icon-slot" data-icon="terminal"></span> Raw state</h2>
+        <div class="filter-row">
+          <label for="state-source">Show</label>
+          <select id="state-source"></select>
+          <button type="button" id="state-refresh" class="btn btn-small">Refresh</button>
+          <div class="check-row">
+            <input type="checkbox" id="state-auto" checked>
+            <label for="state-auto">Refresh on live events</label>
+          </div>
+        </div>
+        <pre id="state-json" class="json" tabindex="0" aria-label="Raw JSON"></pre>
+      </section>
+    </div>
+  </main>
+
+  <footer class="app-footer">
+    <p>TactiDose.tech demo panel · hackathon prototype · not a medical device.</p>
+  </footer>
+</body>
+</html>
