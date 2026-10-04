@@ -16,7 +16,7 @@ Endpoints of the ESP32 (2026-10-04) and what uses them:
 from __future__ import annotations
 
 #: The ESP32's static IP address. ``TACTIDOSE_ESP32_URL`` in .env overrides it (e.g. another board).
-ESP32_BASE_URL = "http://172.20.10.9"
+ESP32_BASE_URL = "http://192.168.4.1"
 
 #: HTTP method of every request (the endpoints work from a browser address bar, so GET).
 METHOD = "GET"
