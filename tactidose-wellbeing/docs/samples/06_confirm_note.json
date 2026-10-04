@@ -1,0 +1,56 @@
+{
+  "method": "POST",
+  "path": "/v1/sessions/ses_00000000000000000000000000000001/actions",
+  "status": 200,
+  "headers": {
+    "X-Dev-User-Id": "synthetic-user-001"
+  },
+  "request": {
+    "schema_version": "1.0",
+    "request_id": "req-0006",
+    "action": "confirm"
+  },
+  "response": {
+    "schema_version": "1.0",
+    "request_id": "req-0006",
+    "session_id": "ses_00000000000000000000000000000001",
+    "user_id": "synthetic-user-001",
+    "action": "confirm",
+    "session_status": "awaiting_answer",
+    "step": 5,
+    "storage_mode": "save",
+    "next_question": {
+      "kind": "question",
+      "question_id": "stress",
+      "prompt": "How is your stress level: low, medium, or high?",
+      "options": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "position": 2,
+      "total": 4
+    },
+    "speech_text": "Your note is kept with your answer. How is your stress level: low, medium, or high?",
+    "pending_input": null,
+    "confirmed_answers": [
+      {
+        "question_id": "mood",
+        "answer_value": "good",
+        "status": "answered",
+        "recorded_at": "2026-01-15T09:00:20Z",
+        "note_text": "Went for a walk in the park",
+        "note_recorded_at": "2026-01-15T09:00:30Z"
+      }
+    ],
+    "summary": null,
+    "support_requested": false,
+    "handoff": null,
+    "urgent_support": null,
+    "record_id": null,
+    "events": [],
+    "expires_at": "2026-01-15T09:30:30Z",
+    "idempotent_replay": false,
+    "error": null
+  }
+}

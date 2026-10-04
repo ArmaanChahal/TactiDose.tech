@@ -1,0 +1,16 @@
+{
+  "method": "DELETE",
+  "path": "/v1/me/history",
+  "status": 200,
+  "headers": {
+    "X-Dev-User-Id": "synthetic-user-001"
+  },
+  "request": null,
+  "response": {
+    "schema_version": "1.0",
+    "user_id": "synthetic-user-001",
+    "deleted_records": 1,
+    "deleted_notes": 0,
+    "speech_text": "I deleted 1 saved check-in, including any notes."
+  }
+}

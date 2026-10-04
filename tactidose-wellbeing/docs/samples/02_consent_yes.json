@@ -1,0 +1,48 @@
+{
+  "method": "POST",
+  "path": "/v1/sessions/ses_00000000000000000000000000000001/actions",
+  "status": 200,
+  "headers": {
+    "X-Dev-User-Id": "synthetic-user-001"
+  },
+  "request": {
+    "schema_version": "1.0",
+    "request_id": "req-0002",
+    "action": "answer",
+    "answer": "yes"
+  },
+  "response": {
+    "schema_version": "1.0",
+    "request_id": "req-0002",
+    "session_id": "ses_00000000000000000000000000000001",
+    "user_id": "synthetic-user-001",
+    "action": "answer",
+    "session_status": "awaiting_answer",
+    "step": 1,
+    "storage_mode": "save",
+    "next_question": {
+      "kind": "question",
+      "question_id": "mood",
+      "prompt": "How is your mood today: good, okay, or low?",
+      "options": [
+        "good",
+        "okay",
+        "low"
+      ],
+      "position": 1,
+      "total": 4
+    },
+    "speech_text": "Thank you. When you finish, your answers and any notes you add will be saved so you can review or delete them later. How is your mood today: good, okay, or low?",
+    "pending_input": null,
+    "confirmed_answers": [],
+    "summary": null,
+    "support_requested": false,
+    "handoff": null,
+    "urgent_support": null,
+    "record_id": null,
+    "events": [],
+    "expires_at": "2026-01-15T09:30:10Z",
+    "idempotent_replay": false,
+    "error": null
+  }
+}

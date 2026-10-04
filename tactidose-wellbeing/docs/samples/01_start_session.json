@@ -1,0 +1,53 @@
+{
+  "method": "POST",
+  "path": "/v1/sessions",
+  "status": 201,
+  "headers": {
+    "X-Dev-User-Id": "synthetic-user-001"
+  },
+  "request": {
+    "schema_version": "1.0",
+    "request_id": "req-0001"
+  },
+  "response": {
+    "schema_version": "1.0",
+    "request_id": "req-0001",
+    "session_id": "ses_00000000000000000000000000000001",
+    "user_id": "synthetic-user-001",
+    "action": "start",
+    "session_status": "awaiting_consent",
+    "step": 0,
+    "storage_mode": "undecided",
+    "next_question": {
+      "kind": "consent",
+      "question_id": null,
+      "prompt": "This is an optional well-being check-in. It is not a medical assessment, and it does not affect your medications. You can skip any question, or say cancel at any time. Would you like me to save your answers, including any notes you add to explain them, so you can review them later? Say yes to save them, or no to keep them for this session only.",
+      "options": [
+        "yes",
+        "no"
+      ],
+      "position": null,
+      "total": 4
+    },
+    "speech_text": "This is an optional well-being check-in. It is not a medical assessment, and it does not affect your medications. You can skip any question, or say cancel at any time. Would you like me to save your answers, including any notes you add to explain them, so you can review them later? Say yes to save them, or no to keep them for this session only.",
+    "pending_input": null,
+    "confirmed_answers": [],
+    "summary": null,
+    "support_requested": false,
+    "handoff": null,
+    "urgent_support": null,
+    "record_id": null,
+    "events": [
+      {
+        "event_id": "evt_05e8033eba8056e49646fbc9bd4681b5",
+        "type": "checkin.started",
+        "session_id": "ses_00000000000000000000000000000001",
+        "occurred_at": "2026-01-15T09:00:05Z",
+        "data": {}
+      }
+    ],
+    "expires_at": "2026-01-15T09:30:05Z",
+    "idempotent_replay": false,
+    "error": null
+  }
+}

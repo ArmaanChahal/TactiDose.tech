@@ -1,0 +1,54 @@
+{
+  "method": "POST",
+  "path": "/v1/sessions/ses_00000000000000000000000000000001/actions",
+  "status": 200,
+  "headers": {
+    "X-Dev-User-Id": "synthetic-user-001"
+  },
+  "request": {
+    "schema_version": "1.0",
+    "request_id": "req-0013",
+    "action": "finish"
+  },
+  "response": {
+    "schema_version": "1.0",
+    "request_id": "req-0013",
+    "session_id": "ses_00000000000000000000000000000001",
+    "user_id": "synthetic-user-001",
+    "action": "finish",
+    "session_status": "completed",
+    "step": 10,
+    "storage_mode": "save",
+    "next_question": null,
+    "speech_text": "Thank you. Your check-in is saved with 3 answered questions. You can ask to hear or delete your saved check-ins at any time. You asked for support from a person. I can't contact anyone myself, but your TactiDose app can help you choose how to reach someone.",
+    "pending_input": null,
+    "confirmed_answers": [],
+    "summary": null,
+    "support_requested": true,
+    "handoff": {
+      "type": "human_support",
+      "host_action_required": true,
+      "contacted_anyone": false,
+      "message": "I can't contact anyone myself, but your TactiDose app can help you choose how to reach someone."
+    },
+    "urgent_support": null,
+    "record_id": "rec_00000000000000000000000000000001",
+    "events": [
+      {
+        "event_id": "evt_3926856085725c0789f9d8b8178d3ed5",
+        "type": "checkin.completed",
+        "session_id": "ses_00000000000000000000000000000001",
+        "occurred_at": "2026-01-15T09:01:05Z",
+        "data": {
+          "saved": true,
+          "answered_count": 3,
+          "skipped_count": 1,
+          "support_requested": true
+        }
+      }
+    ],
+    "expires_at": "2026-01-15T09:31:05Z",
+    "idempotent_replay": false,
+    "error": null
+  }
+}

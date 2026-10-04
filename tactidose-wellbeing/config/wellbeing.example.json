@@ -1,0 +1,18 @@
+{
+  "_comment": "Example safety/support configuration. crisis_resources is intentionally empty: the deploying team must add verified, region-appropriate contacts. Do not copy contact details from this file into production without verification.",
+  "crisis_resources": [],
+  "urgent_phrases": [
+    "i want to die",
+    "i want to kill myself",
+    "kill myself",
+    "end my life",
+    "hurt myself",
+    "suicide",
+    "i am in danger",
+    "im in danger",
+    "i need emergency help"
+  ],
+  "urgent_support_message": "It sounds like you may need help right now. This check-in cannot contact anyone or monitor your safety. If you are in immediate danger, please contact your local emergency services or someone near you now.",
+  "no_resources_message": "No crisis contacts have been configured on this device.",
+  "support_handoff_message": "I can't contact anyone myself, but your TactiDose app can help you choose how to reach someone."
+}

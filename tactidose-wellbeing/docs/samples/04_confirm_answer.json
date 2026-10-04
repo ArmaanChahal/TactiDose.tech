@@ -1,0 +1,55 @@
+{
+  "method": "POST",
+  "path": "/v1/sessions/ses_00000000000000000000000000000001/actions",
+  "status": 200,
+  "headers": {
+    "X-Dev-User-Id": "synthetic-user-001"
+  },
+  "request": {
+    "schema_version": "1.0",
+    "request_id": "req-0004",
+    "action": "confirm"
+  },
+  "response": {
+    "schema_version": "1.0",
+    "request_id": "req-0004",
+    "session_id": "ses_00000000000000000000000000000001",
+    "user_id": "synthetic-user-001",
+    "action": "confirm",
+    "session_status": "awaiting_note_offer",
+    "step": 3,
+    "storage_mode": "save",
+    "next_question": {
+      "kind": "note_offer",
+      "question_id": "mood",
+      "prompt": "Would you like to share what is making you feel good? This is optional. You can tell me now, or say no to move on.",
+      "options": [
+        "yes",
+        "no"
+      ],
+      "position": 1,
+      "total": 4
+    },
+    "speech_text": "Got it: mood good. Would you like to share what is making you feel good? This is optional. You can tell me now, or say no to move on.",
+    "pending_input": null,
+    "confirmed_answers": [
+      {
+        "question_id": "mood",
+        "answer_value": "good",
+        "status": "answered",
+        "recorded_at": "2026-01-15T09:00:20Z",
+        "note_text": null,
+        "note_recorded_at": null
+      }
+    ],
+    "summary": null,
+    "support_requested": false,
+    "handoff": null,
+    "urgent_support": null,
+    "record_id": null,
+    "events": [],
+    "expires_at": "2026-01-15T09:30:20Z",
+    "idempotent_replay": false,
+    "error": null
+  }
+}
