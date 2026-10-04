@@ -199,7 +199,7 @@ class NativeTarget:
         )
         self._image = image or os.environ.get(ENV_IMAGE) or DEFAULT_IMAGE
         self._harness_args = [str(a) for a in harness_args]
-        self.speculate = speculate
+        self._speculate = speculate
         self._timeout_s = timeout_s
         self._startup_timeout_s = startup_timeout_s
         if self._command_override is None and not self.binary.is_file():
@@ -306,9 +306,35 @@ class NativeTarget:
     # ------------------------------------------------------------------ extensions (tests, debugging)
 
     @property
+    def speculate(self) -> bool:
+        """True: answer silent ticks locally using ``!peek`` (exact, fast). False: one round trip per call."""
+        return self._speculate
+
+    @speculate.setter
+    def speculate(self, on: bool) -> None:
+        self._speculate = bool(on)
+        self._silent_ms = 0  # a window computed under the other mode must not be reused
+
+    @property
     def now_ms(self) -> int:
         """Simulated time as seen by the caller (harness clock + locally accumulated ticks)."""
         return self._sim_ms + self._pending_ms
+
+    def configure(self, **settings: object) -> None:
+        """Firmware settings for the following ``boot()`` calls (harness ``!set``).
+
+        Keys are those of the harness ``--set`` option (``homeBackoffSteps``, ``homeOffsetSteps``,
+        ``verifySlot``, ``debugLog``, ``holdWhenIdle``, ``autoHome``, ``settleMs``, ``fw`` ...) plus
+        ``millisOffset``. Booleans are sent as 1/0. :meth:`restore_defaults` undoes them."""
+        directives = [
+            f"!set {key}={int(value) if isinstance(value, bool) else value}" for key, value in settings.items()
+        ]
+        if directives:
+            self._exchange(directives)
+
+    def restore_defaults(self) -> None:
+        """Back to the settings the harness was started with (``!defaults``)."""
+        self._exchange(["!defaults"])
 
     def send_raw(self, data: bytes) -> None:
         """Deliver raw serial bytes (no implicit newline), e.g. ``b"PING\\r"``."""
@@ -386,12 +412,15 @@ class NativeTarget:
         """Send directives, wait for one ``!ack`` each. Returns (device lines, harness lines)."""
         proc = self._ensure_started()
         assert proc.stdin is not None
-        payload = "".join(d + "\n" for d in directives).encode("latin-1")
+        payload = "".join(d + "\n" for d in directives).encode("utf-8")
         try:
             proc.stdin.write(payload)
             proc.stdin.flush()
         except OSError as exc:
-            raise HarnessError(f"cannot write to the native harness: {exc}{self._stderr_tail()}") from exc
+            code, detail = proc.poll(), self._stderr_tail()
+            self._abandon()
+            state = "is not accepting input" if code is None else f"exited (code {code})"
+            raise HarnessError(f"native harness {state}: {exc}{detail}") from exc
         self.round_trips += 1
         timeout = self._timeout_s if self._started else self._startup_timeout_s
         deadline = time.monotonic() + timeout
@@ -403,12 +432,19 @@ class NativeTarget:
             try:
                 line = self._lines.get(timeout=max(0.01, deadline - time.monotonic()))
             except queue.Empty:
+                detail = self._stderr_tail()
+                self._abandon()  # late acks would desynchronise every later exchange
                 raise HarnessError(
-                    f"native harness did not acknowledge {list(directives)!r} within {timeout:.0f} s"
-                    f"{self._stderr_tail()}"
+                    f"native harness did not acknowledge {list(directives)!r} within {timeout:.0f} s{detail}"
                 ) from None
-            if line is None:
-                raise HarnessError(f"native harness exited (code {proc.poll()}){self._stderr_tail()}")
+            if line is None:  # stdout closed: the process is exiting
+                try:
+                    code: int | None = proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    code = None
+                detail = self._stderr_tail()
+                self._abandon()
+                raise HarnessError(f"native harness exited (code {code}){detail}")
             if line.startswith("!ack"):
                 acks += 1
                 parts = line.split()
@@ -425,11 +461,32 @@ class NativeTarget:
             raise HarnessError(f"native harness rejected input: {errors}")
         return device, info
 
+    def _abandon(self) -> None:
+        """Drop a process that can no longer be trusted; the next call starts a fresh harness."""
+        proc, self._proc = self._proc, None
+        if proc is not None and proc.poll() is None:
+            proc.kill()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                log.warning("native harness process %s did not exit after kill", proc.pid)
+        if self._container:
+            try:
+                subprocess.run(["docker", "rm", "-f", self._container], capture_output=True, timeout=30, check=False)
+            except (OSError, subprocess.TimeoutExpired):
+                log.warning("could not remove container %s", self._container)
+            self._container = None
+        self._pending_ms = 0
+        self._silent_ms = 0
+        self._buffered.clear()
+
     def _ensure_started(self) -> subprocess.Popen[bytes]:
         if self._proc is not None:
             if self._proc.poll() is None:
                 return self._proc
-            raise HarnessError(f"native harness exited (code {self._proc.returncode}){self._stderr_tail()}")
+            code, detail = self._proc.returncode, self._stderr_tail()
+            self._abandon()
+            raise HarnessError(f"native harness exited (code {code}){detail}")
         cmd = self._command()
         shown = cmd if isinstance(cmd, str) else subprocess.list2cmdline(cmd)
         log.info("starting native firmware harness: %s", shown)

@@ -811,7 +811,7 @@ class HardwareClient:
                     for p in pendings:
                         self._fail(p, HostCode.DEVICE_RESET, f"{banner} while the command was in flight")
                     if was_connected:
-                        notices.append(("warning", "The dispenser restarted. It will home itself before the next dispense."))
+                        notices.append(("warning", "The dispenser restarted (reset or power dip) and is re-homing."))
                 dispatch.append(msg)
             else:
                 consumed = False

@@ -5,7 +5,7 @@
  */
 
 import { get, post } from '../api.js';
-import { byId, confirmDialog, errorState, errorText, h, replaceChildren } from '../dom.js';
+import { byId, confirmDialog, errorState, h, replaceChildren } from '../dom.js';
 import { icon } from '../icons.js';
 import { createLineLog } from '../linelog.js';
 import { commandResultBox, snapshotRows } from '../hwview.js';

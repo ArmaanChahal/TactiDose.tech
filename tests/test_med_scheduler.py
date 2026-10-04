@@ -34,6 +34,7 @@ from tests.test_med_support import (  # noqa: F401 - fixtures
     build,
     flaky,
     med,
+    med_template,
 )
 
 UTC = timezone.utc

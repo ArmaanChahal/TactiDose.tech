@@ -21,7 +21,7 @@ from tactidose.db.models import (
 from tactidose.medication import safety
 from tactidose.medication.compartments import assigned_slots
 from tactidose.medication.safety import Verdict
-from tests.test_med_support import (
+from tests.test_med_support import (  # noqa: F401 - fixtures
     CANCELLED,
     DISPENSED,
     DISPENSING,
@@ -31,16 +31,17 @@ from tests.test_med_support import (
     SCHEDULED,
     TAKEN,
     Med,
-    build,
+    med_template_unticked,
+    med_unticked,
 )
 
 R = BlockReason
 
 
 @pytest.fixture
-def m(settings, clock, db, bus, fake_hw) -> Med:
+def m(med_unticked: Med) -> Med:
     """Seeded (med1 slot 2: 08:00/20:00, med2 slot 4: 13:00) but no events: tests add them."""
-    return build(settings, clock, db, bus, fake_hw, tick=False)
+    return med_unticked
 
 
 def add(m: Med, schedule_id: int, hhmm: str, status: str = DUE, day: date | None = None, **kw: Any) -> int:

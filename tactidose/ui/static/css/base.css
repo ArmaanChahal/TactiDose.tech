@@ -506,6 +506,28 @@ th.num {
   letter-spacing: 0.01em;
 }
 
+/* definition lists of label / value pairs */
+.facts {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.25em 1em;
+  margin: 0.4em 0 0.6em;
+}
+
+.facts dt {
+  color: var(--fg-3);
+  font-weight: 650;
+}
+
+.facts dd {
+  margin: 0;
+}
+
+.facts ul {
+  margin: 0;
+  padding-left: 1.2em;
+}
+
 /* ------------------------------------------------------------------ app header (caregiver, demo) */
 
 .app-header {
@@ -748,6 +770,12 @@ th.num {
 .line-log .dir-ev { color: var(--warn-fg); }
 
 .line-log .is-err { color: var(--danger-fg); }
+
+.line-log:empty::before {
+  content: "No serial lines yet.";
+  color: var(--fg-3);
+  font-family: var(--font-sans);
+}
 
 /* ------------------------------------------------------------------ motion & forced colours */
 

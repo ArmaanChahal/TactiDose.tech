@@ -96,14 +96,18 @@ ArduinoHal::ArduinoHal()
 void ArduinoHal::begin() {
   /* 1. Motor outputs to a defined, released state before anything else. */
 #if DRIVER_TYPE == DRIVER_STEP_DIR
+#if PIN_ENABLE >= 0
+  /* EN is driven here, not through AccelStepper::setEnablePin(), which briefly writes the
+   * *enabled* level. Level first, then output, so the driver never switches on during boot. */
+  digitalWrite(PIN_ENABLE, ENABLE_ACTIVE_LOW ? HIGH : LOW);
+  pinMode(PIN_ENABLE, OUTPUT);
+  digitalWrite(PIN_ENABLE, ENABLE_ACTIVE_LOW ? HIGH : LOW);
+#endif
   pinMode(PIN_STEP, OUTPUT);
   digitalWrite(PIN_STEP, LOW);
   pinMode(PIN_DIR, OUTPUT);
   digitalWrite(PIN_DIR, LOW);
-#if PIN_ENABLE >= 0
-  stepper_.setEnablePin(PIN_ENABLE);
-#endif
-  stepper_.setPinsInverted(DIR_INVERT != 0, false, ENABLE_ACTIVE_LOW != 0);
+  stepper_.setPinsInverted(DIR_INVERT != 0, false, false);
   stepper_.setMinPulseWidth(STEP_PULSE_US);
 #else
   const uint8_t coils[] = {PIN_IN1, PIN_IN2, PIN_IN3, PIN_IN4};
@@ -111,8 +115,8 @@ void ArduinoHal::begin() {
     pinMode(pin, OUTPUT);
     digitalWrite(pin, LOW);
   }
+  stepper_.disableOutputs(); /* all coils off */
 #endif
-  stepper_.disableOutputs();
 
   /* 2. Gate servo: command CLOSED right away; the core waits GATE_TRAVEL_MS before EVENT BOOT. */
   ESP32PWM::allocateTimer(0);
@@ -194,11 +198,19 @@ long ArduinoHal::stepperCurrentPosition() { return stepper_.currentPosition(); }
 void ArduinoHal::stepperSetCurrentPosition(long position) { stepper_.setCurrentPosition(position); }
 
 void ArduinoHal::stepperEnable(bool on) {
+#if DRIVER_TYPE == DRIVER_STEP_DIR
+#if PIN_ENABLE >= 0
+  digitalWrite(PIN_ENABLE, on == (ENABLE_ACTIVE_LOW == 0) ? HIGH : LOW);
+#endif
+  if (on) stepper_.enableOutputs(); /* (re)configures STEP/DIR as outputs */
+#else
+  /* ULN2003: releasing = all four coils off. Energising takes effect with the next step. */
   if (on) {
     stepper_.enableOutputs();
   } else {
     stepper_.disableOutputs();
   }
+#endif
 }
 
 void ArduinoHal::servoWrite(uint8_t degrees) { servo_.write(degrees); }

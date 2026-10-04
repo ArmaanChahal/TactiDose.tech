@@ -29,13 +29,51 @@
 
 .demo-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(min(100%, 440px), 1fr));
+  grid-template-columns: minmax(0, 1fr);
   gap: 14px;
   align-items: start;
 }
 
-.demo-grid .wide {
-  grid-column: 1 / -1;
+@media (min-width: 900px) {
+  .demo-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-areas:
+      "voice transcript"
+      "sim   sim"
+      "hw    clock"
+      "hw    data"
+      "flows flows"
+      "state state";
+  }
+}
+
+@media (min-width: 1500px) {
+  .demo-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-areas:
+      "voice transcript hw"
+      "sim   sim        hw"
+      "clock data       hw"
+      "flows flows      flows"
+      "state state      state";
+  }
+}
+
+@media (min-width: 1500px) {
+  .c-hw .line-log {
+    max-height: 60vh;
+  }
+}
+
+@media (min-width: 900px) {
+  .c-voice { grid-area: voice; }
+  .c-transcript { grid-area: transcript; }
+  .c-sim { grid-area: sim; }
+  .c-hw { grid-area: hw; }
+  .c-clock { grid-area: clock; }
+  .c-data { grid-area: data; }
+  .c-flows { grid-area: flows; }
+  .c-state { grid-area: state; }
 }
 
 .card h2 {
@@ -87,6 +125,11 @@
   min-height: 2.2em;
 }
 
+.reply:empty::before {
+  content: "The reply appears here.";
+  color: var(--fg-3);
+}
+
 .reply[data-kind="error"] {
   border-left-color: var(--danger-fg);
 }
@@ -136,6 +179,13 @@
   background: var(--bg);
 }
 
+.transcript:empty::before {
+  content: "Nothing said or heard yet.";
+  display: block;
+  padding: 0.5em 0.6em;
+  color: var(--fg-3);
+}
+
 .transcript li {
   display: grid;
   grid-template-columns: auto auto 1fr;
@@ -166,7 +216,7 @@
 
 .sim-layout {
   display: grid;
-  grid-template-columns: minmax(200px, 300px) minmax(0, 1fr);
+  grid-template-columns: minmax(220px, 320px) minmax(0, 1fr);
   gap: 14px;
   align-items: start;
 }
@@ -259,7 +309,7 @@
 
 .flows {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(min(100%, 420px), 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 380px), 1fr));
   gap: 14px;
 }
 
@@ -307,7 +357,7 @@
 
 .step-state {
   font-weight: 800;
-  margin-left: 0.4em;
+  margin-left: 0.15em;
   font-size: 0.85em;
 }
 

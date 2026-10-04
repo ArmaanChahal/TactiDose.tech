@@ -114,6 +114,9 @@ class Assistant:
     max_unknown_words: int = 8
     #: The unsolicited-FAULT notice is not spoken this soon after a hardware-error reply.
     fault_notice_grace_s: float = 3.0
+    #: One FAULT is reported twice (unsolicited ERR line + DEVICE_STATE): speak it once per
+    #: episode. An episode ends when the device leaves FAULT, or after this long.
+    fault_notice_repeat_s: float = 30.0
     #: close() waits this long for the worker (it may be blocked in a hardware command).
     join_timeout_s: float = 5.0
 
@@ -135,9 +138,11 @@ class Assistant:
         self._gate_deadline: float | None = None
         self._gate_gen = 0
         self._device_state: str | None = None
+        self._fault_announced_at: float | None = None
         self._unsubscribe: list[Callable[[], None]] = []
-        # worker-only bookkeeping
+        #: seq of the job that was being handled when a CANCEL arrived (written under _cond).
         self._cancel_requested_for: int | None = None
+        # worker-only bookkeeping
         self._cancel_announced_for: int | None = None
         self._last_hw_error_at: float | None = None
         # dialogue state (guarded by _state_lock; read by state())
@@ -246,7 +251,7 @@ class Assistant:
             elif msg.is_event(Ev.BOOT):
                 self._notice("BOOT")
             elif msg.is_err(Err.HOME_TIMEOUT) or msg.is_err(Err.MOTOR_FAULT):
-                self._notice("FAULT")  # only if a client forwards unsolicited ERR lines
+                self._notice("FAULT")  # HardwareClient forwards *unsolicited* fault ERR lines too
         except Exception:  # noqa: BLE001 - never break the reader thread
             log.exception("on_hardware_event failed for %r", msg)
 
@@ -375,6 +380,8 @@ class Assistant:
         state = str((ev.data or {}).get("state") or "")
         with self._cond:
             previous, self._device_state = self._device_state, state
+            if state != "FAULT":
+                self._fault_announced_at = None  # the next FAULT is a new episode
         if state == "FAULT" and previous != "FAULT":
             self._notice("FAULT")
 
@@ -482,6 +489,9 @@ class Assistant:
     def _handle_check_due(self, job: _Job, summary: DueSummary | None = None) -> Reply:
         summary = summary if summary is not None else self._dose.check_due()
         outcome = summary.to_dict()
+        if getattr(summary, "error", None):
+            # The schedule could not be read: never mistake that for "nothing due" (fail closed).
+            return self._reply(job, Intent.CHECK_DUE, phrases.DB_UNAVAILABLE, ReplyKind.ERROR, outcome)
         if summary.awaiting_confirmation:
             dose = summary.awaiting_confirmation[0]
             text = phrases.awaiting_confirmation(dose, include_names=self._names, more_due=len(summary.due))
@@ -622,7 +632,7 @@ class Assistant:
             mapped = Intent.CONFIRM_TAKEN
         else:
             summary = self._dose.check_due()
-            mapped = Intent.DISPENSE if summary.due else Intent.CHECK_DUE
+            mapped = Intent.DISPENSE if summary.due and not getattr(summary, "error", None) else Intent.CHECK_DUE
         self._bus.publish(Topic.INTENT, {"intent": mapped.value, "source": job.source.value,
                                          "text": job.text, "via": Intent.PRIMARY_ACTION.value})
         if mapped is Intent.CONFIRM_TAKEN:
@@ -676,8 +686,15 @@ class Assistant:
         if job.notice == "BOOT":
             text, kind, level = phrases.DEVICE_RESTARTED, ReplyKind.WARNING, "warning"
         else:
-            last = self._last_hw_error_at
-            if last is not None and self._clock.monotonic() - last < self.fault_notice_grace_s:
+            now = self._clock.monotonic()
+            last_error = self._last_hw_error_at
+            with self._cond:
+                announced = self._fault_announced_at
+                repeat = announced is not None and now - announced < self.fault_notice_repeat_s
+                if not repeat:
+                    self._fault_announced_at = now
+            if repeat or (last_error is not None and now - last_error < self.fault_notice_grace_s):
+                # Already explained (by the failed command's reply or an earlier notice).
                 return self._reply(job, Intent.UNKNOWN, phrases.DEVICE_NEEDS_ATTENTION, ReplyKind.ERROR,
                                    {"notice": job.notice, "suppressed": True}, spoken=False)
             text, kind, level = phrases.DEVICE_NEEDS_ATTENTION, ReplyKind.ERROR, "error"
@@ -729,7 +746,8 @@ class Assistant:
 
     def _count_due(self) -> int:
         try:
-            return len(self._dose.check_due().due)
+            summary = self._dose.check_due()
+            return 0 if getattr(summary, "error", None) else len(summary.due)
         except Exception:  # noqa: BLE001
             log.exception("check_due() failed after a confirmation")
             return 0

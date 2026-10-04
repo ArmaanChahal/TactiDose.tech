@@ -3,10 +3,10 @@
   Compile-check the TactiDose reference firmware for a real ESP32 (arduino-cli in Docker).
 
 .DESCRIPTION
-  Runs firmware/compile_esp32.sh inside a python:3.12 container. Builds both driver variants
-  (STEP/DIR and ULN2003) with all warnings enabled. Cores, tools, libraries and arduino-cli are
-  cached in the Docker volume "tactidose-arduino": the first run downloads ~1 GB, later runs only
-  compile.
+  Runs firmware/compile_esp32.sh inside a python:3.12 container. Builds STEP/DIR and ULN2003 with
+  the shipped config.h, plus an alternate configuration of each (every preprocessor branch), with
+  all warnings enabled. Cores, tools, libraries and arduino-cli are cached in the Docker volume
+  "tactidose-arduino": the first run downloads ~1 GB, later runs only compile.
 
   Behind a TLS-inspecting corporate proxy (Zscaler etc.), downloads fail with "unable to get local
   issuer certificate". Pass -CaSubject Zscaler to export the matching root certificate (public)

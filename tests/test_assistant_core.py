@@ -10,6 +10,7 @@ import json
 import threading
 import time
 from collections import deque
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
@@ -246,6 +247,28 @@ def test_check_due_nothing_due_mentions_next_dose(make):
     assert reply.text == ("You do not have a scheduled medication due right now. "
                           "Your next dose is Calcium (demo token) at 1:00 PM.")
     assert reply.kind is ReplyKind.INFO
+
+
+@dataclass(frozen=True)
+class ErrorSummary(DueSummary):
+    """Same shape as DoseService's DueReport: a DueSummary that says the schedule was unreadable."""
+
+    error: str | None = None
+
+
+def test_check_due_db_error_fails_closed(make):
+    h = make()
+    h.dose.summary = ErrorSummary(now_local=NOW, error="DB_ERROR")
+    reply = h.run(Intent.CHECK_DUE)
+    assert reply.text == phrases.DB_UNAVAILABLE and reply.kind is ReplyKind.ERROR  # never "nothing due"
+    assert h.a.state()["phase"] == "ATTENTION"
+
+
+def test_primary_action_with_db_error_never_dispenses(make):
+    h = make()
+    h.dose.summary = ErrorSummary(now_local=NOW, due=(VITC,), error="DB_ERROR")
+    reply = h.run(Intent.PRIMARY_ACTION, BUTTON)
+    assert reply.text == phrases.DB_UNAVAILABLE and h.dose.count("dispense_next") == 0
 
 
 @pytest.mark.parametrize(
@@ -718,6 +741,19 @@ def test_unsolicited_fault_is_announced_once_per_transition(make):
     assert h.a.state()["phase"] == "ATTENTION"
     h.bus.publish(Topic.DEVICE_STATE, {"state": "READY"})
     h.bus.publish(Topic.DEVICE_STATE, {"state": "FAULT"})
+    assert wait_until(lambda: h.speaker.texts.count(phrases.DEVICE_NEEDS_ATTENTION) == 2, timeout=2)
+
+
+def test_fault_reported_by_err_line_and_state_is_spoken_once(make):
+    """The hardware client publishes DEVICE_STATE FAULT *and* forwards the unsolicited ERR line."""
+    h = make()
+    h.bus.publish(Topic.DEVICE_STATE, {"state": "FAULT"})
+    h.a.on_hardware_event(Message(MessageKind.ERR, "HOME_TIMEOUT", raw="ERR HOME_TIMEOUT"))
+    assert wait_until(lambda: h.speaker.last() == phrases.DEVICE_NEEDS_ATTENTION, timeout=2)
+    h.idle()
+    assert h.speaker.texts == [phrases.DEVICE_NEEDS_ATTENTION]
+    h.clock.mono += 31  # a long time later, with no recovery in between: remind once more
+    h.a.on_hardware_event(Message(MessageKind.ERR, "MOTOR_FAULT", raw="ERR MOTOR_FAULT"))
     assert wait_until(lambda: h.speaker.texts.count(phrases.DEVICE_NEEDS_ATTENTION) == 2, timeout=2)
 
 

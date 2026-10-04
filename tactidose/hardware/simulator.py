@@ -90,6 +90,8 @@ DEFAULT_PRESS_MS = 100
 #: Real-time loop pacing and bus publication rate of :class:`SimulatedDevice`.
 LOOP_SLEEP_S = 0.001
 PUBLISH_INTERVAL_S = 0.1
+#: Simulated milliseconds advanced per device-lock hold while catching up.
+CATCHUP_CHUNK_MS = 250
 #: Host-bound bytes kept per in-process transport when nobody reads.
 TRANSPORT_BUFFER_BYTES = 64 * 1024
 
@@ -991,7 +993,8 @@ class SimulatedDevice:
         self._thread: threading.Thread | None = None
         self._started = False
         self._closed = False
-        self._max_catchup_ms = max(250, int(self.speed * 250))
+        #: More than this much simulated time behind real time (~0.5 s real) is dropped, not replayed.
+        self._max_backlog_ms = max(1000, int(self.speed * 500))
         self._pub_lock = threading.Lock()
         self._last_pub_at = 0.0
         self._last_pub_key: dict[str, Any] | None = None
@@ -1114,16 +1117,19 @@ class SimulatedDevice:
             anchor_sim = self._esp.time_ms
         while not self._stop.is_set():
             now = time.monotonic()
+            behind = 0
             try:
                 with self._lock:
                     target = anchor_sim + int((now - anchor_real) * 1000.0 * self.speed)
                     behind = target - self._esp.time_ms
-                    if behind > self._max_catchup_ms:
+                    if behind > self._max_backlog_ms:
                         # Cannot keep up (process stalled or speed too high): drop the backlog.
-                        behind = self._max_catchup_ms
-                        anchor_real, anchor_sim = now, self._esp.time_ms + behind
+                        log.debug("simulated ESP32 dropped %d ms of backlog", behind)
+                        anchor_real, anchor_sim = now, self._esp.time_ms
+                        behind = 0
                     if behind > 0:
-                        self._advance(behind)
+                        # Bounded work per lock hold so host writes are never blocked for long.
+                        self._advance(min(behind, CATCHUP_CHUNK_MS))
                     lines = self._esp.drain_output()
                     transport = self._transport
                     if self._faults["unresponsive"] or self._faults["disconnect"]:
@@ -1133,7 +1139,8 @@ class SimulatedDevice:
                 self._publish_physical(now)
             except Exception:  # noqa: BLE001 - keep the device alive, but make bugs visible
                 log.exception("simulated ESP32 loop error")
-            time.sleep(LOOP_SLEEP_S)
+            # Caught up: wait for the next millisecond. Behind: just yield so writers get the lock.
+            time.sleep(LOOP_SLEEP_S if behind <= CATCHUP_CHUNK_MS else 0)
 
     def _advance(self, ms: int) -> None:
         esp = self._esp
@@ -1159,6 +1166,7 @@ class SimulatedDevice:
         with self._pub_lock:
             if now - self._last_pub_at < PUBLISH_INTERVAL_S:
                 return
+            self._last_pub_at = now                # checked (and published) at most ~10 Hz
             with self._lock:
                 payload = self._esp.physical()
                 payload["faults"] = dict(self._faults)
@@ -1166,5 +1174,4 @@ class SimulatedDevice:
             if key == self._last_pub_key:
                 return
             self._last_pub_key = key
-            self._last_pub_at = now
         self.bus.publish(Topic.SIM_PHYSICAL, payload)

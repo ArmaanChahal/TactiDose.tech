@@ -392,7 +392,7 @@ def test_sim_device_runs_in_scaled_real_time(make_device):
     link = dev.open_transport()
     t0 = time.monotonic()
     dev.start()
-    assert threading.Thread.__name__ and any(t.name == "sim-device" for t in threading.enumerate())
+    assert any(t.name == "sim-device" and t.daemon for t in threading.enumerate())
     read_lines(link, has("EVENT BOOT sim-1.0.0", "OK READY"))
     elapsed = time.monotonic() - t0
     assert 0.1 < elapsed < 1.5                                     # ~4 s of homing at x20

@@ -15,7 +15,7 @@ export const R_OUT = 112;
 export const R_IN = 42;
 const R_LABEL = 80;
 
-const round = (v) => Math.round(v * 100) / 100;
+const round = (v) => Math.round(v * 100) / 100 || 0; // "|| 0" turns -0 into 0
 
 /** Point at radius r and angle deg (0 = 12 o'clock, clockwise). */
 export function polar(r, deg) {
@@ -61,7 +61,7 @@ export class CarouselView {
     this.angle = 0;
     this.target = 0;
     this.raf = null;
-    this.state = { slot: null, gate: 'UNKNOWN', targetSlot: null, assigned: new Set() };
+    this.state = { slot: null, gate: 'UNKNOWN', targetSlot: null, moving: false, assigned: new Set() };
     this.build(numSlots);
   }
 
@@ -117,10 +117,11 @@ export class CarouselView {
 
   /**
    * @param {{slot?: number|null, angleDeg?: number|null, gate?: string, targetSlot?: number|null,
-   *          assignedSlots?: Iterable<number>|null}} update
+   *          moving?: boolean, assignedSlots?: Iterable<number>|null}} update
    */
-  update({ slot, angleDeg = null, gate, targetSlot, assignedSlots } = {}) {
+  update({ slot, angleDeg = null, gate, targetSlot, moving, assignedSlots } = {}) {
     if (slot !== undefined) this.state.slot = slot === null ? null : Number(slot);
+    if (moving !== undefined) this.state.moving = Boolean(moving);
     if (gate !== undefined) this.state.gate = gate || 'UNKNOWN';
     if (targetSlot !== undefined) this.state.targetSlot = targetSlot === null ? null : Number(targetSlot);
     if (assignedSlots) this.state.assigned = new Set(Array.from(assignedSlots, Number));
@@ -182,9 +183,10 @@ export class CarouselView {
 
   /** Text alternative, also used as the visible caption. */
   describe() {
-    const { slot, gate, targetSlot } = this.state;
+    const { slot, gate, targetSlot, moving } = this.state;
     const parts = [];
     if (slot !== null && slot !== undefined) parts.push(`Compartment ${slot + 1} is at the gate.`);
+    else if (moving) parts.push('The carousel is turning.');
     else parts.push('Position unknown (between compartments or not homed).');
     if (targetSlot !== null && targetSlot !== undefined && targetSlot !== slot) parts.push(`Moving to compartment ${targetSlot + 1}.`);
     parts.push(gate === 'OPEN' ? 'Gate open.' : gate === 'CLOSED' ? 'Gate closed.' : 'Gate state unknown.');

@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Compile-check the TactiDose reference firmware for a real ESP32 with arduino-cli, inside Docker.
-# Builds both driver variants (DRIVER_STEP_DIR and DRIVER_ULN2003) with all warnings enabled.
+# Builds four variants with all warnings enabled: DRIVER_STEP_DIR and DRIVER_ULN2003 with the
+# shipped config.h, plus one alternate configuration of each (no EN pin, no cancel button, LED,
+# DIR_INVERT, no home sensor) so that every preprocessor branch is compiled.
 #
 #   bash firmware/compile_esp32.sh           Linux / macOS / WSL / Git Bash
 #   firmware\compile_esp32.ps1               Windows PowerShell (can export a corporate root CA)
@@ -61,22 +63,41 @@ fi
 "$cli" core list
 "$cli" lib list
 
-rm -rf /tmp/sketch
-mkdir -p /tmp/sketch
-cp -r /fw/tactidose_esp32 /tmp/sketch/
+# name | extra compiler flags | config.h overrides (KEY=VALUE, applied to a copy). The *_ALT
+# variants compile the preprocessor branches the defaults skip.
+variants=(
+  "STEP_DIR||"
+  "ULN2003|-DDRIVER_TYPE=2|"
+  "STEP_DIR_ALT||PIN_ENABLE=-1 PIN_CANCEL_BUTTON=-1 PIN_STATUS_LED=2 ENABLE_ACTIVE_LOW=0"
+  "ULN2003_ALT|-DDRIVER_TYPE=2|DIR_INVERT=1 HAS_HOME_SENSOR=0 PIN_STATUS_LED=2"
+)
 status=0
-for variant in STEP_DIR ULN2003; do
+summary=()
+for spec in "${variants[@]}"; do
+  IFS='|' read -r name flags edits <<<"$spec"
+  sketch="/tmp/sketch-$name/tactidose_esp32"
+  rm -rf "/tmp/sketch-$name"
+  mkdir -p "/tmp/sketch-$name"
+  cp -r /fw/tactidose_esp32 "/tmp/sketch-$name/"
+  for edit in $edits; do
+    sed -i -E "s/^#define ${edit%%=*} .*/#define ${edit%%=*} ${edit#*=}/" "$sketch/config.h"
+  done
   props=()
-  [ "$variant" = ULN2003 ] && props=(--build-property "compiler.cpp.extra_flags=-DDRIVER_TYPE=2")
-  echo "=== $FQBN, DRIVER_TYPE=DRIVER_$variant ==="
-  log="/tmp/compile-$variant.log"
-  if ! "$cli" compile --fqbn "$FQBN" --warnings all --build-path "/tmp/build-$variant" "${props[@]}" \
-      /tmp/sketch/tactidose_esp32 2>&1 | tee "$log"; then
+  [ -n "$flags" ] && props=(--build-property "compiler.cpp.extra_flags=$flags")
+  echo "=== $FQBN, variant $name ${flags} ${edits} ==="
+  log="/tmp/compile-$name.log"
+  result=ok
+  if ! "$cli" compile --fqbn "$FQBN" --warnings all --build-path "/tmp/build-$name" "${props[@]}" "$sketch" \
+      2>&1 | tee "$log"; then
     status=1
+    result=FAILED
   fi
   # Warnings that point into the sketch (our code), as opposed to the core or the libraries.
-  ours=$(grep -E "(/sketch/|tactidose_esp32/)[^ :]*:[0-9]+(:[0-9]+)?: warning:" "$log" || true)
-  echo "=== DRIVER_$variant: $(printf '%s' "$ours" | grep -c . || true) warning(s) in sketch files ==="
+  ours=$(grep -E "(/sketch|tactidose_esp32)/[^ :]*:[0-9]+(:[0-9]+)?: warning:" "$log" || true)
+  count=$(printf '%s' "$ours" | grep -c . || true)
   [ -n "$ours" ] && printf '%s\n' "$ours"
+  summary+=("$name: $result, $count warning(s) in sketch files")
 done
+echo "=== summary ==="
+printf '%s\n' "${summary[@]}"
 exit "$status"

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 import time
+from itertools import pairwise
 
 import pytest
 
@@ -485,7 +486,7 @@ def test_start_never_raises_and_retries_with_backoff(settings, bus):
         hw.start()
         assert hw.ping().code == HostCode.NOT_CONNECTED.value
         assert wait_ready(hw, 5)
-        gaps = [b - a for a, b in zip(attempts, attempts[1:])]
+        gaps = [b - a for a, b in pairwise(attempts)]
         assert len(attempts) == 3 and all(g >= 0.4 for g in gaps)
         assert sim.started
     finally:
@@ -530,6 +531,13 @@ def test_unstarted_client_is_not_connected(settings):
 
 
 # --------------------------------------------------------------------------- factory / null
+
+
+def test_clients_implement_the_hardware_controller_protocol(settings):
+    from tactidose.core.interfaces import HardwareController
+
+    assert isinstance(NullHardware(settings), HardwareController)
+    assert isinstance(HardwareClient(settings, transport_factory=ScriptedDevice), HardwareController)
 
 
 def test_null_hardware_fails_closed(settings, bus):

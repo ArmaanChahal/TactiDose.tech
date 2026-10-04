@@ -34,7 +34,7 @@
 
     <div class="demo-grid">
       <!-- ======================================================== simulated voice -->
-      <section class="card" aria-labelledby="voice-title">
+      <section class="card c-voice" aria-labelledby="voice-title">
         <h2 id="voice-title"><span class="icon-slot" data-icon="mic"></span> Simulated voice</h2>
         <form id="voice-form" class="inline-form">
           <label for="voice-text">Say (typed)</label>
@@ -56,7 +56,7 @@
       </section>
 
       <!-- ======================================================== transcript -->
-      <section class="card" aria-labelledby="transcript-title">
+      <section class="card c-transcript" aria-labelledby="transcript-title">
         <div class="card-head">
           <h2 id="transcript-title"><span class="icon-slot" data-icon="list"></span> Live transcript</h2>
           <button type="button" id="transcript-clear" class="btn btn-small">Clear</button>
@@ -65,7 +65,7 @@
       </section>
 
       <!-- ======================================================== simulator -->
-      <section class="card" aria-labelledby="sim-title">
+      <section class="card c-sim" aria-labelledby="sim-title">
         <h2 id="sim-title"><span class="icon-slot" data-icon="gate"></span> Simulator</h2>
         <p id="sim-unavailable" class="state-msg" hidden>The simulator is not available: the server is not in simulator mode (TACTIDOSE_HARDWARE_MODE=sim).</p>
         <div class="sim-layout">
@@ -89,7 +89,7 @@
       </section>
 
       <!-- ======================================================== hardware console -->
-      <section class="card" aria-labelledby="hw-title">
+      <section class="card c-hw" aria-labelledby="hw-title">
         <h2 id="hw-title"><span class="icon-slot" data-icon="terminal"></span> Hardware console</h2>
         <form id="hw-form" class="inline-form">
           <label for="hw-line">Protocol command</label>
@@ -132,7 +132,7 @@
       </section>
 
       <!-- ======================================================== demo clock -->
-      <section class="card" aria-labelledby="clock-title">
+      <section class="card c-clock" aria-labelledby="clock-title">
         <h2 id="clock-title"><span class="icon-slot" data-icon="clock"></span> Demo clock</h2>
         <p id="clock-time" class="clock-time">--:--</p>
         <p id="clock-meta" class="muted"></p>
@@ -153,7 +153,7 @@
       </section>
 
       <!-- ======================================================== demo data -->
-      <section class="card" aria-labelledby="data-title">
+      <section class="card c-data" aria-labelledby="data-title">
         <h2 id="data-title"><span class="icon-slot" data-icon="calendar"></span> Demo data</h2>
         <div class="field">
           <label for="dose-med">Medication for the dose</label>
@@ -174,14 +174,14 @@
       </section>
 
       <!-- ======================================================== scripted flows -->
-      <section class="card wide" aria-labelledby="flows-title">
+      <section class="card c-flows" aria-labelledby="flows-title">
         <h2 id="flows-title"><span class="icon-slot" data-icon="play"></span> Scripted demo flows (handoff §25)</h2>
         <p class="muted">Each checklist calls the real APIs in order and ticks the steps off. Steps marked "your turn" wait for the operator — a person always confirms label data.</p>
         <div id="flows" class="flows"></div>
       </section>
 
       <!-- ======================================================== raw state -->
-      <section class="card wide" aria-labelledby="state-title">
+      <section class="card c-state" aria-labelledby="state-title">
         <h2 id="state-title"><span class="icon-slot" data-icon="terminal"></span> Raw state</h2>
         <div class="filter-row">
           <label for="state-source">Show</label>

@@ -7,8 +7,11 @@ the fixtures from here. Everything runs on the frozen test clock (Mon 5 Oct 2026
 
 from __future__ import annotations
 
+import os
+import shutil
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -33,10 +36,12 @@ from tactidose.medication.catalog import MedicationCatalog
 from tactidose.medication.compartments import CompartmentService
 from tactidose.medication.dispense import DoseService
 from tactidose.medication.scheduler import Scheduler
+from tests.conftest import _ENV_PREFIXES, TEST_NOW_LOCAL, TEST_TZ
 from tests.fakes import FakeHardware, seed_minimal
 
 __all__ = [
-    "FlakyDB", "Med", "build", "flaky", "med", "KIND_ADHERENCE", "KIND_DEVICE_EVENT",
+    "FlakyDB", "Med", "build", "flaky", "from_template", "med", "med_template", "med_template_unticked",
+    "med_unticked", "KIND_ADHERENCE", "KIND_DEVICE_EVENT",
 ]
 
 
@@ -162,11 +167,18 @@ def build(
     *,
     seed: bool = True,
     tick: bool = True,
+    ids: dict[str, Any] | None = None,
     **overrides: Any,
 ) -> Med:
-    """Services wired like ``app.py`` (with ``overrides`` applied to the settings)."""
+    """Services wired like ``app.py`` (with ``overrides`` applied to the settings).
+
+    ``ids`` = the DB was copied from a template that is already seeded: do not seed/tick.
+    """
     st = settings.model_copy(update=overrides) if overrides else settings
-    ids: dict[str, Any] = {}
+    if ids is not None:
+        seed = tick = False
+    else:
+        ids = {}
     if seed:
         ids = seed_minimal(db, st, now=clock.now() - timedelta(days=2))
     compartments = CompartmentService(db, st, bus=bus)
@@ -200,10 +212,61 @@ class FlakyDB:
         return self._real()
 
 
+def _template(tmp_path_factory: pytest.TempPathFactory, name: str, *, tick: bool) -> tuple[Path, dict[str, Any]]:
+    """Build a seeded DB once per session; tests get a file copy (much faster than create_all+seed+tick)."""
+    root = tmp_path_factory.mktemp(name)
+    with pytest.MonkeyPatch.context() as mp:   # session fixtures run before the autouse env cleaner
+        for key in list(os.environ):
+            if key.upper().startswith(_ENV_PREFIXES):
+                mp.delenv(key, raising=False)
+        st = Settings(_env_file=None, data_dir=root / "data", hardware_mode="none", voice_enabled=False,
+                      tts_provider="none", label_extractor="fake", timezone=TEST_TZ, demo_mode=True,
+                      hw_boot_wait_s=0)
+        database = Database(st)
+        database.create_all()
+        m = build(st, Clock(TEST_TZ, frozen_at=TEST_NOW_LOCAL), database, EventBus(), FakeHardware(), tick=tick)
+        with database.engine.connect() as conn:
+            conn.exec_driver_sql("PRAGMA wal_checkpoint(TRUNCATE)")
+        database.dispose()
+    return st.sqlite_path, dict(m.ids)
+
+
+@pytest.fixture(scope="session")
+def med_template(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, dict[str, Any]]:
+    return _template(tmp_path_factory, "med-ticked", tick=True)
+
+
+@pytest.fixture(scope="session")
+def med_template_unticked(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, dict[str, Any]]:
+    return _template(tmp_path_factory, "med-seeded", tick=False)
+
+
+def from_template(template: tuple[Path, dict[str, Any]], settings: Settings, clock: Clock, bus: EventBus,
+                  hw: FakeHardware) -> Med:
+    path, ids = template
+    settings.data_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(path, settings.sqlite_path)
+    return build(settings, clock, Database(settings), bus, hw, ids=dict(ids))
+
+
 @pytest.fixture
-def med(settings: Settings, clock: Clock, db: Database, bus: EventBus, fake_hw: FakeHardware) -> Med:
-    """Seeded (2 meds in slots 2/4, schedules 08:00/20:00/13:00) and ticked at 07:55."""
-    return build(settings, clock, db, bus, fake_hw)
+def med(settings: Settings, clock: Clock, bus: EventBus, fake_hw: FakeHardware,
+        med_template: tuple[Path, dict[str, Any]]):
+    """Seeded (2 meds in slots 2/4, schedules 08:00/20:00/13:00) and ticked at 07:55.
+
+    Do not combine with the conftest ``db`` fixture (both would own the same file)."""
+    m = from_template(med_template, settings, clock, bus, fake_hw)
+    yield m
+    m.db.dispose()
+
+
+@pytest.fixture
+def med_unticked(settings: Settings, clock: Clock, bus: EventBus, fake_hw: FakeHardware,
+                 med_template_unticked: tuple[Path, dict[str, Any]]):
+    """Seeded like ``med`` but without any dose events (tests add their own rows)."""
+    m = from_template(med_template_unticked, settings, clock, bus, fake_hw)
+    yield m
+    m.db.dispose()
 
 
 @pytest.fixture

@@ -13,7 +13,7 @@
 
 import { get, postIntent } from './api.js';
 import { EventStream, RECONNECTED } from './events.js';
-import { $$, announce, byId, debounce, errorText } from './dom.js';
+import { $$, announce, byId, debounce, errorText, initLiveRegions } from './dom.js';
 import { hydrateIcons, icon } from './icons.js';
 import { initThemeToggle } from './theme.js';
 import {
@@ -27,7 +27,7 @@ import {
 } from './kiosk-state.js';
 
 const POLL_MS = 15000;
-const CAPTION_DEDUPE_MS = 4000;
+const CAPTION_DEDUPE_MS = 2500;
 const CANCEL_DEBOUNCE_MS = 500;
 const CAPTION_KIND_ICON = { error: 'warning', warning: 'warning', success: 'check-circle', prompt: 'arrow-right' };
 
@@ -66,6 +66,7 @@ const buttons = $$('[data-intent]');
 let inFlight = null;
 let lastCancelAt = 0;
 let lastCaption = { text: '', at: 0 };
+let captionIsConnectionError = false;
 let lastBannerKey = '';
 
 // ------------------------------------------------------------------ rendering
@@ -107,12 +108,16 @@ function render() {
 /**
  * Show what TactiDose said. Errors go to the assertive region, everything else to
  * the polite one; replayed/initial captions update the screen without being announced.
+ * The same sentence arriving twice (HTTP reply + assistant.spoken event) is shown
+ * once; `force` re-announces an identical sentence (REPEAT).
  */
-function showCaption(text, kind = 'info', { quiet = false } = {}) {
+function showCaption(text, kind = 'info', { quiet = false, force = false } = {}) {
   if (!text) return;
   const now = Date.now();
-  if (text === lastCaption.text && now - lastCaption.at < CAPTION_DEDUPE_MS) return;
+  const duplicate = text === lastCaption.text && now - lastCaption.at < CAPTION_DEDUPE_MS;
+  if (duplicate && !force) return;
   lastCaption = { text, at: now };
+  captionIsConnectionError = false;
   const isError = kind === 'error';
   const target = isError ? ui.captionAlert : ui.caption;
   const other = isError ? ui.caption : ui.captionAlert;
@@ -123,14 +128,27 @@ function showCaption(text, kind = 'info', { quiet = false } = {}) {
   const politeness = isError ? 'assertive' : 'polite';
   if (quiet) target.setAttribute('aria-live', 'off');
   const iconName = CAPTION_KIND_ICON[kind];
-  target.replaceChildren(...(iconName ? [icon(iconName)] : []), document.createTextNode(text));
+  const content = () => [...(iconName ? [icon(iconName)] : []), document.createTextNode(text)];
+  if (duplicate && target.textContent === text) {
+    // Identical text: empty the live region first so it is announced again.
+    target.replaceChildren();
+    setTimeout(() => target.replaceChildren(...content()), 60);
+  } else {
+    target.replaceChildren(...content());
+  }
   if (quiet) setTimeout(() => target.setAttribute('aria-live', politeness), 1200);
 }
 
 function setServerOnline(online) {
   if (view.serverOnline === online) return;
   view.serverOnline = online;
-  announce(online ? 'Connection restored.' : 'Connection lost. Reconnecting.', { assertive: !online });
+  if (online && captionIsConnectionError) {
+    // The caption still shows "Cannot reach the server…": replace it (this also announces it).
+    captionIsConnectionError = false;
+    showCaption('Connection restored.', 'info');
+  } else {
+    announce(online ? 'Connection restored.' : 'Connection lost. Reconnecting.', { assertive: !online });
+  }
   render();
 }
 
@@ -200,10 +218,11 @@ async function sendIntent(intent) {
   try {
     const reply = await postIntent(intent, 'ui');
     setServerOnline(true);
-    if (reply && reply.text) showCaption(reply.text, reply.kind || 'info');
+    if (reply && reply.text) showCaption(reply.text, reply.kind || 'info', { force: intent === 'REPEAT' });
   } catch (err) {
     if (err.network) setServerOnline(false);
     showCaption(errorText(err), 'error');
+    captionIsConnectionError = Boolean(err.network || err.timeout);
   } finally {
     if (!isCancel) setBusy(null);
     refreshSoon();
@@ -285,6 +304,7 @@ for (const topic of ['dose.updated', 'clock.changed', 'data.changed']) {
 
 // ------------------------------------------------------------------ start
 
+initLiveRegions();
 hydrateIcons();
 initThemeToggle(byId('theme-toggle'), { upper: true });
 render();

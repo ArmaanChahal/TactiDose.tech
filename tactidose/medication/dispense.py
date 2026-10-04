@@ -80,7 +80,7 @@ from tactidose.hardware.protocol import (
 )
 from tactidose.medication import safety
 from tactidose.medication.compartments import assigned_slots, iso
-from tactidose.medication.errors import ConflictError, DomainError, NotFoundError, ValidationError
+from tactidose.medication.errors import ConflictError, NotFoundError, ValidationError
 from tactidose.medication.safety import Verdict
 from tactidose.medication.scheduler import (
     Scheduler,
@@ -413,12 +413,28 @@ class DoseService:
             return claim_or_outcome
         claim = claim_or_outcome
         self._current_dose = claim.dose
-        announce(claim.dose)
-        if self._interrupt.is_set():
-            return self._revert_claim(claim)
-        result = self._send(Command(CommandName.DISPENSE_SLOT, claim.slot),
-                            lambda: self.hardware.dispense_slot(claim.slot))
-        return self._finish(claim, result)
+        try:
+            announce(claim.dose)
+            if self._interrupt.is_set():
+                return self._revert_claim(claim)
+            result = self._send(Command(CommandName.DISPENSE_SLOT, claim.slot),
+                                lambda: self.hardware.dispense_slot(claim.slot))
+            return self._finish(claim, result)
+        except Exception:  # noqa: BLE001 - a bug after the claim: the outcome is unknown
+            log.exception("unexpected error while dispensing %s; locking it for review", claim.dose.label)
+            return self._lock_for_review(claim, "INTERNAL_ERROR")
+
+    def _lock_for_review(self, claim: _Claim, why: str) -> DispenseOutcome:
+        """Claimed dose with an unknown outcome -> HARDWARE_ERROR(needs_review); never retried."""
+        self._gate_possibly_open = True
+        values = {"status": DoseStatus.HARDWARE_ERROR.value, "needs_review": True,
+                  "hardware_result": f"UNCERTAIN {why}"}
+        rec = _PendingRecord(claim.event_id, values, "DOSE_HARDWARE_ERROR", {"why": why},
+                             ("dispense_uncertain", why),
+                             replace(claim.dose, status=DoseStatus.HARDWARE_ERROR.value, needs_review=True,
+                                     hardware_result=values["hardware_result"]))
+        _ok, dose = self._record(rec)
+        return DispenseOutcome(DispenseStatus.HARDWARE_ERROR, dose=dose, reason=why)
 
     def _refusal(self, ev: _Eval, src: str) -> DispenseOutcome:
         if ev.verdict is Verdict.IN_PROGRESS:
@@ -583,10 +599,12 @@ class DoseService:
             snap = self._wait_while_homing()
             if self._interrupt.is_set():
                 return _Prep(False, Err.STOPPED.value, cancelled=True)
-            if snap is None or snap.state is DeviceState.HOMING:
-                return _Prep(False, "HOMING_TIMEOUT")
+            if snap is None:
+                return _Prep(False, "NO_STATUS")
             if not snap.connected:
                 return _Prep(False, HostCode.NOT_CONNECTED.value)
+            if snap.state is DeviceState.HOMING:
+                return _Prep(False, "HOMING_TIMEOUT")
             if snap.state is DeviceState.FAULT:
                 return _Prep(False, DeviceState.FAULT.value)
         in_flight = (snap.in_flight or "").split(" ")[0].upper()

@@ -25,6 +25,8 @@
  *                           ("-" = zero bytes)
  * Extensions that do change state:
  *   !rx <hex>               deliver raw bytes (no implicit newline), e.g. "\r" terminators
+ *   !set <key>=<value>      firmware setting for the following !boot (keys of --set, or millisOffset)
+ *   !defaults               back to the command-line settings
  * A line that cannot be processed produces "!err <reason>" before its !ack.
  *
  * Command line: harness [--millis-offset N] [--set key=value]...
@@ -36,6 +38,7 @@
 #include <string.h>
 
 #include <iostream>
+#include <list>
 #include <string>
 #include <vector>
 
@@ -159,16 +162,22 @@ tactidose::CoreConfig harnessConfig() {
   return c;
 }
 
-/* --set key=value: tweak the firmware configuration (used by tests to cover config variants). */
-bool applySetting(const std::string& assignment, tactidose::CoreConfig* c, std::string* fwStorage) {
+/* Stable storage for strings referenced by CoreConfig::fwVersion (never freed). */
+const char* internString(const std::string& s) {
+  static std::list<std::string> pool;
+  pool.push_back(s);
+  return pool.back().c_str();
+}
+
+/* --set / !set key=value: tweak the firmware configuration (tests cover config variants). */
+bool applySetting(const std::string& assignment, tactidose::CoreConfig* c) {
   const size_t eq = assignment.find('=');
   if (eq == std::string::npos) return false;
   const std::string key = assignment.substr(0, eq);
   const std::string value = assignment.substr(eq + 1);
   if (key == "fw") {
     if (value.empty() || value.find(' ') != std::string::npos) return false;
-    *fwStorage = value;
-    c->fwVersion = fwStorage->c_str();
+    c->fwVersion = internString(value);
     return true;
   }
   bool* flag = nullptr;
@@ -213,7 +222,12 @@ bool applySetting(const std::string& assignment, tactidose::CoreConfig* c, std::
 class Harness {
  public:
   Harness(const tactidose::CoreConfig& config, const harness::Physics& physics, uint32_t millisOffset)
-      : hal_(physics), config_(config), core_(hal_, config_) {
+      : hal_(physics),
+        config_(config),
+        core_(hal_, config_),
+        defaults_(config),
+        millisOffset_(millisOffset),
+        defaultMillisOffset_(millisOffset) {
     hal_.setOutput(&out_);
     hal_.setMillisOffset(millisOffset);
   }
@@ -283,6 +297,7 @@ class Harness {
       const bool fitted = w[1] != "none";
       if (w[1] == "ok") hal_.setSensor(harness::SensorMode::kOk);
       if (w[1] == "dead") hal_.setSensor(harness::SensorMode::kDead);
+      hal_.setMillisOffset(millisOffset_);
       hal_.powerOn(fitted);
       config_.hasHomeSensor = fitted;
       core_ = tactidose::TactiDoseCore(hal_, config_);
@@ -319,6 +334,11 @@ class Harness {
       out_ += std::string(" fw_state=") + tactidose::stateName(core_.state()) + " fw_homed=" +
               (core_.homed() ? "1" : "0") + " fw_slot=" + std::to_string(core_.slot()) +
               " booted=" + (booted_ ? "1" : "0") + "\n";
+    } else if (cmd == "set" && argc == 1) {
+      set(w[1]);
+    } else if (cmd == "defaults" && argc == 0) {
+      config_ = defaults_;
+      millisOffset_ = defaultMillisOffset_;
     } else if (cmd == "parsehex" && (argc == 1 || argc == 2)) {
       parseHex(w);
     } else if (cmd == "rx" && argc == 1) {
@@ -332,6 +352,20 @@ class Harness {
       error("unknown or malformed directive: !" + cmd);
     }
     return true;
+  }
+
+  void set(const std::string& assignment) {
+    const std::string prefix = "millisOffset=";
+    if (assignment.compare(0, prefix.size(), prefix) == 0) {
+      uint64_t value = 0;
+      if (!parseUnsigned(assignment.substr(prefix.size()), 0xFFFFFFFFULL, &value)) {
+        error("set: millisOffset must be 0..4294967295");
+      } else {
+        millisOffset_ = static_cast<uint32_t>(value);
+      }
+    } else if (!applySetting(assignment, &config_)) {
+      error("set: unknown key or bad value: " + assignment);
+    }
   }
 
   void parseHex(const std::vector<std::string>& w) {
@@ -355,8 +389,11 @@ class Harness {
   }
 
   harness::FakeHal hal_;
-  tactidose::CoreConfig config_;
+  tactidose::CoreConfig config_; /* used by the next !boot */
   tactidose::TactiDoseCore core_;
+  const tactidose::CoreConfig defaults_;
+  uint32_t millisOffset_;
+  const uint32_t defaultMillisOffset_;
   bool booted_ = false;
   std::string out_;
 };
@@ -373,7 +410,6 @@ int usage(const char* argv0) {
 
 int main(int argc, char** argv) {
   tactidose::CoreConfig config = harnessConfig();
-  std::string fwStorage;
   uint32_t millisOffset = 0;
   for (int i = 1; i < argc; ++i) {
     const std::string arg = argv[i];
@@ -382,7 +418,7 @@ int main(int argc, char** argv) {
       if (!parseUnsigned(argv[++i], 0xFFFFFFFFULL, &value)) return usage(argv[0]);
       millisOffset = static_cast<uint32_t>(value);
     } else if (arg == "--set" && i + 1 < argc) {
-      if (!applySetting(argv[++i], &config, &fwStorage)) {
+      if (!applySetting(argv[++i], &config)) {
         fprintf(stderr, "bad --set %s\n", argv[i]);
         return usage(argv[0]);
       }

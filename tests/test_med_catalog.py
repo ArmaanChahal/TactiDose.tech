@@ -20,6 +20,7 @@ from tests.test_med_support import (  # noqa: F401 - fixtures
     MISSED,
     Med,
     med,
+    med_template,
 )
 
 MEDICATION_KEYS = {"medication_id", "name", "strength", "instructions_text", "warnings", "source",

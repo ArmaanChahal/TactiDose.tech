@@ -30,6 +30,7 @@ from tactidose.hardware.conformance_native import (
     ENV_COMMAND,
     ENV_IMAGE,
     HarnessBuildError,
+    HarnessError,
     NativeTarget,
     build_harness,
     docker_unavailable_reason,
@@ -43,6 +44,7 @@ pytestmark = pytest.mark.native
 # Captured at import time: the autouse hermetic fixture removes TACTIDOSE_* variables per test.
 _COMMAND = os.environ.get(ENV_COMMAND) or None
 _IMAGE = os.environ.get(ENV_IMAGE) or DEFAULT_IMAGE
+_GCC_IMAGE = os.environ.get("TACTIDOSE_GCC_IMAGE") or DEFAULT_IMAGE
 
 SCENARIOS: list[dict[str, Any]] = load_scenarios()["scenarios"]
 BOOT_LINES = ["re:EVENT BOOT \\S+", "OK HOMING", "OK HOMED", "OK READY"]
@@ -73,14 +75,15 @@ def _linux_local_build() -> bool:
     ).returncode == 0
 
 
-def _require_docker_image(image: str) -> None:
+def _require_docker_images(*images: str) -> None:
     reason = docker_unavailable_reason()
     if reason:
         pytest.skip(f"native firmware tests need Docker on this machine: {reason}")
-    found = subprocess.run(["docker", "image", "inspect", image], capture_output=True, check=False, timeout=60)
-    if found.returncode != 0:
-        pytest.skip(f"Docker image {image} is not present (tests never pull images); "
-                    f"run firmware/native/build.ps1 or 'docker pull {image}' once")
+    for image in dict.fromkeys(images):
+        found = subprocess.run(["docker", "image", "inspect", image], capture_output=True, check=False, timeout=60)
+        if found.returncode != 0:
+            pytest.skip(f"Docker image {image} is not present (tests never pull images); "
+                        f"run firmware/native/build.ps1 or 'docker pull {image}' once")
 
 
 @pytest.fixture(scope="session")
@@ -89,13 +92,13 @@ def harness_binary() -> Path:
     if _COMMAND is not None:  # user-supplied harness command: trust it
         return binary
     local = _linux_local_build()
-    if not sys.platform.startswith("linux"):
-        _require_docker_image(_IMAGE)
-    if harness_is_stale(binary):
-        if not local:
-            _require_docker_image(os.environ.get("TACTIDOSE_GCC_IMAGE") or DEFAULT_IMAGE)
+    stale = harness_is_stale(binary)
+    needed = ([] if sys.platform.startswith("linux") else [_IMAGE]) + ([_GCC_IMAGE] if stale and not local else [])
+    if needed:
+        _require_docker_images(*needed)
+    if stale:
         try:
-            build_harness(local=local)
+            build_harness(image=_GCC_IMAGE, local=local)
         except HarnessBuildError as exc:
             pytest.fail(f"the firmware core / native harness does not compile:\n{exc}")
     return binary
@@ -224,6 +227,78 @@ def _assert_physically_safe(target: NativeTarget) -> dict[str, str]:
     return phys
 
 
+# --------------------------------------------------------------------------- NativeTarget client logic (no Docker)
+
+#: Minimal stand-in harness: acknowledges every line, keeps a clock, reports every peek as silent.
+_FAKE_HARNESS = """
+import sys
+t = 0
+for line in sys.stdin:
+    line = line.rstrip("\\n")
+    if line.startswith("!tick "):
+        t += int(line.split()[1])
+    elif line.startswith("!peek "):
+        print("!peek " + line.split()[1])
+    elif line == "> PING":
+        print("OK PONG")
+    print("!ack %d" % t, flush=True)
+    if line == "!quit":
+        break
+"""
+
+
+def test_missing_binary_explains_how_to_build(tmp_path: Path) -> None:
+    with pytest.raises(FileNotFoundError, match="build.ps1"):
+        NativeTarget(tmp_path / "no-harness-here")
+
+
+def test_custom_command_and_speculative_bookkeeping(tmp_path: Path) -> None:
+    script = tmp_path / "fake_harness.py"
+    script.write_text(_FAKE_HARNESS, encoding="utf-8")
+    with NativeTarget(command=[sys.executable, str(script)], timeout_s=20) as target:
+        target.reset()
+        target.send("PING")                      # reply is returned by the next tick()
+        assert target.tick(5) == ["OK PONG"]
+        trips = target.round_trips
+        for _ in range(100):                     # inside the 1000 ms window the fake declared silent
+            assert target.tick(5) == []
+        assert target.round_trips == trips and target.now_ms == 505
+        target.speculate = False
+        assert target.tick(5) == [] and target.round_trips == trips + 1 and target.now_ms == 510
+
+
+def test_command_from_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    script = tmp_path / "fake harness.py"          # a space in the path on purpose
+    script.write_text(_FAKE_HARNESS, encoding="utf-8")
+    line = subprocess.list2cmdline([sys.executable, str(script)]) if os.name == "nt" else \
+        " ".join(__import__("shlex").quote(p) for p in (sys.executable, str(script)))
+    monkeypatch.setenv(ENV_COMMAND, line)
+    with NativeTarget(tmp_path / "unused-binary", timeout_s=20) as target:
+        target.reset()
+        target.send("PING")
+        assert target.tick(1) == ["OK PONG"]
+
+
+def test_unresponsive_harness_times_out_and_is_discarded(tmp_path: Path) -> None:
+    script = tmp_path / "mute.py"
+    script.write_text("import time\ntime.sleep(60)\n", encoding="utf-8")
+    target = NativeTarget(command=[sys.executable, str(script)], timeout_s=1, startup_timeout_s=1)
+    with pytest.raises(HarnessError, match="did not acknowledge"):
+        target.reset()
+    assert target._proc is None                  # killed, not left running
+    target.close()
+
+
+def test_exiting_harness_reports_its_exit_code(tmp_path: Path) -> None:
+    script = tmp_path / "crash.py"
+    script.write_text("import sys\nsys.stdin.readline()\nsys.stderr.write('boom\\n')\nsys.exit(3)\n",
+                      encoding="utf-8")
+    target = NativeTarget(command=[sys.executable, str(script)], timeout_s=20, startup_timeout_s=20)
+    with pytest.raises(HarnessError, match="exited"):
+        target.reset()
+    target.close()
+
+
 # --------------------------------------------------------------------------- the conformance suite
 
 
@@ -241,40 +316,83 @@ def test_conformance_scenario(native: NativeTarget, scenario: dict[str, Any]) ->
         assert int(phys["gate_opens"]) == GATE_OPENS[scenario["name"]], phys
 
 
+@pytest.fixture
+def configured(native: NativeTarget) -> Iterator[NativeTarget]:
+    """The module's harness; settings changed with ``configure()`` are undone afterwards."""
+    yield native
+    native.restore_defaults()
+
+
 @pytest.mark.parametrize(
-    "harness_args",
+    "settings",
     [
-        pytest.param(["--millis-offset", str(WRAP - 15_000)], id="millis-wraps-15s-after-boot"),
-        pytest.param(["--millis-offset", str(WRAP - 60_000)], id="millis-wraps-60s-after-boot"),
-        pytest.param(["--set", "homeBackoffSteps=0"], id="single-pass-homing"),
-        pytest.param(["--set", "homeOffsetSteps=12"], id="home-offset-calibration"),
-        pytest.param(["--set", "verifySlot=0", "--set", "debugLog=0", "--set", "holdWhenIdle=0"],
+        pytest.param({"millisOffset": WRAP - 15_000}, id="millis-wraps-15s-after-boot"),
+        pytest.param({"millisOffset": WRAP - 60_000}, id="millis-wraps-60s-after-boot"),
+        pytest.param({"homeBackoffSteps": 0}, id="single-pass-homing"),
+        pytest.param({"homeOffsetSteps": 12}, id="home-offset-calibration"),
+        pytest.param({"verifySlot": False, "debugLog": False, "holdWhenIdle": False},
                      id="no-slot-check-no-debug-release-when-idle"),
     ],
 )
-def test_full_suite_under_variants(harness_binary: Path, harness_args: list[str]) -> None:
+def test_full_suite_under_variants(configured: NativeTarget, settings: dict[str, Any]) -> None:
     """Wrap-safe timing (millis() wraps every 49.7 days) and config variants keep conformance."""
-    with _target(harness_binary, harness_args=harness_args) as target:
-        failed = []
-        for scenario in SCENARIOS:
-            result = run_scenario(target, scenario)
-            phys = target.physical()
-            if not result.ok or phys["violations"] != "0":
-                failed.append(f"{result.describe()} | violations={phys['violations']} {phys['last_violation']}")
-        assert not failed, "\n".join(failed)
+    configured.configure(**settings)
+    failed = []
+    for scenario in SCENARIOS:
+        result = run_scenario(configured, scenario)
+        phys = configured.physical()
+        if not result.ok or phys["violations"] != "0":
+            failed.append(f"{result.describe()} | violations={phys['violations']} {phys['last_violation']}")
+    assert not failed, "\n".join(failed)
 
 
-@pytest.mark.parametrize("name", ["busy_while_moving", "cancel_button_during_move_stops"])
-def test_speculative_ticking_matches_plain_ticking(harness_binary: Path, native: NativeTarget, name: str) -> None:
+#: Short scenario mixing every kind of event, for the plain-vs-speculative cross-check.
+CROSS_CHECK: dict[str, Any] = {
+    "name": "cross_check",
+    "steps": [
+        {"boot": "none", "expect": BOOT_LINES},
+        {"send": "DISPENSE_SLOT 1", "expect": ["OK MOVING 1"]},
+        {"press": "CONFIRM", "expect": ["EVENT CONFIRM_BUTTON"]},
+        {"send": "PING", "expect": ["OK PONG"]},
+        {"wait_ms": 3000, "expect": ["OK AT_SLOT 1", "OK GATE_OPEN"]},
+        {"press": "CANCEL", "expect": ["EVENT CANCEL_BUTTON", "OK GATE_CLOSED", "OK READY"]},
+        {"send": "MOVE_SLOT 3", "expect": ["OK MOVING 3"]},
+        {"wait_ms": 200, "expect": []},
+        {"send": "STOP", "expect": ["ERR STOPPED", "OK STOPPED"]},
+        {"send": "HOME", "expect": ["OK HOMING", "OK HOMED", "OK READY"]},
+        {"send": "OPEN_GATE", "expect": ["OK GATE_OPEN"]},
+        {"wait_ms": 1500, "expect": []},
+        {"send": "STATUS", "quiet_ms": 300, "expect": ["status:state=GATE_OPEN,gate=OPEN"]},
+    ],
+}
+
+
+def test_speculative_ticking_matches_plain_ticking(native: NativeTarget) -> None:
     """The !peek optimisation must not change a single line or the millisecond it is reported."""
-    scenario = next(s for s in SCENARIOS if s["name"] == name)
     fast = Recorder(native)
-    assert run_scenario(fast, scenario).ok
-    with _target(harness_binary, speculate=False) as plain_target:
-        plain = Recorder(plain_target)
-        assert run_scenario(plain, scenario).ok
-    assert fast.log == plain.log
-    assert fast.now == plain.now
+    assert run_scenario(fast, CROSS_CHECK).ok
+    native.speculate = False
+    try:
+        plain = Recorder(native)
+        trips = native.round_trips
+        assert run_scenario(plain, CROSS_CHECK).ok
+        plain_trips = native.round_trips - trips
+    finally:
+        native.speculate = True
+    assert fast.log == plain.log and fast.now == plain.now
+    assert plain_trips > 500  # really ticked one chunk at a time
+
+
+def test_harness_rejects_unknown_settings_and_inputs(configured: NativeTarget) -> None:
+    with pytest.raises(HarnessError, match="unknown key"):
+        configured.configure(noSuchSetting=1)
+    with pytest.raises(ValueError):
+        configured.send("PING\nPING")
+    with pytest.raises(ValueError):
+        configured.boot("sideways")
+    configured.reset()  # still in sync after the rejected input
+    configured.boot("ok")
+    assert any(line.startswith("EVENT BOOT ") for line in configured.tick(1000))
 
 
 def test_run_all_api(native: NativeTarget) -> None:

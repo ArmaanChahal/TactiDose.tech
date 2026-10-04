@@ -70,6 +70,7 @@ export function createCompartments(ctx) {
       slot: device?.slot ?? null,
       gate: device?.gate || 'UNKNOWN',
       targetSlot: device?.target_slot ?? null,
+      moving: ['MOVING', 'HOMING', 'AT_TARGET'].includes(device?.state),
       assignedSlots: comps.filter((c) => c.medication_id).map((c) => c.slot),
     });
     const prefix = !device ? 'Device status unknown. ' : device.connected ? '' : 'Device not connected. ';

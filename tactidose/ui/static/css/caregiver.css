@@ -53,15 +53,14 @@
 /* ------------------------------------------------------------------ tabs */
 
 .tablist-wrap {
-  overflow-x: auto;
   margin: 0 0 16px;
   border-bottom: 3px solid var(--border-subtle);
 }
 
 .tablist {
   display: flex;
+  flex-wrap: wrap;
   gap: 4px;
-  min-width: max-content;
 }
 
 [role="tab"] {
@@ -154,27 +153,6 @@
 .item-sub {
   color: var(--fg-2);
   font-weight: 600;
-}
-
-.facts {
-  display: grid;
-  grid-template-columns: max-content 1fr;
-  gap: 0.25em 1em;
-  margin: 0.4em 0 0.6em;
-}
-
-.facts dt {
-  color: var(--fg-3);
-  font-weight: 650;
-}
-
-.facts dd {
-  margin: 0;
-}
-
-.facts ul {
-  margin: 0;
-  padding-left: 1.2em;
 }
 
 .form-card {
@@ -483,7 +461,7 @@
 
 .chart-tick {
   fill: var(--fg-3);
-  font-size: 13px;
+  font-size: 14px;
   text-anchor: end;
   dominant-baseline: central;
   font-variant-numeric: tabular-nums;
@@ -491,7 +469,7 @@
 
 .chart-x {
   fill: var(--fg-2);
-  font-size: 13px;
+  font-size: 14px;
   text-anchor: middle;
 }
 

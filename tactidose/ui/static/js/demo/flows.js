@@ -216,8 +216,11 @@ function flowDefinitions(env) {
         label: 'User command is recognized: "What do I take now?"',
         async run(shared) {
           const reply = await postText('What do I take now?', 'keyboard');
-          if (reply?.intent !== 'CHECK_DUE') throw new Error(`Understood as ${reply?.intent || 'nothing'}, expected CHECK_DUE.`);
+          // With check_due_auto_dispense the reply already reports the dispense.
           shared.autoDispensed = reply?.outcome?.status === 'DISPENSED';
+          if (reply?.intent !== 'CHECK_DUE' && !shared.autoDispensed) {
+            throw new Error(`Understood as ${reply?.intent || 'nothing'}, expected CHECK_DUE.`);
+          }
           return `TactiDose said: “${reply.text}”`;
         },
       },
@@ -454,7 +457,7 @@ export function createFlows(container, env) {
       const ui = h('div', { class: 'step-ui' });
       const li = h('li', { class: 'step', 'data-status': 'pending' }, iconEl,
         h('div', { class: 'step-main' },
-          h('span', { class: 'step-label' }, `${i + 1}. ${step.label}`), state, detail, ui));
+          h('span', { class: 'step-label' }, `${i + 1}. ${step.label}`), ' ', state, detail, ui));
       return { li, icon: iconEl, state, detail, ui };
     });
     flow.runBtn = h('button', { type: 'button', class: 'btn btn-primary', on: { click: () => run(flow) } }, icon('play'), `Run flow ${flow.id}`);

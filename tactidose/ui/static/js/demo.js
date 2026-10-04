@@ -7,7 +7,7 @@
 
 import { get, post, postText } from './api.js';
 import { EventStream, RECONNECTED, parseTimestamp } from './events.js';
-import { $$, byId, confirmDialog, createNotifier, debounce, errorState, errorText, h, prettyJson, replaceChildren } from './dom.js';
+import { $$, byId, confirmDialog, createNotifier, debounce, errorState, errorText, h, initLiveRegions, prettyJson, replaceChildren } from './dom.js';
 import { hydrateIcons, icon } from './icons.js';
 import { initThemeToggle } from './theme.js';
 import { bindConnIndicator } from './conn.js';
@@ -48,6 +48,7 @@ const STATE_SOURCES = Object.freeze([
 const NOTICE_ICONS = { success: 'check-circle', error: 'warning', warning: 'warning', info: 'info' };
 const MAX_TRANSCRIPT = 250;
 
+initLiveRegions();
 hydrateIcons();
 initThemeToggle(byId('theme-toggle'));
 const notify = createNotifier(byId('notices'), { iconFor: (kind) => icon(NOTICE_ICONS[kind] || 'info') });
@@ -161,7 +162,13 @@ function renderPhysical(p) {
   if (!p) return;
   if (Number(p.num_slots)) carousel.setNumSlots(Number(p.num_slots));
   const gate = p.gate_open === true ? 'OPEN' : p.gate_open === false ? 'CLOSED' : 'UNKNOWN';
-  carousel.update({ angleDeg: p.angle_deg, slot: p.slot ?? null, gate, targetSlot: p.target_slot ?? null });
+  carousel.update({
+    angleDeg: p.angle_deg,
+    slot: p.slot ?? null,
+    gate,
+    targetSlot: p.target_slot ?? null,
+    moving: ['MOVING', 'HOMING', 'AT_TARGET'].includes(p.state),
+  });
   simCaption.textContent = `${carousel.describe()}${p.state ? ` Firmware state: ${p.state}.` : ''}`;
   const rows = [
     ['Angle', Number.isFinite(Number(p.angle_deg)) ? `${Number(p.angle_deg).toFixed(1)}°` : '–'],

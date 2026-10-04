@@ -120,9 +120,10 @@ function askForPin(reason) {
   if (deps.promptPin) return Promise.resolve(deps.promptPin(reason));
   // Concurrent 401s share one prompt.
   if (!pinRequest) {
+    const generic = !reason || /^caregiver pin required\.?$/i.test(String(reason).trim());
     pinRequest = promptDialog({
       title: 'Caregiver PIN required',
-      message: reason || 'Enter the caregiver PIN to make changes.',
+      message: generic ? 'Enter the caregiver PIN to make changes.' : reason,
       label: 'Caregiver PIN',
       type: 'password',
       inputmode: 'numeric',

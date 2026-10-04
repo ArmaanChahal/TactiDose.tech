@@ -219,7 +219,8 @@ def assess_event(
     def blocked(reason: BlockReason) -> Assessment:
         return Assessment(event, display_slot(event, slots), comp_id, reason)
 
-    # Rule 2 — status; uncertain / exhausted hardware errors are locked for caregiver review.
+    # Rule 2 — status (handoff §4.2: never re-open an accessed dose; §30: never retry an
+    # uncertain one). Uncertain / exhausted hardware errors are locked for caregiver review.
     if not is_dispensable(event, settings):
         return blocked(BlockReason.NEEDS_REVIEW)
     # Rule 3 — only active, human-confirmed medications on active schedules (handoff §18 activation rule).
@@ -359,7 +360,8 @@ def evaluate(session: Session, now: datetime, settings: Settings) -> SafetyDecis
         .order_by(DoseEvent.scheduled_at, DoseEvent.event_id)
     ).all())
 
-    # Rule 1 — only events whose window contains now: scheduled_at in [now - late, now + early].
+    # Rule 1 — only events whose window contains now (handoff §4.1 step 3 "finds the due
+    # scheduled event"): scheduled_at in [now - late, now + early].
     in_window_events = session.scalars(
         _events_query(settings)
         .where(DoseEvent.scheduled_at >= now - late, DoseEvent.scheduled_at <= now + early)
@@ -397,21 +399,16 @@ def evaluate(session: Session, now: datetime, settings: Settings) -> SafetyDecis
         slots=slots,
     )
 
-    def pick(verdict: Verdict, a: Assessment | None, ev: DoseEvent | None = None,
-             reason: BlockReason | None = None) -> SafetyDecision:
+    def pick(verdict: Verdict, a: Assessment) -> SafetyDecision:
         decision.verdict = verdict
-        if a is not None:
-            decision.event, decision.slot, decision.compartment_id = a.event, a.slot, a.compartment_id
-            decision.reason = a.reason if reason is None else reason
-        elif ev is not None:
-            decision.event, decision.slot = ev, display_slot(ev, slots)
-            decision.reason = reason
+        decision.event, decision.slot, decision.compartment_id = a.event, a.slot, a.compartment_id
+        decision.reason = a.reason
         return decision
 
     if in_progress:
         # Rule 5 makes nothing eligible while the device is dispensing.
         decision.queued, decision.due = due, []
-        return pick(Verdict.IN_PROGRESS, blocked[0], reason=BlockReason.IN_PROGRESS)
+        return pick(Verdict.IN_PROGRESS, blocked[0])        # blocked[0] is the first DISPENSING event
     if due:
         return pick(Verdict.ALLOW, due[0])
     review = [a for a in blocked if a.reason is BlockReason.NEEDS_REVIEW]
@@ -419,8 +416,10 @@ def evaluate(session: Session, now: datetime, settings: Settings) -> SafetyDecis
         return pick(Verdict.BLOCKED, review[0])
     too_soon = [a for a in blocked if a.reason in _DUPLICATE_REASONS]
     if accessed:
+        # Handoff §4.2: "That scheduled dose has already been accessed." — report the latest one.
         latest = max(accessed, key=lambda e: (_access_time(e), e.event_id))
-        return pick(Verdict.DUPLICATE, None, latest)
+        decision.verdict, decision.event, decision.slot = Verdict.DUPLICATE, latest, display_slot(latest, slots)
+        return decision
     if too_soon:
         return pick(Verdict.DUPLICATE, too_soon[0])
     config = [a for a in blocked if a.reason in _CONFIG_REASONS]

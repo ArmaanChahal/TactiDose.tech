@@ -522,10 +522,10 @@ class Scheduler:
     def _reconcile_events(self, s: Session, sched: Schedule, now: datetime) -> list[dict[str, Any]]:
         """After a schedule edit: drop/cancel open events that no longer match the schedule.
 
-        Events still matching the (active) schedule are kept. Stale events whose window
-        has not opened are deleted (they never left SCHEDULED, so nothing was reported);
-        stale in-window events are CANCELLED. Accessed, in-flight, closed-window and
-        review-locked events are never touched.
+        Events still matching the (active) schedule are kept. Stale, never-touched events
+        whose window has not opened are deleted (they never left SCHEDULED, so nothing was
+        reported); other stale open events are CANCELLED. Accessed, in-flight,
+        closed-window and review-locked events are never touched.
         """
         payloads: list[dict[str, Any]] = []
         rows = s.scalars(
@@ -542,7 +542,8 @@ class Scheduler:
                 continue
             if sched.active and self._is_valid_occurrence(sched, ev.scheduled_at):
                 continue
-            if ev.status == DoseStatus.SCHEDULED.value and start > now:
+            untouched = not ev.attempts and ev.hardware_result is None
+            if ev.status == DoseStatus.SCHEDULED.value and start > now and untouched:
                 payload = dose_update_payload(ev, self.clock, previous=ev.status, action="deleted")
                 payload["status"] = None
                 log_event(s, self.settings.device_id, LogCategory.DOSE, "DOSE_UNSCHEDULED",

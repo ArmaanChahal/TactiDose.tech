@@ -104,7 +104,10 @@ export function createMedications(ctx) {
     return active
       .slice()
       .sort((a, b) => String(a.time_of_day).localeCompare(String(b.time_of_day)))
-      .map((s) => `${time24To12(s.time_of_day)} ${describeRepeat(s).toLowerCase()}`)
+      .map((s) => {
+        const repeat = describeRepeat(s);
+        return `${time24To12(s.time_of_day)} ${repeat === 'Every day' ? 'every day' : `on ${repeat}`}`;
+      })
       .join('; ');
   }
 

@@ -8,7 +8,7 @@
 
 import { clearPin, get, hasPin } from './api.js';
 import { EventStream, RECONNECTED } from './events.js';
-import { byId, createNotifier } from './dom.js';
+import { byId, createNotifier, initLiveRegions } from './dom.js';
 import { hydrateIcons, icon } from './icons.js';
 import { initThemeToggle } from './theme.js';
 import { initTabs } from './tabs.js';
@@ -25,6 +25,7 @@ import { createAnalytics } from './cg/analytics.js';
 const NAME_KEY = 'tactidose.caregiverName';
 const NOTICE_ICONS = { success: 'check-circle', error: 'warning', warning: 'warning', info: 'info' };
 
+initLiveRegions();
 hydrateIcons();
 initThemeToggle(byId('theme-toggle'));
 
@@ -69,7 +70,7 @@ const ctx = {
   },
   async refreshClock() {
     try {
-      const state = await get('/api/state');
+      const state = await get('/api/state', { timeoutMs: 5000 });
       this.setNow(state?.now_local || state?.due?.now_local);
     } catch {
       /* clock stays unknown: times fall back to their own offsets */

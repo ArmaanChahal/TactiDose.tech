@@ -183,6 +183,15 @@ function liveRegion(id, politeness) {
   return el;
 }
 
+/**
+ * Create the hidden live regions up front: screen readers often miss the first
+ * change in a region that was only just inserted. Call once when a page starts.
+ */
+export function initLiveRegions() {
+  liveRegion('td-live-polite', 'polite');
+  liveRegion('td-live-assertive', 'assertive');
+}
+
 /** Announce a short message to screen readers without showing it. */
 export function announce(message, { assertive = false } = {}) {
   const el = liveRegion(assertive ? 'td-live-assertive' : 'td-live-polite', assertive ? 'assertive' : 'polite');

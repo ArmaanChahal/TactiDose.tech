@@ -15,7 +15,8 @@ from tests.test_hw_transports import running_tcp_simulator
 def make_sim(settings):
     devices: list[SimulatedDevice] = []
 
-    def make(speed: float = 40.0) -> SimulatedDevice:
+    # Moderate speed: the STOP-during-move check needs a move longer than thread scheduling jitter.
+    def make(speed: float = 15.0) -> SimulatedDevice:
         dev = SimulatedDevice(settings.model_copy(update={"sim_speed": speed}))
         devices.append(dev)
         dev.start()
@@ -37,7 +38,7 @@ def test_checklist_passes_including_buttons(settings, make_sim):
         elif ">>> Press the CANCEL" in line:
             sim.press("CANCEL")
 
-    code = run_hw_test(settings.model_copy(update={"sim_speed": 40.0}), transport_factory=sim.open_transport,
+    code = run_hw_test(settings, transport_factory=sim.open_transport,
                        repeat=2, interactive=True, out=console)
     text = "\n".join(out)
     assert code == EXIT_OK, text
@@ -49,11 +50,10 @@ def test_checklist_passes_including_buttons(settings, make_sim):
 
 
 def test_checklist_over_tcp_uses_the_real_serial_stack(settings, make_sim):
-    s = settings.model_copy(update={"sim_speed": 40.0})
     sim = make_sim()
     out: list[str] = []
-    with running_tcp_simulator(s, sim) as url:
-        code = run_hw_test(s, port=url, out=out.append)
+    with running_tcp_simulator(settings, sim) as url:
+        code = run_hw_test(settings, port=url, out=out.append)
     text = "\n".join(out)
     assert code == EXIT_OK, text
     assert "14/14 checks passed, 2 skipped" in text and url in text
@@ -94,7 +94,7 @@ def test_serial_conformance_target_runs_hardware_safe_scenarios(make_sim):
     sim = make_sim(speed=10.0)
     target = SerialConformanceTarget("sim", transport=sim.open_transport(), reset=sim.reboot)
     try:
-        assert target.name == "serial:sim://"
+        assert target.name == "serial:sim://" and target.real_hardware is True
         names = ["boot_homes_and_reports_ready", "ping_variants_and_blank_lines",
                  "unknown_and_overlong_commands", "dispense_happy_path", "stop_with_gate_open_closes_gate"]
         results = run_all(target, names=names, include_slow=False)

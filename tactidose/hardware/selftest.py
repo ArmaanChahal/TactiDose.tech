@@ -161,9 +161,13 @@ class _HwTest:
             name="hw-test-move", daemon=True,
         )
         mover.start()
-        if not self.wait_state(DeviceState.MOVING, 2.0):
+        moving = _wait(lambda: "move" in box or self.client.snapshot().state is DeviceState.MOVING,
+                       2.0, interval_s=0.002)
+        if "move" in box or not moving:
             mover.join(self.settings.timeout_move_s + 1)
             got = box.get("move")
+            if got is not None and got.ok:
+                return False, f"move finished before STOP could be sent ({_describe(got)})"
             return False, f"carousel never reported MOVING ({_describe(got) if got else 'no result'})"
         stop = self.client.stop()
         mover.join(self.settings.timeout_move_s + 1)
@@ -292,6 +296,10 @@ def run_hw_test(
         snap = client.snapshot()
         test = _HwTest(client, test_settings, out)
         test.run(max(1, int(repeat)), interactive)
+    except KeyboardInterrupt:
+        out("Interrupted: sending STOP.")
+        client.stop()                      # never leave the carousel moving or the gate open
+        raise
     finally:
         client.close()
     _print_table(test.results, out, f"TactiDose hardware self-test - {label} (fw {snap.fw_version or '?'})")
@@ -315,6 +323,9 @@ class SerialConformanceTarget:
     supports_faults = False
     supports_buttons = False
     supports_boot = True
+    #: Not used by the frozen runner yet: lets it skip ``hardware_safe: false`` scenarios on
+    #: real boards even though this target can reboot the device (see the report).
+    real_hardware = True
 
     def __init__(
         self,
