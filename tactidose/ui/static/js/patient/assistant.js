@@ -10,6 +10,7 @@ import { byId, debounce, errorText } from '../dom.js';
 import { createChatLog } from '../chat.js';
 import { displayTranscript } from '../pcm.js';
 import { VoiceInput, voiceInputAvailable } from '../voice.js';
+import { cancelPendingSpeech } from '../speech.js';
 import { speakAfter } from '../wellbeing.js';
 
 const TALK_LABELS = {
@@ -104,7 +105,10 @@ export function createAssistant(ctx) {
       }
       const actions = Array.isArray(reply?.actions) ? reply.actions : [];
       ctx.onActions(actions);
-      if (ctx.prefs.get('speakReplies') && reply?.text) ctx.speaker.speak(reply.text, reply.audio_url || null);
+      if (ctx.prefs.get('speakReplies') && reply?.text) {
+        cancelPendingSpeech();
+        ctx.speaker.speak(reply.text, reply.audio_url || null);
+      }
     } catch (err) {
       const message = err?.timeout || err?.network
         ? `There was no answer (${errorText(err)}). If you asked for a pill, check Home or History before asking again.`
@@ -202,6 +206,10 @@ export function createAssistant(ctx) {
   });
 
   return {
+    /** A message is waiting for the assistant's reply (its outcome will be spoken). */
+    get busy() {
+      return busy;
+    },
     show() {
       if (!loaded) loadConversation();
     },

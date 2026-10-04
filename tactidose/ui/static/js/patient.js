@@ -32,9 +32,11 @@ import {
 import { advanceLocalIso, spellOut } from './format.js';
 import { notificationSpeech } from './notifications.js';
 import { createDropHistory } from './history.js';
+import { createDispenseButtons } from './dispense.js';
 import { createCheckinHistory } from './wellbeing.js';
 import { createReports } from './reports.js';
 import { ReplySpeaker } from './voice.js';
+import { speakNatural } from './speech.js';
 import { createAssistant } from './patient/assistant.js';
 import { createSchedule } from './patient/schedule.js';
 
@@ -231,7 +233,7 @@ function showResult(view) {
 }
 
 function speakIfWanted(text) {
-  if (prefs.get('speakDrops') && text) speaker.speak(text);
+  if (prefs.get('speakDrops') && text) speakNatural(speaker, text);   // server voice (ElevenLabs if set)
 }
 
 function setDropping(on) {
@@ -314,8 +316,11 @@ function onLiveNotification(n) {
   if (!SPOKEN_KINDS.has(n.kind) || !prefs.get('speakDrops')) return;
   const dropId = n.data?.drop_id;
   if (dropId !== undefined && state.spokenDrops.has(dropId)) return;
+  // A drop or assistant turn of this page is still waiting for its answer: that answer is spoken
+  // (speaking this too would cut one voice off with the other).
+  if (state.dropping || assistant?.busy) return;
   if (dropId !== undefined) state.spokenDrops.add(dropId);
-  if (!assistant?.listening) speaker.speak(notificationSpeech(n));
+  if (!assistant?.listening) speakNatural(speaker, notificationSpeech(n));
 }
 
 // ------------------------------------------------------------------ care team
@@ -377,6 +382,14 @@ async function start() {
   });
 
   byId('device-stop').addEventListener('click', stopDevice);
+  const dispense = createDispenseButtons(byId('dispense-controls'), {
+    // Wi-Fi dispenser: "Dispense pill N" = the Drop pill button of container N (same rules, same feedback).
+    onDispense: (number) => {
+      const v = (state.status?.containers || []).map(containerView).find((c) => c.number === number);
+      if (v) requestDrop(v);
+      else notify(`Container ${number} is not set up.`, 'error');
+    },
+  });
   renderShare();
 
   assistant = createAssistant({
@@ -438,6 +451,7 @@ async function start() {
     if (!state.status || !d || typeof d !== 'object') return;
     state.status = { ...state.status, device: d };
     renderDevice(d);
+    dispense.render(d);   // online / offline changed
   });
   stream.on(RECONNECTED, () => {
     loadStatus();

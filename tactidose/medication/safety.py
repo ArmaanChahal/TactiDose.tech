@@ -132,11 +132,12 @@ def find_confirmable(
         select(DoseEvent)
         .options(selectinload(DoseEvent.medication))
         .where(
-            DoseEvent.device_id == settings.device_id,
             DoseEvent.status == DoseStatus.DISPENSED.value,
             DoseEvent.dispensed_at >= cutoff,
         )
     )
+    if not settings.effective_shared_device:      # shared dispenser: every patient's record counts
+        q = q.where(DoseEvent.device_id == settings.device_id)
     if patient_id is not None:
         q = q.where(DoseEvent.user_id == patient_id)
     if medication_id is not None:

@@ -392,19 +392,19 @@ def test_cooldown_zero_disables_the_check(env: Env):
     assert st.cooldown_remaining_s == 0 and st.next_manual_allowed_at is None
 
 
-def test_per_pill_floor_blocks_the_same_pill_even_with_the_cooldown_off(env: Env):
+def test_doctor_cooldown_is_the_only_wait_on_request(env: Env):
+    """No fixed per-pill floor: with the doctor/family cooldown at 0 the same pill can drop again."""
     env.set_cooldown(0)
     assert env.manual(0).status == "DROPPED"                  # 07:55 Vitamin C
-    env.advance(minutes=30)
-    agent = env.agent(0)
-    assert (agent.status, agent.reason, agent.cooldown_remaining_s) == ("DENIED", "COOLDOWN", 30 * 60)
-    assert agent.message.startswith("Vitamin C (demo candy) was dropped at 7:55 AM. The next one can drop at 8:55 AM")
+    env.advance(minutes=5)
+    assert env.agent(0).status == "DROPPED"                   # same pill, 5 minutes later
     demo = env.drops.request_drop(patient_id=env.patient, source="demo", slot=0, requested_by_user_id=env.doctor)
-    assert demo.reason == "COOLDOWN"
-    assert env.manual(1).status == "DROPPED"                  # another pill is fine
-    env.advance(minutes=30)
-    assert env.manual(0).status == "DROPPED"                  # 60 minutes after the first one
-    assert env.drop_commands() == ["DROP_SLOT 0", "DROP_SLOT 1", "DROP_SLOT 0"]
+    assert demo.status == "DROPPED"
+    env.set_cooldown(30)                                      # the doctor's cooldown applies again
+    env.advance(minutes=1)
+    denied = env.manual(0)
+    assert (denied.status, denied.reason) == ("DENIED", "COOLDOWN")
+    assert env.drop_commands() == ["DROP_SLOT 0", "DROP_SLOT 0", "DROP_SLOT 0"]
 
 
 def test_uncertain_drops_count_for_the_cooldown(env: Env):

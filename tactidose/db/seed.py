@@ -8,7 +8,10 @@
 * device ``settings.device_id`` bound to Alex with ``settings.manual_cooldown_minutes``
   (taken over only if it has no real patient yet - see ``auth.service.bind_device_in_session``);
 * containers 1-3 loaded with confirmed demo medications and 20 / 12 / 3 pills (container 3 is low
-  on stock, to show alerts), and daily schedules 08:00 / 13:00 / 20:00 created by Dr. Lee.
+  on stock, to show alerts), and daily schedules 08:00 / 13:00 / 20:00 created by Dr. Lee;
+* with a shared dispenser (``settings.effective_shared_device``, e.g. the Wi-Fi ESP32): four more
+  test patients (:data:`DEMO_EXTRA_PATIENTS`: jordan@, maria@, priya@, chen@demo.tactidose), each
+  with their own device record on the same dispenser and the same demo setup, linked to Dr. Lee.
 
 It is idempotent and safe to run on every start: rows that exist are left as they are, so pill
 counts, a changed cooldown, edited or deleted schedules and archived medications survive a
@@ -117,6 +120,16 @@ DEMO_MEDICATIONS: tuple[DemoMedication, ...] = (
                    "Demo candy, not a medicine. One piece with dinner.", 2, 3, "20:00"),
 )
 
+#: Extra test patients, seeded when the dispenser is shared (``settings.effective_shared_device``,
+#: e.g. the Wi-Fi ESP32): each gets their own device record on the same dispenser with the demo
+#: medications, containers and schedules, linked to Dr. Lee. Password: ``settings.demo_password``.
+DEMO_EXTRA_PATIENTS: tuple[DemoAccount, ...] = (
+    DemoAccount("patient2", "jordan@demo.tactidose", "Jordan Lee", Role.PATIENT),
+    DemoAccount("patient3", "maria@demo.tactidose", "Maria Garcia", Role.PATIENT),
+    DemoAccount("patient4", "priya@demo.tactidose", "Priya Patel", Role.PATIENT),
+    DemoAccount("patient5", "chen@demo.tactidose", "Chen Wei", Role.PATIENT),
+)
+
 DEMO_WARNINGS = ("Demo only - not a real medication.",)
 
 #: Wiped by :func:`reset_demo`, children before parents (foreign keys are enforced on SQLite).
@@ -179,6 +192,9 @@ def _seed(db: Database, settings: Settings, clock: Clock, *, auth: AuthService |
     now = clock.now()
     accounts = [_ensure_account(db, auth, spec, password, restore=restore) for spec in DEMO_ACCOUNTS]
     ids = {a["key"]: a["user_id"] for a in accounts}
+    # Shared dispenser only; accounts first, each in its own transaction (like the ones above).
+    extra_accounts = [_ensure_account(db, auth, spec, password, restore=restore)
+                      for spec in DEMO_EXTRA_PATIENTS] if settings.effective_shared_device else []
     specs = DEMO_MEDICATIONS[: settings.num_slots]
 
     with db.session() as s:
@@ -218,6 +234,8 @@ def _seed(db: Database, settings: Settings, clock: Clock, *, auth: AuthService |
                         "schedules were not seeded (run reset-demo to take it back)",
                         settings.device_id, dev.user_id if dev else None)
 
+        extra = _seed_extra_patients(s, settings, doctor, specs, extra_accounts, now, restore=restore)
+
         log_event(s, settings.device_id, LogCategory.ADMIN, "DEMO_RESET" if restore else "DEMO_SEEDED", {
             "patient_id": patient.user_id, "users_created": sum(a["created"] for a in accounts),
             "links_created": links_created, "medications_created": meds_created,
@@ -249,6 +267,7 @@ def _seed(db: Database, settings: Settings, clock: Clock, *, auth: AuthService |
             "schedules": [{"schedule_id": sc.schedule_id, "medication_id": sc.medication_id,
                            "time_of_day": sc.time_of_day} for sc in schedules],
             "cooldown_minutes": dev.manual_cooldown_minutes if dev is not None else None,
+            "extra_patients": extra,
             "created": {
                 "users": sum(a["created"] for a in accounts),
                 "links": links_created,
@@ -262,6 +281,40 @@ def _seed(db: Database, settings: Settings, clock: Clock, *, auth: AuthService |
                                            "reason": "demo_reset" if restore else "demo_seeded"})
     log.info("demo %s: %s", "reset" if restore else "seed", summary["created"])
     return summary
+
+
+def _seed_extra_patients(s: Session, settings: Settings, doctor: User, specs: tuple[DemoMedication, ...],
+                         accounts: list[dict[str, Any]], now: datetime, *, restore: bool) -> list[dict[str, Any]]:
+    """Shared dispenser: the extra test patients, each with their own device record (same
+    dispenser), demo medications, containers and schedules, linked to Dr. Lee."""
+    from tactidose.medication.compartments import ensure_patient_device
+
+    out: list[dict[str, Any]] = []
+    for account in accounts:
+        patient = s.get(User, account["user_id"])
+        if patient is None:
+            continue
+        _ensure_links(s, patient, (doctor,), now)
+        dev, _created = ensure_patient_device(s, settings, patient, now=now)
+        if restore:
+            dev.manual_cooldown_minutes = settings.manual_cooldown_minutes
+            dev.auto_drop_enabled = settings.auto_drop_enabled
+            dev.updated_at = now
+        comps = {c.slot_number: c for c in
+                 s.scalars(select(Compartment).where(Compartment.device_id == dev.device_id))}
+        meds: list[Medication] = []
+        for med_spec in specs:
+            med, _ = _ensure_medication(s, patient, doctor, med_spec, now, restore=restore)
+            meds.append(med)
+            _ensure_container(s, settings, dev, comps, med, med_spec, now, restore=restore)
+            _ensure_schedule(s, med, doctor, med_spec, now, restore=restore)
+        if restore:
+            _retire_other_setup(s, patient, comps, meds, now)
+        s.flush()
+        out.append({"patient_id": patient.user_id, "email": account["email"],
+                    "display_name": account["display_name"], "device_id": dev.device_id,
+                    "created": account["created"]})
+    return out
 
 
 def _ensure_account(db: Database, auth: AuthService, spec: DemoAccount, password: str, *,

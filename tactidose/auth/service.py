@@ -517,7 +517,23 @@ class AuthService:
             except Exception:   # the account exists; the binding can be redone (CLI bind-device)
                 log.warning("could not bind device %s to new patient #%s",
                             self.settings.device_id, created.user_id, exc_info=True)
+            if self.settings.effective_shared_device:
+                self._ensure_shared_device(created.user_id)
         return created
+
+    def _ensure_shared_device(self, patient_id: int) -> None:
+        """Shared dispenser (one ESP32 for everyone): give a new patient their own device record."""
+        from tactidose.medication.compartments import ensure_patient_device
+
+        try:
+            with self.db.session() as s:
+                patient = s.get(User, patient_id)
+                if patient is not None:
+                    dev, made = ensure_patient_device(s, self.settings, patient, now=self.clock.now())
+                    if made:
+                        log.info("patient #%s gets device record %s on the shared dispenser", patient_id, dev.device_id)
+        except Exception:   # the account exists; the device can be added later
+            log.warning("could not create a shared-dispenser device for patient #%s", patient_id, exc_info=True)
 
     def new_link_code(self, s: Session) -> str:
         """A link code not used by any other account (call inside a session)."""

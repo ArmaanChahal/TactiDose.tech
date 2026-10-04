@@ -16,7 +16,7 @@ import contextlib
 import logging
 import re
 from datetime import datetime, time, timedelta, timezone
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr
@@ -41,6 +41,7 @@ log = logging.getLogger(__name__)
 router = APIRouter(route_class=TactiRoute, tags=["device"])
 
 NO_PATIENT = "No patient is linked to this device yet."
+NOT_ALLOWED_DEVICE = "You do not have access to this dispenser."
 RELEASE_REFUSED = (
     "Pills are only released with DROP_SLOT n, so every pill is recorded. "
     "DISPENSE_SLOT and OPEN_GATE are not allowed from the console."
@@ -54,11 +55,41 @@ MAX_TRAVEL = timedelta(days=30)
 
 
 def _device_patient(services: Any, user: Any, *, edit: bool) -> int:
+    """The patient whose device ``user`` may use: the configured device's patient, or - with a
+    shared dispenser (everyone on the same ESP32) - the user's own / a linked patient that has a
+    device record. 403 otherwise."""
     owner = domain.device_patient(services)
-    if owner is None:
-        raise HTTPException(403, NO_PATIENT)
-    (check_edit if edit else check_view)(services, user, owner)
-    return owner
+    check = check_edit if edit else check_view
+    if owner is not None:
+        try:
+            check(services, user, owner)
+            return owner
+        except HTTPException:
+            if not services.settings.effective_shared_device:
+                raise
+    if services.settings.effective_shared_device:
+        for pid in _shared_candidates(services, user):
+            try:
+                check(services, user, pid)
+                return pid
+            except HTTPException:
+                continue
+    raise HTTPException(403, NO_PATIENT if owner is None else NOT_ALLOWED_DEVICE)
+
+
+def _shared_candidates(services: Any, user: Any) -> list[int]:
+    """Patients with a device record that ``user`` is (patient) or is linked to (caregiver)."""
+    from sqlalchemy import select
+
+    from tactidose.db.models import Device
+
+    pids = [user.user_id] if getattr(user, "is_patient", False) else [
+        int(p) for p in services.auth.linked_patient_ids(user)]
+    if not pids:
+        return []
+    with services.db.session() as s:
+        have = set(s.scalars(select(Device.user_id).where(Device.user_id.in_(pids))))
+    return [p for p in pids if p in have]
 
 
 def _interrupt(services: Any) -> bool:
@@ -99,10 +130,39 @@ DemoOperator = Annotated[AuthUser, Depends(demo_operator)]
 # --------------------------------------------------------------------------- device
 
 
+def _device_out(hardware: Any) -> dict[str, Any]:
+    """DeviceSnapshot + the restocking lid (Wi-Fi ESP32 only): ``lid_supported`` and ``lid``
+    (open/closed/None)."""
+    out = device_view(hardware)
+    out["lid_supported"] = callable(getattr(hardware, "set_lid", None))
+    out["lid"] = getattr(hardware, "lid_state", None)
+    return out
+
+
 @router.get("/api/device")
 def get_device(user: CurrentUser, services: ServicesDep) -> dict[str, Any]:
     _device_patient(services, user, edit=False)
-    return device_view(services.hardware)
+    return _device_out(services.hardware)
+
+
+class LidBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    state: Literal["open", "close"]
+
+
+@router.post("/api/device/lid")
+def lid(body: LidBody, user: CurrentUser, services: ServicesDep) -> dict[str, Any]:
+    """Open / close the dispenser lid to restock it (Wi-Fi ESP32: GET /lid?state=open|close).
+    Restocking is a doctor/family task (like refills): linked doctor/family only. Never drops a pill;
+    dispensing is POST /api/patients/{pid}/drops (drop rules) -> GET /dispense?pill=N."""
+    _device_patient(services, user, edit=True)
+    set_lid = getattr(services.hardware, "set_lid", None)
+    if not callable(set_lid):
+        raise HTTPException(409, "This dispenser has no lid control (only the Wi-Fi ESP32 has one).")
+    out = set_lid(body.state == "open")
+    log.info("lid %s requested by user %s -> %s", body.state, user.user_id, out.get("detail"))
+    return {**out, "device": _device_out(services.hardware)}
 
 
 @router.post("/api/device/home")

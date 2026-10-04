@@ -110,11 +110,13 @@ from tactidose.hardware.protocol import (
 )
 from tactidose.medication import safety
 from tactidose.medication.compartments import (
+    actuated,
     assigned_slots,
     container_info,
     device_compartments,
     iso,
     patient_device,
+    served_device_ids,
 )
 from tactidose.medication.errors import ConflictError, NotFoundError, ValidationError
 from tactidose.medication.notifications import PendingNotifications, clock_label, duration_label, plural
@@ -427,7 +429,7 @@ class DropService:
             today = tuple(dose_to_view(ev, self.clock, slots) for ev in today_events)
             upcoming = self._next_event(s, patient_id, now)
             alerts = self._alerts(s, dev, containers, today_events, snap)
-            configured = dev is not None and dev.device_id == self.settings.device_id
+            configured = actuated(dev, self.settings)
             status = PatientStatus(
                 patient_id=user.user_id,
                 display_name=user.display_name,
@@ -532,8 +534,9 @@ class DropService:
         changed_count = 0
         try:
             with self.db.session() as s:
+                served = served_device_ids(s, self.settings)
                 rows = s.scalars(select(PillDrop).where(
-                    PillDrop.device_id == self.settings.device_id, PillDrop.completed_at.is_(None))).all()
+                    PillDrop.device_id.in_(served), PillDrop.completed_at.is_(None))).all()
                 for row in rows:
                     res = s.execute(
                         update(PillDrop)
@@ -556,7 +559,7 @@ class DropService:
                     fx.patients[row.patient_id] = "recovery"
                 events = s.scalars(
                     select(DoseEvent).options(selectinload(DoseEvent.medication)).where(
-                        DoseEvent.device_id == self.settings.device_id, DoseEvent.status == _DISPENSING)
+                        DoseEvent.device_id.in_(served), DoseEvent.status == _DISPENSING)
                 ).all()
                 for ev in events:
                     changed = cas_transition(s, ev.event_id, _DISPENSING, {
@@ -756,7 +759,7 @@ class DropService:
         hhmm = f"{local_now.hour:02d}:{local_now.minute:02d}"
         with self.db.session() as s:
             dev = patient_device(s, self.settings, patient_id)
-            if dev is None or dev.device_id != self.settings.device_id:
+            if not actuated(dev, self.settings):
                 raise ValidationError("This patient has no dispenser connected.")
             if medication_id is not None:
                 med = s.get(Medication, medication_id) if is_id(medication_id) else None
@@ -874,7 +877,7 @@ class DropService:
         if dev is None:
             return _Check(None, _R.DEVICE_UNAVAILABLE.value, "No dispenser is linked to this account.")
         t = _Target(device_id=dev.device_id, patient_id=dev.user_id)
-        if dev.device_id != self.settings.device_id:
+        if not actuated(dev, self.settings):     # shared dispenser: every patient's device record
             return _Check(t, _R.DEVICE_UNAVAILABLE.value, "This dispenser is not connected right now.")
         refusal = self._permission(req)
         if refusal is not None:
@@ -887,7 +890,8 @@ class DropService:
         blocker = self._review_blocker(s, dev.device_id, now, t)
         if blocker is not None:
             return blocker
-        # 4. global cooldown (manual / agent / button, and the demo panel)
+        # 4. the doctor/family cooldown (devices.manual_cooldown_minutes; manual / agent / button and
+        #    the demo panel). It is the only waiting time on request: 0 = no wait at all.
         if req.source in _COOLDOWN_SOURCES or req.source == _DEMO:
             remaining, next_at, last_at = self._cooldown(s, dev, now)
             if remaining > 0 and next_at is not None and last_at is not None:
@@ -898,11 +902,6 @@ class DropService:
                     return in_flight
                 return _Check(t, _R.COOLDOWN.value, self._cooldown_message(last_at, next_at, remaining, now),
                               remaining_s=remaining, next_allowed_at=self.clock.to_local(next_at))
-            # 4b. per-pill floor: the same medication never drops twice within
-            # min_dose_interval_minutes on request, even with the global cooldown turned off.
-            floor = self._per_pill_floor(s, t, now)
-            if floor is not None:
-                return floor
         # 5. scheduled dose already satisfied
         if req.source == _SCHEDULE:
             satisfied = self._satisfaction(s, t, now)
@@ -1014,38 +1013,6 @@ class DropService:
         if now >= next_at:
             return 0, None, last
         return int(math.ceil((next_at - now).total_seconds())), next_at, last
-
-    def _per_pill_floor(self, s: Session, t: _Target, now: datetime) -> _Check | None:
-        """Deny when this medication dropped (or may have) within ``min_dose_interval_minutes``."""
-        minutes = int(self.settings.min_dose_interval_minutes or 0)
-        if minutes <= 0 or t.medication_id is None:
-            return None
-        happened = func.coalesce(PillDrop.completed_at, PillDrop.requested_at)
-        row = s.execute(
-            select(PillDrop.completed_at, PillDrop.requested_at)
-            .where(
-                PillDrop.patient_id == t.patient_id,
-                PillDrop.medication_id == t.medication_id,
-                PillDrop.status.in_(_COUNTED),
-                happened >= now - timedelta(minutes=minutes),
-            )
-            .order_by(happened.desc(), PillDrop.drop_id.desc())
-            .limit(1)
-        ).first()
-        if row is None:
-            return None
-        last_at = row.completed_at or row.requested_at
-        next_at = last_at + timedelta(minutes=minutes)
-        remaining = int(math.ceil((next_at - now).total_seconds()))
-        if remaining <= 0:
-            return None
-        last_local, next_local = self.clock.to_local(last_at), self.clock.to_local(next_at)
-        day = " tomorrow" if next_local.date() > self.clock.to_local(now).date() else ""
-        name = t.medication_name or _container(t.slot)
-        return _Check(t, _R.COOLDOWN.value,
-                      f"{name} was dropped at {clock_label(last_local)}. The next one can drop{day} at "
-                      f"{clock_label(next_local)}, in {duration_label(remaining)}.",
-                      remaining_s=remaining, next_allowed_at=self.clock.to_local(next_at))
 
     def _satisfaction(self, s: Session, t: _Target, now: datetime) -> _Check | None:
         ev = s.get(DoseEvent, t.event_id)
@@ -1764,7 +1731,7 @@ class DropService:
         if dev is None:
             return [{"kind": NotificationKind.DEVICE_ALERT.value, "message": "No dispenser is linked to this account."}]
         alerts: list[dict[str, Any]] = []
-        if dev.device_id != self.settings.device_id or snap is None or not snap.connected:
+        if not actuated(dev, self.settings) or snap is None or not snap.connected:
             alerts.append({"kind": NotificationKind.DEVICE_ALERT.value, "message": "The dispenser is not connected."})
         elif snap.state is DeviceState.FAULT:
             alerts.append({"kind": NotificationKind.DEVICE_ALERT.value,
@@ -1798,14 +1765,16 @@ class DropService:
         now = self.clock.now()
         late = timedelta(minutes=self.settings.dose_late_minutes)
         with self.db.session() as s:
-            dev = s.get(Device, self.settings.device_id)
-            if dev is None or not dev.auto_drop_enabled:
-                return []
+            # Every served device record (one, or all of them with a shared dispenser) whose
+            # automatic drops are on; each dose must belong to that record's patient.
+            served = served_device_ids(s, self.settings)
             rows = s.execute(
                 select(DoseEvent.event_id, DoseEvent.user_id)
+                .join(Device, Device.device_id == DoseEvent.device_id)
                 .where(
-                    DoseEvent.device_id == dev.device_id,
-                    DoseEvent.user_id == dev.user_id,
+                    DoseEvent.device_id.in_(served),
+                    Device.auto_drop_enabled.is_(True),
+                    DoseEvent.user_id == Device.user_id,
                     DoseEvent.status.in_(safety.OPEN_STATUSES),
                     DoseEvent.needs_review.is_(False),
                     DoseEvent.scheduled_at <= now,
