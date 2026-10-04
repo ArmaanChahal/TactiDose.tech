@@ -32,6 +32,7 @@ import {
 import { advanceLocalIso, spellOut } from './format.js';
 import { notificationSpeech } from './notifications.js';
 import { createDropHistory } from './history.js';
+import { createLidControls } from './lid.js';
 import { createCheckinHistory } from './wellbeing.js';
 import { createReports } from './reports.js';
 import { ReplySpeaker } from './voice.js';
@@ -377,6 +378,7 @@ async function start() {
   });
 
   byId('device-stop').addEventListener('click', stopDevice);
+  const lid = createLidControls(byId('lid-controls'), { notify: (m, k) => notify(m, k) });
   renderShare();
 
   assistant = createAssistant({
@@ -438,6 +440,7 @@ async function start() {
     if (!state.status || !d || typeof d !== 'object') return;
     state.status = { ...state.status, device: d };
     renderDevice(d);
+    lid.load();   // online / offline changed: refresh the lid buttons
   });
   stream.on(RECONNECTED, () => {
     loadStatus();

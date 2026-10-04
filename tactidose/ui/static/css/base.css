@@ -1278,3 +1278,8 @@ th.num {
 .k-guided {
   margin: 1rem 0;
 }
+
+/* Wi-Fi dispenser lid buttons (js/lid.js) */
+.lid-controls {
+  margin-top: 0.75rem;
+}

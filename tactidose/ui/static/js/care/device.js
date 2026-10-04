@@ -1,7 +1,7 @@
 /**
  * Care portal "Device" tab: the device snapshot in words (GET /api/device, live
  * `device.state` events) and Home / Stop / Reconnect (doctor/family; Stop is always
- * allowed).
+ * allowed), plus Open / Close lid on the Wi-Fi ESP32 (js/lid.js).
  */
 
 import { get, post } from '../api.js';
@@ -9,12 +9,14 @@ import { byId, errorState, errorText, h, replaceChildren } from '../dom.js';
 import { icon } from '../icons.js';
 import { commandResultBox, snapshotRows } from '../hwview.js';
 import { lazyPanel } from './panel.js';
+import { createLidControls } from '../lid.js';
 
 /** ctx: {notify(message, kind)} */
 export function createDeviceTab(ctx) {
   const facts = byId('dev-facts');
   const result = byId('dev-result');
   const buttons = [byId('dev-home'), byId('dev-stop'), byId('dev-reconnect'), byId('dev-refresh')];
+  const lid = createLidControls(byId('dev-lid'), { notify: ctx.notify });
 
   function render(snap) {
     replaceChildren(facts, snapshotRows(snap).flatMap(([k, v]) => [h('dt', {}, k), h('dd', {}, String(v))]));
@@ -22,7 +24,9 @@ export function createDeviceTab(ctx) {
 
   async function load() {
     try {
-      render(await get('/api/device'));
+      const device = await get('/api/device');
+      render(device);
+      lid.render(device);
     } catch (err) {
       replaceChildren(facts, errorState(err, load, icon('warning')));
     }

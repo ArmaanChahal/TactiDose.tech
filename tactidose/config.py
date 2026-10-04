@@ -161,10 +161,13 @@ class Settings(BaseSettings):
     buzzer_backend: Literal["laptop", "serial", "both", "none"] = "laptop"
 
     # ------------------------------------------------------------------ hardware
-    hardware_mode: Literal["sim", "serial", "none"] = "sim"
+    #: "wifi" = the ESP32 over HTTP (lid / dispense endpoints in tactidose/hardware/wifi_config.py).
+    hardware_mode: Literal["sim", "serial", "wifi", "none"] = "sim"
     #: "auto" (USB VID/PID scan), "COM5", "/dev/ttyUSB0", "socket://127.0.0.1:7777", "loop://"
     serial_port: str = "auto"
     serial_baud: int = 115200
+    #: hardware_mode "wifi": the ESP32's address. Empty = wifi_config.ESP32_BASE_URL (http://192.168.1.45).
+    esp32_url: str | None = None
     #: Home automatically after connecting if the device reports it is not homed.
     hw_auto_home: bool = True
     hw_heartbeat_s: float = Field(5.0, ge=0.5, le=120)
@@ -249,7 +252,8 @@ class Settings(BaseSettings):
     analytics_salt: SecretStr = SecretStr("tactidose-demo-salt-change-me")
 
     # ------------------------------------------------------------------ validators
-    @field_validator("timezone", "mic_device", "audio_output_device", "wellbeing_config_file", mode="before")
+    @field_validator("timezone", "mic_device", "audio_output_device", "wellbeing_config_file", "esp32_url",
+                     mode="before")
     @classmethod
     def _blank_to_none(cls, v: object) -> object:
         if isinstance(v, str) and not v.strip():
@@ -342,6 +346,7 @@ class Settings(BaseSettings):
             "num_slots": self.num_slots,
             "hardware_mode": self.hardware_mode,
             "serial_port": self.serial_port,
+            "esp32_url": self.esp32_url if self.hardware_mode == "wifi" else None,
             "demo_mode": self.demo_mode,
             "timezone": self.timezone or "system",
             "database": "tidb" if (self.tidb_host and not self.database_url) else (

@@ -340,6 +340,26 @@ answered after `OK DROPPED n` / `ERR NO_PILL` and `OK READY`.
 | 3 fixed containers, one dispensing wheel/servo each | no motion (report `OK MOVING n`, `OK AT_SLOT n` immediately) | servo of container `n` rotates one pocket |
 | Drop sensor (optional, recommended) | – | IR break-beam in the chute sampled during the release |
 
+## 12.7 The Wi-Fi ESP32 **(added 2026-10-04)**
+
+The Wi-Fi ESP32 does not speak this line protocol. It has three HTTP endpoints:
+* `GET /dispense?pill=N`
+* `GET /lid?state=open|close`
+* `GET /` (reachability)
+
+The host maps them in `tactidose/hardware/wifi_device.py`, using the IP and paths in
+`tactidose/hardware/wifi_config.py`. For example, `DROP_SLOT n` becomes `/dispense?pill=n+1`.
+Outcomes:
+
+| HTTP result | Outcome |
+|---|---|
+| 2xx | `OK DROPPED` |
+| Another status | definite failure |
+| Cannot connect | not sent |
+| No answer | UNCERTAIN |
+
+See README "Connecting the ESP32 over Wi-Fi".
+
 ## 13. Optional extension — `BUZZER` **(added 2026-10-04)**
 
 A buzzer helps a blind user find the pill ("follow the sound to the table"). The extension is

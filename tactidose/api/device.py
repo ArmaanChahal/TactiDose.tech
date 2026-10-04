@@ -16,7 +16,7 @@ import contextlib
 import logging
 import re
 from datetime import datetime, time, timedelta, timezone
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr
@@ -99,10 +99,37 @@ DemoOperator = Annotated[AuthUser, Depends(demo_operator)]
 # --------------------------------------------------------------------------- device
 
 
+def _device_out(hardware: Any) -> dict[str, Any]:
+    """DeviceSnapshot + the lid (Wi-Fi ESP32 only): ``lid_supported`` and ``lid`` (open/closed/None)."""
+    out = device_view(hardware)
+    out["lid_supported"] = callable(getattr(hardware, "set_lid", None))
+    out["lid"] = getattr(hardware, "lid_state", None)
+    return out
+
+
 @router.get("/api/device")
 def get_device(user: CurrentUser, services: ServicesDep) -> dict[str, Any]:
     _device_patient(services, user, edit=False)
-    return device_view(services.hardware)
+    return _device_out(services.hardware)
+
+
+class LidBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    state: Literal["open", "close"]
+
+
+@router.post("/api/device/lid")
+def lid(body: LidBody, user: CurrentUser, services: ServicesDep) -> dict[str, Any]:
+    """Open / close the dispenser lid (Wi-Fi ESP32: GET /lid?state=open|close). The device's patient
+    and linked doctor/family. Never drops a pill; dispensing goes through the drop rules."""
+    _device_patient(services, user, edit=False)
+    set_lid = getattr(services.hardware, "set_lid", None)
+    if not callable(set_lid):
+        raise HTTPException(409, "This dispenser has no lid control (only the Wi-Fi ESP32 has one).")
+    out = set_lid(body.state == "open")
+    log.info("lid %s requested by user %s -> %s", body.state, user.user_id, out.get("detail"))
+    return {**out, "device": _device_out(services.hardware)}
 
 
 @router.post("/api/device/home")
