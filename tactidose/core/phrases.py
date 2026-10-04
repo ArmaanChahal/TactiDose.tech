@@ -96,9 +96,47 @@ DEVICE_RESTARTED = "The dispenser restarted. Please wait while it gets ready."
 DEVICE_NEEDS_ATTENTION = "The dispenser needs attention. Please ask your caregiver for help."
 NOT_SET_UP = "This dispenser is not set up yet. Please ask your caregiver."
 
+# ---- guided judge demo (tactidose/guided/runner.py); candy, not medicine
+DEMO_INTRO = ("Welcome to the CareBridge guided demo. This demo uses candy, not real medicine. "
+              "We will go through your morning, noon and night pills.")
+DEMO_ASK_TAKE = {
+    "morning": "It's time for your morning pill. Do you want to take it?",
+    "noon": "It's time for your noon pill. Do you want to take it?",
+    "night": "It's time for your night pill. Do you want to take it?",
+}
+DEMO_REASK_YES_NO = "Sorry, I didn't catch that. Please say yes or no."
+DEMO_DECLINED = "Okay, I won't drop it. I've noted that you skipped this one."
+DEMO_BUZZER = "I'm turning on the buzzer. Follow the sound to the table and take your pill."
+DEMO_ASK_TAKEN = "Did you take the pill?"
+DEMO_TAKEN_YES = TAKEN_NOTED
+DEMO_TAKEN_NO = "Okay. I've noted that you haven't taken it."
+DEMO_NO_DOSE = "I couldn't find this pill in your schedule, so nothing was dropped."
+DEMO_ASK_CHECKIN = "How has your day been? How are you feeling? Any problems?"
+DEMO_CHECKIN_THANKS = "Thank you for telling me. I've noted it for your care team."
+DEMO_CHECKIN_NONE = "Okay, no answer this time."
+DEMO_ALERT_SENT = "I've let your care team know. The demo has stopped."
+DEMO_NEXT = "Next pill coming up."
+DEMO_GOODBYE = "That's the end of the demo. Thank you. Here is your summary."
+DEMO_STOPPED = "The demo was stopped."
+
 #: Every static sentence the system may say verbatim (no names, no clock times). Pre-rendered
 #: by ``warm-tts-cache`` so the core interaction stays understandable offline.
 CRITICAL_PHRASES: list[str] = [
+    DEMO_INTRO,
+    *DEMO_ASK_TAKE.values(),
+    DEMO_REASK_YES_NO,
+    DEMO_DECLINED,
+    DEMO_BUZZER,
+    DEMO_ASK_TAKEN,
+    DEMO_TAKEN_NO,
+    DEMO_NO_DOSE,
+    DEMO_ASK_CHECKIN,
+    DEMO_CHECKIN_THANKS,
+    DEMO_CHECKIN_NONE,
+    DEMO_ALERT_SENT,
+    DEMO_NEXT,
+    DEMO_GOODBYE,
+    DEMO_STOPPED,
     PILL_DROPPED,
     COOLDOWN,
     CONTAINER_EMPTY,

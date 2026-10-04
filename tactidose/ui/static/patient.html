@@ -133,7 +133,9 @@
         <div class="check-row"><input type="checkbox" id="speak-replies"><label for="speak-replies">Speak replies</label></div>
         <button type="button" id="stop-speaking" class="btn"><span class="icon-slot" data-icon="volume-off"></span> Stop speaking</button>
         <button type="button" id="new-chat" class="btn"><span class="icon-slot" data-icon="plus"></span> New conversation</button>
+        <button type="button" id="start-checkin" class="btn" aria-describedby="checkin-hint"><span class="icon-slot" data-icon="sun"></span> Well-being check-in</button>
       </div>
+      <p id="checkin-hint" class="muted">Optional: a few questions about mood, stress and sleep. You are also asked after a pill drops. Saved answers appear in History, where your doctor and family can see them.</p>
     </section>
 
     <!-- ============================================================ Schedule -->
@@ -156,6 +158,11 @@
       <h1 id="history-title" class="view-title" tabindex="-1">History</h1>
       <p class="view-intro">Every pill request, including the ones that did not drop and why.</p>
       <div id="history-root"></div>
+      <section class="history-section" aria-labelledby="wellbeing-title">
+        <h2 id="wellbeing-title">Well-being check-ins</h2>
+        <p class="field-hint">Your answers about mood, stress and sleep after your pills, with your own notes. Your doctor and family can see the ones you saved. You can delete any of them.</p>
+        <div id="wellbeing-root"></div>
+      </section>
     </section>
 
     <!-- ============================================================ Reports -->

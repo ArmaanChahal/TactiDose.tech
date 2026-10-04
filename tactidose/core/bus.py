@@ -47,6 +47,12 @@ class Topic:
     PATIENT_STATUS = "patient.status"      # {"patient_id", "reason"} — refetch hint for portals
     AGENT = "agent.message"                # {"patient_id", "conversation_id", "message_id", "role"}
     REPORT = "report.updated"              # {"patient_id", "report_id", "status"}
+    #: The well-being check-in asked after a drop: {"user_id" (= the patient), "patient_id",
+    #: "session_id", "drop_id", "text", "next_question"} - sent to the patient only.
+    WELLBEING_PROMPT = "wellbeing.prompt"
+    #: Guided judge demo progress (tactidose/guided/runner.py): {"patient_id", "run_id", "state",
+    #: "slot", "step", "say", "audio_url", "awaiting", "heard", "buzzer", "outcome", "results"}.
+    DEMO_GUIDED = "demo.guided"
 
 
 @dataclass(frozen=True)

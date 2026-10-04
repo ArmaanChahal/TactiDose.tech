@@ -71,6 +71,7 @@ def health_payload(services: Any) -> dict[str, Any]:
         "scheduler": loop.status() if loop is not None else {"running": False},
         "voice": {"enabled": bool(settings.voice_enabled), "running": voice_loop is not None,
                   **(_call_status(voice_loop) or {})},
+        "wellbeing": _call_status(getattr(services, "wellbeing", None)) or {"available": False},
         "degraded": sorted(getattr(services, "startup_errors", {}) or {}),
     }
 

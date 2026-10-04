@@ -220,6 +220,10 @@ class Services:
     speaker: Any = None
     voice_loop: Any = None
     analytics_sync: Any = None
+    #: Optional well-being check-in bridge (tactidose/wellbeing.py); None when off or not installed.
+    wellbeing: Any = None
+    #: Guided judge demo runner (tactidose/guided/); its endpoints need demo mode.
+    guided: Any = None
     scheduler_loop: SchedulerLoop | None = None
     #: Step name -> short error, for steps that failed at build/startup ("degraded" in /api/health).
     startup_errors: dict[str, str] = field(default_factory=dict)
@@ -278,12 +282,14 @@ def build_services(
     speaker: Any = None,
     voice_loop: Any = None,
     analytics_sync: Any = None,
+    wellbeing: Any = None,
 ) -> Services:
     """Construct the real implementations (ARCHITECTURE §11) for everything not injected.
 
     Parallel v2 modules are imported lazily here. ``notifications``, ``drops`` and ``auth`` are
     required (an ImportError propagates); the agent, reports and the extras are optional: if
-    they fail to build the app still starts and their endpoints answer 503.
+    they fail to build the app still starts and their endpoints answer 503. The well-being
+    check-in is optional too: None when disabled or when ``tactidose-wellbeing`` is not installed.
     """
     settings = settings or get_settings()
     errors: dict[str, str] = {}
@@ -356,17 +362,31 @@ def build_services(
             return SnowflakeSync(db, settings, clock, bus=bus)
 
         analytics_sync = _optional(errors, "analytics_sync", _sync)
+    if wellbeing is None and settings.wellbeing_enabled:
+        def _wellbeing() -> Any:
+            from tactidose.wellbeing import build_wellbeing
+
+            return build_wellbeing(settings, db=db, clock=clock, bus=bus)
+
+        wellbeing = _optional(errors, "wellbeing", _wellbeing)
 
     services = Services(
         settings=settings, clock=clock, bus=bus, db=db, hardware=hardware, sim=sim,
         notifications=notifications, compartments=compartments, catalog=catalog, scheduler=scheduler,
         drops=drops, auth=auth, agent=agent, reports=reports, extractor=extractor, onboarding=onboarding,
-        speaker=speaker, voice_loop=voice_loop, analytics_sync=analytics_sync,
+        speaker=speaker, voice_loop=voice_loop, analytics_sync=analytics_sync, wellbeing=wellbeing,
         startup_errors=errors, owns_db=owns_db,
     )
     services.scheduler_loop = SchedulerLoop(
         scheduler, drops, interval_s=settings.scheduler_tick_s, hardware=hardware,
     )
+
+    def _guided() -> Any:
+        from tactidose.guided import GuidedDemoRunner
+
+        return GuidedDemoRunner(services)
+
+    services.guided = _optional(errors, "guided", _guided)
     return services
 
 
@@ -499,6 +519,10 @@ def shutdown(services: Services) -> None:
         _close("voice loop", services.voice_loop.close)
     if services.analytics_sync is not None:
         _close("analytics sync", services.analytics_sync.close)
+    if services.guided is not None:
+        _close("guided demo", services.guided.close)
+    if services.wellbeing is not None:
+        _close("wellbeing", services.wellbeing.close)
     agent_close = getattr(services.agent, "close", None)
     if callable(agent_close):
         _close("agent", agent_close)
@@ -647,6 +671,10 @@ def create_app(settings: Settings | None = None, *, services: Services | None = 
     app.state.services = services
     install_error_handlers(app)
     app.include_router(api_router())
+    if services.wellbeing is not None:
+        from tactidose.wellbeing import mount_wellbeing
+
+        mount_wellbeing(app, services)
     _add_pages(app)
     _mount_static(app)
     return app

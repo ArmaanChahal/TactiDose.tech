@@ -17,6 +17,8 @@ import { containerView, kioskBanner, nextPillText, outcomeView, remainingCooldow
 import { notificationSpeech } from './notifications.js';
 import { displayTranscript } from './pcm.js';
 import { ReplySpeaker, VoiceInput, voiceInputAvailable } from './voice.js';
+import { speakAfter } from './wellbeing.js';
+import { createGuidedDemo } from './guided.js';
 
 const CONFIRM_MS = 6000;
 
@@ -39,7 +41,14 @@ const state = {
   chatting: false,
   lastBanner: '',
   spokenDrops: new Set(),
+  /** after-drop well-being check-in offers already said */
+  offered: new Set(),
+  /** a guided demo is running: it does the talking (no notification speech, no offers) */
+  guided: false,
 };
+
+/** Guided judge demo controls (demo mode only; created in start()). */
+let guided = null;
 
 function caption(text, { speak = true, assertive = false } = {}) {
   byId('k-caption').textContent = text;
@@ -170,6 +179,7 @@ async function chat(text) {
     const body = { text, input_mode: 'voice', speak: true };
     if (state.conversationId) body.conversation_id = state.conversationId;
     const reply = await post('/api/agent/chat', body, { timeoutMs: LONG_TIMEOUT_MS });
+    if (reply?.wellbeing?.offer_id) state.offered.add(reply.wellbeing.offer_id);
     state.conversationId = reply?.conversation_id ?? state.conversationId;
     for (const a of reply?.actions || []) if (a?.drop_id) state.spokenDrops.add(a.drop_id);
     byId('k-caption').textContent = reply?.text || '';
@@ -195,8 +205,25 @@ const voice = new VoiceInput({
   onInterim: (text) => {
     byId('k-heard').textContent = `Hearing: ${displayTranscript(text)}`;
   },
-  onResult: (text) => chat(text),
+  onResult: (text) => {
+    if (guided?.awaiting) guided.answer(text, 'voice');
+    else chat(text);
+  },
 });
+
+/** Voice-first guided demo: start listening once the question has been said. */
+function listenWhenQuiet(tries = 0) {
+  if (!guided?.awaiting || voice.active || !voiceInputAvailable()) return;
+  if (speaker.speaking && tries < 60) {
+    setTimeout(() => listenWhenQuiet(tries + 1), 250);
+    return;
+  }
+  try {
+    voice.start();
+  } catch {
+    /* the Talk button and the text box still work */
+  }
+}
 
 function toggleTalk() {
   if (!voiceInputAvailable()) {
@@ -212,6 +239,7 @@ byId('k-stop').addEventListener('click', async () => {
   voice.cancel();
   speaker.stop();
   disarm();
+  if (guided?.running) guided.stop();
   try {
     await post('/api/device/stop', {});
     caption('Stopped.', { speak: true });
@@ -278,9 +306,37 @@ async function start() {
     const dropId = n?.data?.drop_id;
     if (dropId !== undefined && state.spokenDrops.has(dropId)) return;
     if (dropId !== undefined) state.spokenDrops.add(dropId);
-    if (!voice.active && !state.chatting) caption(notificationSpeech(n));
+    if (!voice.active && !state.chatting && !state.guided) caption(notificationSpeech(n));
+  });
+  stream.on('wellbeing.prompt', (d, _env, meta) => {
+    if (meta?.replayed || !d?.offer_id || !d.text || state.offered.has(d.offer_id)) return;
+    state.offered.add(d.offer_id);
+    if (state.chatting || state.guided) return; // the reply of the message in flight carries the offer
+    byId('k-caption').textContent = d.text;
+    announce(d.text);
+    speakAfter(speaker, d.text);
   });
   stream.on(RECONNECTED, loadStatus);
+  try {
+    const health = await get('/api/health');
+    if (health?.demo_mode) {
+      byId('k-guided').hidden = false;
+      guided = createGuidedDemo(byId('k-guided-root'), {
+        stream,
+        speaker,
+        onCaption: (text) => {
+          byId('k-caption').textContent = text;
+          announce(text);
+        },
+        onAwaiting: () => listenWhenQuiet(),
+        onRunning: (on) => {
+          state.guided = on;
+        },
+      });
+    }
+  } catch {
+    /* no guided demo on this screen */
+  }
   stream.start();
   await loadStatus();
   setInterval(renderBanner, 1000);

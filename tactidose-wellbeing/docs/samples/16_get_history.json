@@ -1,0 +1,60 @@
+{
+  "method": "GET",
+  "path": "/v1/me/history",
+  "status": 200,
+  "headers": {
+    "X-Dev-User-Id": "synthetic-user-001"
+  },
+  "request": null,
+  "response": {
+    "schema_version": "1.0",
+    "user_id": "synthetic-user-001",
+    "records": [
+      {
+        "record_id": "rec_00000000000000000000000000000001",
+        "started_at": "2026-01-15T09:00:05Z",
+        "completed_at": "2026-01-15T09:01:05Z",
+        "support_requested": true,
+        "answers": [
+          {
+            "question_id": "mood",
+            "answer_value": "good",
+            "status": "answered",
+            "recorded_at": "2026-01-15T09:00:20Z",
+            "note_text": "Went for a walk in the park",
+            "note_recorded_at": "2026-01-15T09:00:30Z"
+          },
+          {
+            "question_id": "stress",
+            "answer_value": null,
+            "status": "skipped",
+            "recorded_at": "2026-01-15T09:00:40Z",
+            "note_text": null,
+            "note_recorded_at": null
+          },
+          {
+            "question_id": "sleep",
+            "answer_value": "poor",
+            "status": "answered",
+            "recorded_at": "2026-01-15T09:00:45Z",
+            "note_text": null,
+            "note_recorded_at": null
+          },
+          {
+            "question_id": "support",
+            "answer_value": "yes",
+            "status": "answered",
+            "recorded_at": "2026-01-15T09:00:55Z",
+            "note_text": null,
+            "note_recorded_at": null
+          }
+        ],
+        "sharing": {
+          "share_answers": false,
+          "share_notes": false
+        }
+      }
+    ],
+    "speech_text": "You have 1 saved check-in. The most recent one, from January 15: Mood: good, with a note. Stress: skipped. Sleep: poor. Support from a person: yes."
+  }
+}

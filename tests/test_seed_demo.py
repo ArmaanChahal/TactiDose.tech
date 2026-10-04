@@ -230,8 +230,9 @@ def test_reset_wipes_dynamic_data_and_restores_the_demo(db_v2, settings_v2, cloc
     for model in DYNAMIC_MODELS:
         assert _count(db_v2, model) == 0, model.__tablename__
     assert restored["wiped"] == {"report_deliveries": 1, "reports": 1, "conversation_messages": 1,
-                                 "conversations": 1, "notifications": 1, "pill_drops": 1, "dose_events": 1,
-                                 "auth_sessions": 1}
+                                 "conversations": 1, "wellbeing_answers": 0, "wellbeing_checkins": 0,
+                                 "guided_demo_slots": 0,
+                                 "notifications": 1, "pill_drops": 1, "dose_events": 1, "auth_sessions": 1}
     assert auth.resolve(token) is None                       # everyone is signed out
     assert restored["patient_id"] == summary["patient_id"]
     assert auth.patient_profile(summary["patient_id"])["link_code"] == code_before   # links stay valid

@@ -53,6 +53,7 @@ from tactidose.db.models import (
     Device,
     DoseEvent,
     Frequency,
+    GuidedDemoSlot,
     LogCategory,
     Medication,
     MedicationSource,
@@ -63,6 +64,8 @@ from tactidose.db.models import (
     Role,
     Schedule,
     User,
+    WellbeingAnswer,
+    WellbeingCheckin,
 )
 from tactidose.db.session import Database
 from tactidose.medication.errors import ConflictError, ValidationError
@@ -118,7 +121,8 @@ DEMO_WARNINGS = ("Demo only - not a real medication.",)
 
 #: Wiped by :func:`reset_demo`, children before parents (foreign keys are enforced on SQLite).
 DYNAMIC_MODELS: tuple[type, ...] = (
-    ReportDelivery, Report, ConversationMessage, Conversation, Notification, PillDrop, DoseEvent, AuthSession,
+    ReportDelivery, Report, ConversationMessage, Conversation, WellbeingAnswer, WellbeingCheckin, GuidedDemoSlot,
+    Notification, PillDrop, DoseEvent, AuthSession,
 )
 
 

@@ -22,6 +22,7 @@ stops repeated drops, and doctors and family members see everything in their own
 | Conversation log | Only the **patient's** conversations are stored, including what the assistant looked up and asked for. |
 | Reports | A PDF for the last N days (adherence, drops, refused requests, inventory, a factual summary of conversations) stored in the database, viewable in both portals, emailable to the doctor. |
 | Two portals | **Patient** portal and **doctor/family** portal, with login. Caregivers link to a patient using the patient's ID + link code. Only doctor/family can change schedules, cooldown, containers and medications. |
+| Well-being check-in (optional) | After a pill drops, the patient is asked whether they want a quick check-in (mood, stress, sleep, support, with optional notes in their own words). Saved check-ins are stored next to the pill history, shown in a **Well-being check-ins** section of History in both portals, linked to the pill they followed. Non-clinical, never affects pills. Lives in [`tactidose-wellbeing/`](tactidose-wellbeing/README.md). |
 | Safety | AI never controls the motor. Uncertain drops (e.g. the USB cable is pulled mid-drop) are flagged and block further drops until a caregiver checks. |
 
 ## Quick start (no hardware needed)
@@ -34,6 +35,7 @@ cd TactiDose.tech
 python -m venv .venv
 .venv\Scripts\activate
 pip install -e ".[all,dev]"
+pip install -e "./tactidose-wellbeing[dev]"  # optional well-being check-in
 python -m tactidose download-voice-model     # offline speech recognition (~40 MB), optional
 python -m tactidose run --sim                # simulated ESP32
 ```
@@ -51,6 +53,42 @@ Open **http://127.0.0.1:8000** and sign in with a demo account (password `demo12
 The **demo panel** (`/demo`) has a demo clock ("jump to the next dose"), simulator controls
 (faults, pill counts, button presses) and one-click checklists for the four demo flows. See
 [docs/DEMO_SCRIPT.md](docs/DEMO_SCRIPT.md).
+
+### Guided judge demo (morning, noon, night)
+
+A voice-first run of one demo day in about a minute, with candy, not medicine. It works fully
+offline with the simulator and the rule-based assistant, and sounds better with `GEMINI_API_KEY` /
+`ELEVENLABS_API_KEY` in `.env`.
+
+1. `python -m tactidose warm-tts-cache` once (pre-renders every fixed demo line, optional), then
+   `python -m tactidose run --sim --demo-pause-seconds 7`.
+2. Screen for the judges: open **http://127.0.0.1:8000/kiosk** signed in as `alex@demo.tactidose`.
+3. Operator: open **/demo** signed in as `sam@demo.tactidose` (another browser or a private window),
+   keep **Start from fresh demo data** ticked and press **Run guided demo** (Alex can also press it
+   on the kiosk, without the fresh-data option).
+4. For each slot the kiosk asks "It's time for your morning pill. Do you want to take it?", listens
+   automatically and answers by voice. If the microphone or Wi-Fi fails, type the answer in the
+   **Type an answer** box (kiosk or demo panel).
+   * **Yes:** "I'm turning on the buzzer…" plays a beeping (simulated) buzzer and drops the pill
+     through the normal drop rules. Then "Did you take the pill?".
+   * **No:** the dose is skipped. An unclear answer is asked once more, then counts as no.
+   * Then "How has your day been? How are you feeling? Any problems?". Mood, symptoms, concerns
+     and severity are read from the answer (rules, or Gemini when configured, always checked).
+     Emergency wording ("chest pain", "can't breathe") gets the fixed emergency reply, notifies the
+     care team and stops the demo.
+5. After the night pill: a goodbye and a spoken summary of the three slots. **Stop demo** (or the
+   kiosk's Stop button, or saying "stop") ends it at any time and stops the dispenser.
+
+How it fits in: each slot is that container's *scheduled dose* (08:00 / 13:00 / 20:00). The demo
+clock jumps forward to 15 minutes before each one, and the drop is
+`DropService.request_drop(source="schedule")`, so every normal rule applies and the manual
+cooldown is never involved. Results: `guided_demo_slots`, `pill_drops`, `dose_events` and a
+"Guided demo" conversation. Rehearse without a browser:
+
+```bash
+python -m tactidose guided-demo                    # scripted answers, prints every line and the stored rows
+python -m tactidose guided-demo --answers "yes|yes|Good day|no|Fine|no|Tired"
+```
 
 Run `python -m tactidose doctor` any time to check the setup (database, serial ports, voice model,
 audio devices, which cloud services are configured).
@@ -228,12 +266,14 @@ Design rule: **AI interprets, deterministic code authorizes and actuates.** The 
 | `python -m tactidose generate-report --patient-id 1 --days 7` | make a PDF report from the command line |
 | `python -m tactidose send-test-email --to you@example.com` | check the email setup |
 | `python -m tactidose download-voice-model`, `warm-tts-cache` | offline voice setup |
+| `python -m tactidose guided-demo [--answers "yes\|yes\|…"] [--pause N]` | headless guided judge demo on the simulator (own data folder) |
 
 ## Testing
 
 ```powershell
 pytest                       # ~2,000 tests, about 2 minutes
 pytest -m "not native"       # skip the Docker-based firmware tests
+cd tactidose-wellbeing && pytest   # the check-in package's own suite (138 tests)
 python -m tactidose conformance --target sim      # 32 protocol scenarios on the simulator
 python -m tactidose conformance --target native   # the same against the real firmware code (Docker)
 ```
@@ -250,6 +290,9 @@ tactidose/
   hardware/     serial client, ESP32 simulator, protocol, self-test
   voice/ audio/ offline speech recognition, text-to-speech
   ui/static/    login, patient portal, care portal, demo panel, kiosk
+  wellbeing.py  host-side bridge to the optional check-in (identity, chat routing, /api/wellbeing)
+  guided/       guided judge demo: MORNING / NOON / NIGHT state machine, free-text check-in extraction
+tactidose-wellbeing/  standalone well-being check-in package (own pyproject, tests, docs)
 firmware/       reference ESP32 firmware + native test harness
 docs/           architecture, API, serial protocol, hardware integration, demo script
 tests/          pytest suite

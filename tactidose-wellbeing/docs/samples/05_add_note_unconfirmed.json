@@ -1,0 +1,63 @@
+{
+  "method": "POST",
+  "path": "/v1/sessions/ses_00000000000000000000000000000001/actions",
+  "status": 200,
+  "headers": {
+    "X-Dev-User-Id": "synthetic-user-001"
+  },
+  "request": {
+    "schema_version": "1.0",
+    "request_id": "req-0005",
+    "action": "add_note",
+    "note_text": "Went for a walk in the park"
+  },
+  "response": {
+    "schema_version": "1.0",
+    "request_id": "req-0005",
+    "session_id": "ses_00000000000000000000000000000001",
+    "user_id": "synthetic-user-001",
+    "action": "add_note",
+    "session_status": "awaiting_note_confirmation",
+    "step": 4,
+    "storage_mode": "save",
+    "next_question": {
+      "kind": "note_confirmation",
+      "question_id": "mood",
+      "prompt": "Here is your note: “Went for a walk in the park”. Should I keep it with your answer? Say yes to keep it, change to say it again, or no to leave it out.",
+      "options": [
+        "yes",
+        "change",
+        "no"
+      ],
+      "position": 1,
+      "total": 4
+    },
+    "speech_text": "Here is your note: “Went for a walk in the park”. Should I keep it with your answer? Say yes to keep it, change to say it again, or no to leave it out.",
+    "pending_input": {
+      "confirmed": false,
+      "kind": "note_draft",
+      "question_id": "mood",
+      "candidate_value": null,
+      "note_text": "Went for a walk in the park"
+    },
+    "confirmed_answers": [
+      {
+        "question_id": "mood",
+        "answer_value": "good",
+        "status": "answered",
+        "recorded_at": "2026-01-15T09:00:20Z",
+        "note_text": null,
+        "note_recorded_at": null
+      }
+    ],
+    "summary": null,
+    "support_requested": false,
+    "handoff": null,
+    "urgent_support": null,
+    "record_id": null,
+    "events": [],
+    "expires_at": "2026-01-15T09:30:25Z",
+    "idempotent_replay": false,
+    "error": null
+  }
+}

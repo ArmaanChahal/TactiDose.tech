@@ -17,6 +17,8 @@ import { createLineLog } from './linelog.js';
 import { commandResultBox } from './hwview.js';
 import { requireSession, roleName, watchSession } from './session.js';
 import { DEMO_ACCOUNTS } from './authforms.js';
+import { createGuidedDemo } from './guided.js';
+import { ReplySpeaker } from './voice.js';
 import {
   addMinutesToLocal,
   advanceLocalIso,
@@ -458,6 +460,12 @@ async function start() {
   if (!me) return;
   renderSession();
   watchSession(stream);
+  createGuidedDemo(byId('guided-root'), {
+    stream,
+    speaker: new ReplySpeaker(),
+    speak: () => byId('guided-speak').checked,
+    allowReset: true,
+  });
   stream.on(RECONNECTED, () => {
     loadSim();
     loadClock();

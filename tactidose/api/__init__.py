@@ -10,9 +10,11 @@ def api_router() -> APIRouter:
     from tactidose.api import (
         accounts,
         chat,
+        checkins,
         device,
         events,
         extras,
+        guided,
         health,
         notifications,
         patients,
@@ -20,7 +22,7 @@ def api_router() -> APIRouter:
     )
 
     root = APIRouter()
-    for module in (health, accounts, patients, chat, reports, notifications, events, device, extras):
+    for module in (health, accounts, patients, checkins, chat, reports, notifications, events, device, guided, extras):
         root.include_router(module.router)
     return root
 

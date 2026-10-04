@@ -127,6 +127,33 @@ class Settings(BaseSettings):
     smtp_ssl: bool = Field(False, validation_alias=_alias("SMTP_SSL", "TACTIDOSE_SMTP_SSL"))
     smtp_timeout_s: float = Field(20.0, gt=0, le=120)
 
+    # ------------------------------------------------------------------ well-being check-in (optional)
+    #: The non-clinical check-in from ``tactidose-wellbeing/`` (needs that package installed).
+    #: It never affects drops, schedules or the agent's decisions (tactidose/wellbeing.py).
+    #: Saved check-ins live in the main database next to pill_drops (patient + care team see them).
+    wellbeing_enabled: bool = True
+    #: After every pill that drops, offer the patient a check-in (portal / kiosk / agent reply).
+    wellbeing_after_drop: bool = True
+    #: At most one after-drop offer per patient in this many minutes (0 = after every drop).
+    wellbeing_after_drop_gap_minutes: int = Field(120, ge=0, le=1440)
+    #: Urgent-support wording and verified crisis resources (tactidose-wellbeing/config/*.json).
+    wellbeing_config_file: Path | None = None
+    #: Inactivity timeout of an open check-in; unsaved answers are discarded after it.
+    wellbeing_session_ttl_s: int = Field(1800, ge=60, le=86400)
+    #: Render check-in replies with the server TTS (ElevenLabs when configured). Off by default:
+    #: replies can read the patient's own note back, so the browser speaks them locally.
+    wellbeing_server_tts: bool = False
+
+    # ------------------------------------------------------------------ guided demo (demo mode only)
+    #: Pause between the MORNING / NOON / NIGHT slots of the guided judge demo (tactidose/guided/).
+    demo_pause_seconds: float = Field(7.0, ge=0, le=120)
+    #: How long the guided demo waits for a spoken/typed answer before treating it as unclear.
+    demo_answer_timeout_s: float = Field(45.0, ge=1, le=600)
+    #: How long the (simulated) buzzer sounds after a pill drops, to guide the patient to the table.
+    demo_buzzer_seconds: float = Field(5.0, ge=0, le=60)
+    #: Extract mood / symptoms / concerns from the free-text check-in with Gemini (rules otherwise).
+    demo_checkin_ai: bool = True
+
     # ------------------------------------------------------------------ hardware
     hardware_mode: Literal["sim", "serial", "none"] = "sim"
     #: "auto" (USB VID/PID scan), "COM5", "/dev/ttyUSB0", "socket://127.0.0.1:7777", "loop://"
@@ -216,7 +243,7 @@ class Settings(BaseSettings):
     analytics_salt: SecretStr = SecretStr("tactidose-demo-salt-change-me")
 
     # ------------------------------------------------------------------ validators
-    @field_validator("timezone", "mic_device", "audio_output_device", mode="before")
+    @field_validator("timezone", "mic_device", "audio_output_device", "wellbeing_config_file", mode="before")
     @classmethod
     def _blank_to_none(cls, v: object) -> object:
         if isinstance(v, str) and not v.strip():
@@ -326,6 +353,7 @@ class Settings(BaseSettings):
             "manual_cooldown_minutes_default": self.manual_cooldown_minutes,
             "auto_drop_enabled": self.auto_drop_enabled,
             "allow_registration": self.allow_registration,
+            "wellbeing_enabled": self.wellbeing_enabled,
         }
 
 

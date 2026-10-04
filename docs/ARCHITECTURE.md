@@ -16,6 +16,7 @@ Where this document conflicts with the original handoff, **this document wins**.
 | Agent | The patient talks to it (voice or text). It checks the database (status, history) and decides whether to request a pill; the deterministic rules above have the final say. All patient↔agent messages, tool calls and results are stored. |
 | Reports | PDF for the last *N* days (drops, schedule adherence, inventory, conversation summary), stored in the DB, viewable in both portals, emailable to the doctor. |
 | Portals | **Patient** and **doctor/family** with login. Caregivers link to a patient with the patient's database ID + link code. Only doctor/family can edit schedules, cooldown, containers/refills and medications. |
+| Well-being check-in | Optional, non-clinical (`tactidose-wellbeing/` package via `tactidose/wellbeing.py`). Offered to the patient after every `DROPPED` pill (rate-limited); saved check-ins go to `wellbeing_checkins` / `wellbeing_answers` linked to the drop, visible to the patient and linked doctor/family (`GET /api/patients/{pid}/wellbeing`), deletable by the patient only. Its turns are answered before the agent and never stored in `conversations`; it never gates or influences drops. See `CLAUDE.md`. |
 | Optional extras | Gemini label scanning, Snowflake analytics, TiDB, blind-friendly kiosk screen, offline device-side voice loop — kept behind config, off the main flow. |
 
 ## 2. Principles
@@ -63,6 +64,7 @@ tactidose/
 │   ├── service.py            AuthService (implements AuthServiceAPI): register/login/sessions/links    [platform]
 │   └── deps.py               FastAPI dependencies: current_user, require_patient_access, ...            [platform]
 ├── api/                      routers per docs/API.md v2, SSE with per-user filtering                   [platform]
+├── wellbeing.py              optional check-in bridge: after-drop offer, DB repository, identity, chat routing [extras]
 ├── voice/ · audio/ · integrations/ · core/phrases.py   (wave 1, reused; v1 core/assistant.py removed)    [agent / extras]
 └── ui/static/                login, patient portal, care portal, demo panel, optional kiosk           [ui]
 firmware/                     reference ESP32 firmware (+DROP_SLOT, 3 containers)                        [hardware]

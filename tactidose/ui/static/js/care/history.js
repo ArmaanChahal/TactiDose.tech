@@ -1,13 +1,15 @@
 /**
  * Care portal "History" tab: every drop request (shared history view with "It dropped"
  * / "It did not drop" for uncertain drops) and the scheduled doses of a chosen day with
- * "Skip this dose" (POST /api/patients/{pid}/doses/{event_id}/skip).
+ * "Skip this dose" (POST /api/patients/{pid}/doses/{event_id}/skip), and the patient's saved
+ * well-being check-ins (read-only).
  */
 
 import { get, post } from '../api.js';
 import { byId, confirmDialog, errorState, errorText, h, replaceChildren, setLoading } from '../dom.js';
 import { icon } from '../icons.js';
 import { createDropHistory } from '../history.js';
+import { createCheckinHistory } from '../wellbeing.js';
 import { doseSummary, renderDoseList } from '../doses.js';
 import { lazyPanel } from './panel.js';
 
@@ -21,6 +23,11 @@ export function createHistoryTab(ctx) {
     getOffset: ctx.getOffset,
     getNow: ctx.getNow,
     onChanged: ctx.onChanged,
+  });
+  const checkins = createCheckinHistory(byId('cg-wellbeing-root'), {
+    getPatientId: () => ctx.pid,
+    audience: 'caregiver',
+    getOffset: ctx.getOffset,
   });
   const dateInput = byId('doses-date');
   const doseList = byId('doses-list');
@@ -72,6 +79,7 @@ export function createHistoryTab(ctx) {
 
   const panel = lazyPanel(() => {
     drops.load();
+    checkins.load();
     loadDoses();
   });
   return {

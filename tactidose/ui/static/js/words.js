@@ -69,6 +69,7 @@ export const NOTIFICATION_KIND = Object.freeze({
   REPORT_READY: { word: 'Report ready', icon: 'file', tone: 'info' },
   REPORT_SENT: { word: 'Report sent', icon: 'mail', tone: 'info' },
   DEVICE_ALERT: { word: 'Device problem', icon: 'warning', tone: 'bad', urgent: true },
+  HEALTH_CONCERN: { word: 'Needs attention', icon: 'warning', tone: 'bad', urgent: true },
 });
 
 /** dose_events.status (DoseStatus). */
