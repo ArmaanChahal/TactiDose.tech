@@ -100,7 +100,8 @@ DemoOperator = Annotated[AuthUser, Depends(demo_operator)]
 
 
 def _device_out(hardware: Any) -> dict[str, Any]:
-    """DeviceSnapshot + the lid (Wi-Fi ESP32 only): ``lid_supported`` and ``lid`` (open/closed/None)."""
+    """DeviceSnapshot + the restocking lid (Wi-Fi ESP32 only): ``lid_supported`` and ``lid``
+    (open/closed/None)."""
     out = device_view(hardware)
     out["lid_supported"] = callable(getattr(hardware, "set_lid", None))
     out["lid"] = getattr(hardware, "lid_state", None)
@@ -121,9 +122,10 @@ class LidBody(BaseModel):
 
 @router.post("/api/device/lid")
 def lid(body: LidBody, user: CurrentUser, services: ServicesDep) -> dict[str, Any]:
-    """Open / close the dispenser lid (Wi-Fi ESP32: GET /lid?state=open|close). The device's patient
-    and linked doctor/family. Never drops a pill; dispensing goes through the drop rules."""
-    _device_patient(services, user, edit=False)
+    """Open / close the dispenser lid to restock it (Wi-Fi ESP32: GET /lid?state=open|close).
+    Restocking is a doctor/family task (like refills): linked doctor/family only. Never drops a pill;
+    dispensing is POST /api/patients/{pid}/drops (drop rules) -> GET /dispense?pill=N."""
+    _device_patient(services, user, edit=True)
     set_lid = getattr(services.hardware, "set_lid", None)
     if not callable(set_lid):
         raise HTTPException(409, "This dispenser has no lid control (only the Wi-Fi ESP32 has one).")

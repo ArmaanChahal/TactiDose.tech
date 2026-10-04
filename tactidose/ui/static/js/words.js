@@ -34,7 +34,6 @@ export const HARDWARE_REASON = Object.freeze({
   NO_PILL: 'No pill came out',
   NO_BUZZER: 'No buzzer is fitted',
   HTTP_ERROR: 'The dispenser reported an error, so no pill was dropped',
-  LID_ERROR: 'The lid did not open, so no pill was dropped',
   INVALID_SLOT: 'The device does not have that container',
   NOT_HOMED: 'The device needed to reset its position',
   BUSY: 'The device was busy',

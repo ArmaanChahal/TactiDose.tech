@@ -1,14 +1,16 @@
 """The Wi-Fi ESP32 dispenser: its address and HTTP endpoints, all in one place. Edit here.
 
 Used when ``TACTIDOSE_HARDWARE_MODE=wifi`` (or ``python -m tactidose run --wifi``). The driver is
-``tactidose/hardware/wifi_device.py``; every dispense still goes through the drop rules
-(DropService: cooldown, double-dose guard, pill counts, history).
+``tactidose/hardware/wifi_device.py``.
 
-Endpoints of the ESP32 (2026-10-04):
+Endpoints of the ESP32 (2026-10-04) and what uses them:
 
-    open lid        GET http://172.20.10.9/lid?state=open
-    close lid       GET http://172.20.10.9/lid?state=close
-    dispense pill N GET http://172.20.10.9/dispense?pill=N     (N = 1, 2, 3 = container 1, 2, 3)
+    dispense pill N GET http://172.20.10.9/dispense?pill=N   N = 1, 2, 3 = container 1, 2, 3.
+                    Just drops the pill. Every dispense goes through the drop rules first
+                    (DropService: cooldown, double-dose guard, pill counts, history).
+    open lid        GET http://172.20.10.9/lid?state=open    Restocking only: doctor/family open the
+    close lid       GET http://172.20.10.9/lid?state=close   lid, refill the containers, close it.
+                    Never part of a dispense.
 """
 
 from __future__ import annotations
@@ -24,13 +26,6 @@ LID_OPEN_PATH = "/lid?state=open"
 LID_CLOSE_PATH = "/lid?state=close"
 DISPENSE_PATH = "/dispense?pill={pill}"
 
-#: Every dispense: open the lid first, dispense, then close the lid LID_CLOSE_AFTER_S seconds later
-#: (so the patient can take the pill). If the lid does not open, nothing is dispensed.
-#: False = dispense only (the lid buttons still work).
-OPEN_LID_FOR_DISPENSE = True
-#: Seconds the lid stays open after a dispense before it closes by itself.
-LID_CLOSE_AFTER_S = 5.0
-
 #: Reachability check: any HTTP answer from this path means the ESP32 is on the network.
 HEALTH_PATH = "/"
 #: Seconds between reachability checks while idle (the device shows "connected" / "offline").
@@ -42,5 +37,5 @@ CONNECT_TIMEOUT_S = 3.0
 #: Seconds to wait for the ESP32's answer to /dispense (it should answer when the pill has dropped).
 #: No answer in time = the pill MAY have dropped: the drop is recorded as UNCERTAIN for a caregiver.
 DISPENSE_TIMEOUT_S = 20.0
-#: Seconds to wait for the answer to /lid.
+#: Seconds to wait for the answer to /lid (restocking).
 LID_TIMEOUT_S = 10.0

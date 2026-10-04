@@ -229,29 +229,23 @@ supports the older v1 commands still works: the app drops a pill with `DISPENSE_
 
 The ESP32 dispenser on the network has a static IP, **`http://172.20.10.9`**, and three endpoints:
 
-| Action | ESP32 endpoint | In the website |
+| Action | ESP32 endpoint | Who, where in the website |
 |---|---|---|
-| Open the lid | `GET /lid?state=open` | **Open lid** button: patient Home (Pill device card) and care portal Device tab |
-| Close the lid | `GET /lid?state=close` | **Close lid** button: same places |
-| Dispense pill 1, 2, 3 | `GET /dispense?pill=1` (`2`, `3`) | **Dispense pill 1 / 2 / 3** buttons (patient Home, Pill device card) and the **Drop pill** button on each container; the assistant and scheduled doses use it too |
+| Dispense pill 1, 2, 3 | `GET /dispense?pill=1` (`2`, `3`) | **Patient**: **Dispense pill 1 / 2 / 3** buttons (Home, Pill device card) and the **Drop pill** button on each container. The assistant and scheduled doses use it too |
+| Open the lid (restock) | `GET /lid?state=open` | **Doctor / family**: care portal → Containers → **Restock the dispenser** → **Open lid to restock** |
+| Close the lid | `GET /lid?state=close` | **Doctor / family**: same card → **Close lid** |
 
-**How dispensing works.** The patient presses **Dispense pill N** (or **Drop pill** on a container)
-on the website. The app's drop rules run first: the global cooldown, the double-dose guard, pill
-counts, and the history and notifications. Only then does the app talk to the ESP32:
+**Dispensing** only calls `/dispense?pill=N`. Container 1 is `pill=1`, and the lid is never touched.
+The app's drop rules run first: the global cooldown, the double-dose guard, pill counts, and the
+history and notifications. A pill can't be dropped from the website without them.
 
-1. `GET /lid?state=open`. If the lid doesn't open, **nothing is dispensed** ("the lid did not open").
-2. `GET /dispense?pill=N`. Container 1 is `pill=1`.
-3. `GET /lid?state=close` **5 seconds later**, also when the dispense failed.
+**Restocking** is separate and is a doctor/family task, like refills:
+1. Open the lid.
+2. Put the pills in.
+3. Record the new count with **Refill** on each container.
+4. Close the lid.
 
-The website shows the result straight away and doesn't wait for the close. Another dispense within
-those 5 s restarts the timer, so the lid closes once.
-
-A pill can't be dropped from the website without those checks, and the Open/Close lid buttons never
-dispense. Doctor/family can use the lid buttons but cannot dispense, which is the existing
-permission rule.
-
-To change the 5 s or turn the lid step off, edit `LID_CLOSE_AFTER_S` and `OPEN_LID_FOR_DISPENSE` in
-`wifi_config.py`.
+The lid buttons never dispense. Patients don't see them; the API refuses them with 403.
 
 What the ESP32's answer means:
 
@@ -259,7 +253,6 @@ What the ESP32's answer means:
 |---|---|
 | HTTP 200 | **dropped** (pill count −1) |
 | Another HTTP status | **failed** (nothing dropped) |
-| The lid did not open | **failed** (nothing was dispensed) |
 | Not reachable | refused as **device unavailable** (nothing was sent) |
 | Reached, but no answer within 20 s | **uncertain**: further drops wait until a caregiver checks (History → "It dropped" / "It did not drop") |
 
@@ -278,7 +271,6 @@ To make Wi-Fi the default, put `TACTIDOSE_HARDWARE_MODE=wifi` in `.env`. Optiona
 [`tactidose/hardware/wifi_config.py`](tactidose/hardware/wifi_config.py):
 * `ESP32_BASE_URL` (the static IP)
 * `LID_OPEN_PATH`, `LID_CLOSE_PATH`, `DISPENSE_PATH` (`{pill}` = container 1–3)
-* `OPEN_LID_FOR_DISPENSE`, `LID_CLOSE_AFTER_S` (the open → dispense → close-after-5-s sequence)
 * `HEALTH_PATH`, `METHOD`
 * the timeouts
 

@@ -186,6 +186,7 @@
         <!-- ---------------------------------------------------- containers -->
         <div id="panel-containers" class="tab-panel" role="tabpanel" aria-labelledby="tab-containers" hidden>
           <p class="field-hint">Assign a medication to each container, refill it and set when it counts as running low. Use candy or tokens for the demo.</p>
+          <section id="restock-lid" class="card restock-card" aria-label="Restock the dispenser" hidden></section>
           <div id="containers-list" class="container-grid"></div>
         </div>
 
@@ -364,7 +365,6 @@
               <button type="button" id="dev-reconnect" class="btn"><span class="icon-slot" data-icon="plug"></span> Reconnect</button>
               <button type="button" id="dev-refresh" class="btn"><span class="icon-slot" data-icon="rotate"></span> Refresh</button>
             </div>
-            <div id="dev-lid" class="lid-controls" hidden></div>
             <div id="dev-result" role="status"></div>
             <dl id="dev-facts" class="facts"></dl>
           </section>

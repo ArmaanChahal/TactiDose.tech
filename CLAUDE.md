@@ -151,14 +151,13 @@ Threads:
   * `wifi_device.WifiDispenser` is a `HardwareController` for three HTTP endpoints: `/dispense?pill=N`,
     `/lid?state=open|close`, and `GET /` for reachability. The IP (static `http://172.20.10.9`,
     override `TACTIDOSE_ESP32_URL`) and the paths are in `wifi_config.py`.
-  * Drops still go through `DropService`. `drop_slot` runs `/lid?state=open`, then `/dispense`,
-    then `/lid?state=close` `LID_CLOSE_AFTER_S` (5 s) later on a timer.
-    * Results: 2xx = DROPPED, another status = FAILED, cannot connect = NOT_CONNECTED (never sent),
-      no answer = UNCERTAIN + review.
-    * A lid that did not open = `LID_ERROR`, nothing dispensed.
-  * The patient Home has **Dispense pill N** buttons (`js/lid.js` `onDispense`), which run the same
-    path as the Drop pill buttons.
-  * Lid: `POST /api/device/lid` and the Open/Close lid buttons (`js/lid.js`).
+  * Drops still go through `DropService`. `drop_slot` only calls `/dispense?pill=N`.
+    Results: 2xx = DROPPED, another status = FAILED, cannot connect = NOT_CONNECTED (never sent),
+    no answer = UNCERTAIN + review.
+  * The patient Home has **Dispense pill N** buttons (`js/dispense.js`), which run the same path as
+    the Drop pill buttons.
+  * The lid is for restocking only: `POST /api/device/lid` (linked doctor/family) and the "Restock the
+    dispenser" card on the care Containers tab (`js/lid.js`). It is never part of a dispense.
   * No stop, home or buzzer endpoint: those calls return "not supported". `simulator.py` is a faithful ESP32
   model with fault injection. There are 32 conformance scenarios, run against both the simulator
   and the native firmware core.

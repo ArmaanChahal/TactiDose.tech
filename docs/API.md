@@ -194,7 +194,7 @@ Access to `/api/reports/{rid}…` follows the report's patient (patient themself
 | Method & path | Body | Response |
 |---|---|---|
 | `GET /api/device` | – | `DeviceSnapshot` (patient of the device or linked caregiver) + `lid_supported`, `lid` (`open`\|`closed`\|null; Wi-Fi ESP32 only) |
-| `POST /api/device/lid` | `{state: "open"\|"close"}` | `{ok, lid, detail, device}` — Wi-Fi ESP32 only (`GET /lid?state=…`); 409 on other devices. Device's patient or linked caregiver. Never drops a pill |
+| `POST /api/device/lid` *(caregiver)* | `{state: "open"\|"close"}` | `{ok, lid, detail, device}` — restocking lid of the Wi-Fi ESP32 (`GET /lid?state=…`); linked doctor/family only (403 for the patient); 409 on other devices. Never drops a pill |
 | `POST /api/device/home` *(caregiver)* | – | `{ok, result: CommandResultView, device}` |
 | `POST /api/device/stop` | – | same (patient or caregiver; always allowed) |
 | `POST /api/device/reconnect` *(caregiver)* | – | `{ok, device}` |

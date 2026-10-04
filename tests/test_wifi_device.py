@@ -1,14 +1,14 @@
 """The Wi-Fi ESP32 (hardware_mode "wifi", tactidose/hardware/wifi_device.py) against a mock of its
-three endpoints (GET /lid?state=open|close, GET /dispense?pill=N, plus GET / for reachability):
-the driver's outcomes (dropped / failed / never sent / uncertain), the lid, and the whole website
-path - patient Drop pill -> DropService rules -> /dispense - and the lid buttons' API.
+three endpoints (GET /dispense?pill=N, GET /lid?state=open|close, plus GET / for reachability):
+the driver's outcomes (dropped / failed / never sent / uncertain), dispensing that never touches the
+lid, the website path - patient Dispense / Drop pill -> DropService rules -> /dispense - and the
+restocking lid's API (doctor/family only).
 """
 
 from __future__ import annotations
 
 import time
 from datetime import datetime
-from types import SimpleNamespace
 from typing import Any
 
 import httpx
@@ -18,7 +18,7 @@ from tactidose.config import Settings
 from tactidose.hardware import protocol as p
 from tactidose.hardware import wifi_config
 from tactidose.hardware.serial_client import create_hardware
-from tactidose.hardware.wifi_device import HTTP_ERROR, LID_ERROR, WifiDispenser
+from tactidose.hardware.wifi_device import HTTP_ERROR, WifiDispenser
 
 TZ = "America/Vancouver"
 
@@ -57,24 +57,9 @@ def _settings(**over: Any) -> Settings:
     return Settings(**base)
 
 
-def _config(**over: Any) -> SimpleNamespace:
-    """wifi_config with some values changed (e.g. a short lid delay for the tests)."""
-    values = {k: getattr(wifi_config, k) for k in dir(wifi_config) if k.isupper()}
-    values.update(over)
-    return SimpleNamespace(**values)
-
-
-def _device(fake: FakeEsp32, settings: Settings | None = None, *, bus: Any = None,
-            config: Any = wifi_config) -> WifiDispenser:
+def _device(fake: FakeEsp32, settings: Settings | None = None, *, bus: Any = None) -> WifiDispenser:
     client = httpx.Client(transport=httpx.MockTransport(fake), follow_redirects=False)
-    return WifiDispenser(settings or _settings(), bus=bus, client=client, config=config)
-
-
-def _wait_for(predicate: Any, timeout: float = 3.0) -> bool:
-    deadline = time.monotonic() + timeout
-    while not predicate() and time.monotonic() < deadline:
-        time.sleep(0.02)
-    return predicate()
+    return WifiDispenser(settings or _settings(), bus=bus, client=client)
 
 
 # --------------------------------------------------------------------------- the driver
@@ -140,56 +125,15 @@ def test_health_check_tracks_online_offline():
     assert dev.snapshot().ready_for_motion is False
 
 
-def test_dispense_opens_the_lid_first_and_closes_it_after_the_delay():
+def test_dispense_never_touches_the_lid():
     fake = FakeEsp32()
-    dev = _device(fake, config=_config(LID_CLOSE_AFTER_S=0.2))
-    result = dev.drop_slot(0)
-    assert result.code == "DROPPED"
-    assert fake.requests == ["/lid?state=open", "/dispense?pill=1"]       # result returns before the close
-    assert dev.lid_state == "open"
-    assert _wait_for(lambda: fake.requests[-1] == "/lid?state=close")
-    assert dev.lid_state == "closed" and fake.requests.count("/lid?state=close") == 1
-
-
-def test_default_lid_delay_is_five_seconds():
-    assert wifi_config.OPEN_LID_FOR_DISPENSE is True and wifi_config.LID_CLOSE_AFTER_S == 5.0
-
-
-def test_lid_closes_even_when_the_dispense_fails():
-    fake = FakeEsp32()
-    dev = _device(fake, config=_config(LID_CLOSE_AFTER_S=0.1))
+    dev = _device(fake)
+    assert dev.drop_slot(0).code == "DROPPED"
     fake.mode = "error"
     assert dev.drop_slot(2).code == HTTP_ERROR
-    assert _wait_for(lambda: fake.requests[-1] == "/lid?state=close")
-
-
-def test_lid_that_does_not_open_means_nothing_is_dispensed():
-    fake = FakeEsp32()
-    dev = _device(fake, config=_config(LID_CLOSE_AFTER_S=0.1))
-    fake.lid_status = 500
-    result = dev.drop_slot(1)
-    assert not result.ok and result.code == LID_ERROR and result.definitive
-    assert p.drop_certainty(result) is p.DropCertainty.NOT_DROPPED
-    time.sleep(0.2)
-    assert not any(r.startswith("/dispense") for r in fake.requests)
-
-
-def test_lid_sequence_can_be_switched_off():
-    fake = FakeEsp32()
-    dev = _device(fake, config=_config(OPEN_LID_FOR_DISPENSE=False))
-    assert dev.drop_slot(0).code == "DROPPED"
     time.sleep(0.1)
-    assert fake.requests == ["/dispense?pill=1"]
-
-
-def test_new_dispense_cancels_the_pending_close():
-    fake = FakeEsp32()
-    dev = _device(fake, config=_config(LID_CLOSE_AFTER_S=0.3))
-    dev.drop_slot(0)
-    dev.drop_slot(1)                                     # within the delay: one close, at the end
-    assert _wait_for(lambda: fake.requests[-1] == "/lid?state=close")
-    time.sleep(0.4)
-    assert fake.requests.count("/lid?state=close") == 1
+    assert fake.requests == ["/dispense?pill=1", "/dispense?pill=3"]
+    assert not hasattr(wifi_config, "OPEN_LID_FOR_DISPENSE")
 
 
 # --------------------------------------------------------------------------- the website
@@ -224,7 +168,7 @@ def test_drop_pill_button_goes_through_the_rules_to_the_esp32(site):
     pid = services.device_patient_id()
     first = client.post(f"/api/patients/{pid}/drops", headers=alex, json={"slot": 0}).json()
     assert first["status"] == "DROPPED", first
-    assert fake.requests[-2:] == ["/lid?state=open", "/dispense?pill=1"]       # lid first, then the pill
+    assert fake.requests[-1] == "/dispense?pill=1" and not any(r.startswith("/lid") for r in fake.requests)
     sent = len([r for r in fake.requests if r.startswith("/dispense")])
     second = client.post(f"/api/patients/{pid}/drops", headers=alex, json={"slot": 2}).json()
     assert second["status"] == "DENIED" and second["reason"] == "COOLDOWN"
@@ -245,16 +189,17 @@ def test_no_answer_marks_the_drop_uncertain_for_review(site):
     assert again["status"] == "DENIED"                         # no further drop until reviewed
 
 
-def test_lid_buttons_api(site):
+def test_restocking_lid_is_for_doctor_and_family(site):
     client, services, fake, login = site
     alex, sam = login("alex@demo.tactidose"), login("sam@demo.tactidose")
-    device = client.get("/api/device", headers=alex).json()
+    device = client.get("/api/device", headers=sam).json()
     assert device["lid_supported"] is True and device["mode"] == "wifi"
-    r = client.post("/api/device/lid", headers=alex, json={"state": "open"}).json()
+    assert client.post("/api/device/lid", headers=alex, json={"state": "open"}).status_code == 403   # patient
+    r = client.post("/api/device/lid", headers=sam, json={"state": "open"}).json()
     assert r["ok"] and r["lid"] == "open" and fake.requests[-1] == "/lid?state=open"
-    r = client.post("/api/device/lid", headers=sam, json={"state": "close"}).json()   # caregiver too
+    r = client.post("/api/device/lid", headers=sam, json={"state": "close"}).json()
     assert r["lid"] == "closed" and r["device"]["lid"] == "closed"
-    assert client.post("/api/device/lid", headers=alex, json={"state": "half"}).status_code == 422
+    assert client.post("/api/device/lid", headers=sam, json={"state": "half"}).status_code == 422
     assert not any(q.startswith("/dispense") for q in fake.requests)                  # the lid never dispenses
 
 
@@ -265,7 +210,7 @@ def test_lid_api_refuses_on_other_devices(tmp_path):
     settings = _settings(data_dir=tmp_path / "data", hardware_mode="none", voice_enabled=False,
                          tts_provider="none", demo_mode=True, scheduler_tick_s=600)
     with TestClient(create_app(services=build_services(settings))) as client:
-        r = client.post("/api/auth/login", json={"email": "alex@demo.tactidose", "password": "demo1234"})
+        r = client.post("/api/auth/login", json={"email": "sam@demo.tactidose", "password": "demo1234"})
         h = {"Authorization": f"Bearer {r.json()['token']}"}
         assert client.get("/api/device", headers=h).json()["lid_supported"] is False
         assert client.post("/api/device/lid", headers=h, json={"state": "open"}).status_code == 409
