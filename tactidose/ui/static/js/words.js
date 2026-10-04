@@ -32,6 +32,7 @@ export const DENY_REASON = Object.freeze({
 /** DropOutcome.reason for FAILED / UNCERTAIN (hardware and host codes). */
 export const HARDWARE_REASON = Object.freeze({
   NO_PILL: 'No pill came out',
+  NO_BUZZER: 'No buzzer is fitted',
   INVALID_SLOT: 'The device does not have that container',
   NOT_HOMED: 'The device needed to reset its position',
   BUSY: 'The device was busy',
