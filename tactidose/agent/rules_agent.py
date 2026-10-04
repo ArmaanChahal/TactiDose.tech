@@ -15,8 +15,12 @@ Rules agent behaviour (replies come from :mod:`tactidose.core.phrases`, a few sh
 ``request_pill``; "what's due" / "when can I have my next pill"; "when did I last take my pill";
 "how many pills are left"; "I took it" -> ``confirm_pill_taken``; "help"; greetings; "repeat".
 Questions ("did my pill drop?") never request a pill. Neither do negations ("don't drop it",
-"I don't want my pill"), requests for several pills, prompt-injection attempts, emergencies or
-speech containing ``[unk]``. When the patient did not say which pill: the only container with a
+"I don't want my pill"), negated fragments ("not the calcium", "no, not that one", "can I have my
+pill, not the calcium" - blocked for every provider), requests for several pills, prompt-injection
+attempts, emergencies or speech containing ``[unk]``. A drop request that only says which pill NOT
+to drop gets "Which pill would you like?" without the negated ones (never a guess); the rules agent
+also never drops a medication named right after "not" ("can i have my pill not calcium").
+When the patient did not say which pill: the only container with a
 medication, else the dose due now, else "Which pill would you like?" (the next message may answer
 with a name or number); "yes" after "Would you like me to drop it now?" drops the due dose.
 
@@ -34,6 +38,7 @@ from typing import Any, Mapping, Sequence
 from tactidose.agent.tools import (
     CONFIRM_PILL_TAKEN,
     GET_RECENT_DROPS,
+    MIN_MATCH_SCORE,
     NOT_REQUESTED,
     REQUEST_PILL,
     STOP_DEVICE,
@@ -44,6 +49,7 @@ from tactidose.agent.tools import (
     match_containers,
     medication_options,
     name_score,
+    name_tokens,
     parse_dt,
 )
 from tactidose.config import Settings
@@ -249,7 +255,10 @@ class TextFlags:
     #: A request verb ("can I have", "give me", "drop") - with a pill word it is a drop request.
     request_verb: bool = False
     drop_request: bool = False
+    #: Any negation that forbids a drop in this turn (``turn_guard`` blocks ``request_pill``).
     drop_negated: bool = False
+    #: The only negation is a fragment naming what NOT to drop ("my pill, not the calcium").
+    negated_fragment: bool = False
     confirm: bool = False
     confirm_negated: bool = False
     multiple: bool = False
@@ -295,12 +304,69 @@ _DEFERRAL = re.compile(
 
 #: Polite fillers that contain "no" but negate nothing ("no problem, drop my pill").
 _POLITE_NO = re.compile(r"\b(?:no problem|no worries|no rush|no hurry)\b", re.IGNORECASE)
+#: A hedge that ends its own clause negates nothing: "I'm not sure, drop my pill" -> "unsure".
+#: Unpunctuated ("im not sure drop my pill", as speech arrives) it may mean "not sure whether to
+#: drop": it stays a negation and fails closed.
+_HEDGE = re.compile(
+    r"\bnot\s+(?:(?:really|quite|too|so|totally|entirely|completely|exactly)\s+)?(?:sure|certain)"
+    r"(?=\s*[,.;:!…]|\s+[-–—]+\s)", re.IGNORECASE)
+
+#: Clause breaks in typed text. Speech has none: a transcript is a single clause.
+_CLAUSE_BREAK = re.compile(r"[,.;:!?…]+|\s[-–—]+\s")
+#: A clause that starts with "not" names what NOT to drop ("not the calcium", "no, not that one",
+#: "my pill, not calcium"). "Not feeling well, ..." / "not good" talk about health, not pills.
+_NOT_CLAUSE = re.compile(
+    r"^(?:(?:no|nope|nah|oh|um|uh|er|well|okay|sorry|actually|wait|but|and|or|just) )*not\b"
+    r"(?! (?:feeling|feel|well|good|great|doing)\b)")
+#: "not" + a determiner or a pill word, anywhere: "can I have my pill, not the calcium", "not pill 2".
+#: "not that bad / much" is an intensifier, not a pill. Other "not my ..." / "not the ..." phrases
+#: ("it's not my fault, can I have my pill") fail closed: the rules agent asks which pill.
+_NOT_OBJECT = _any(
+    r"not (?:the|this|my|those|these)",
+    r"not that(?! (?:bad|much|long|big|hard|serious|important|often|far|good|great|well)\b)",
+    r"not (?:(?:any|a|an|your) )?(?:pills?|tablets?|capsules?|containers?|slots?|number|vitamins?"
+    r"|medications?|medicine|meds|doses?|candy|candies|tokens?)",
+)
+#: Words skipped between "not" and a medication name in :func:`negated_containers`.
+_NOT_DETERMINERS = frozenset({"the", "my", "that", "this", "those", "these", "your", "any", "a", "an"})
+
+
+def _names_what_not_to_drop(softened: str, norm: str) -> bool:
+    """True if a fragment of the message says which pill NOT to drop (``_NOT_OBJECT`` anywhere, or
+    a clause of the typed text that starts with "not"). A model may read "my pill, not the calcium"
+    as a request for the calcium, so every provider is blocked for this turn."""
+    if _NOT_OBJECT.search(norm):
+        return True
+    return any(_NOT_CLAUSE.match(normalise(clause)) for clause in _CLAUSE_BREAK.split(softened))
+
+
+def negated_containers(norm: str, containers: Sequence[ContainerInfo]) -> list[ContainerInfo]:
+    """Containers named right after a "not" in normalised text ("not the calcium", "not pill 2",
+    "can i have my pill not calcium"): the medication name or container number must follow "not"
+    (one determiner allowed), so "not feeling well, can I have my vitamin c" names none."""
+    tokens = norm.split()
+    found: list[ContainerInfo] = []
+    for i, token in enumerate(tokens):
+        if token != "not":
+            continue
+        rest = tokens[i + 1:i + 7]
+        if rest and rest[0] in _NOT_DETERMINERS:
+            rest = rest[1:]
+        refs = container_refs(" ".join(rest[:3]))
+        for c in containers:
+            if c in found or c.medication_id is None or not c.medication_name:
+                continue
+            size = len(name_tokens(c.medication_name)) or 1
+            if (c.container_number in refs
+                    or name_score(" ".join(rest[:size]), c.medication_name) >= MIN_MATCH_SCORE):
+                found.append(c)
+    return found
 
 
 def analyse(text: str) -> TextFlags:
     """Read one patient message. Pure and deterministic; never raises."""
     raw = text if isinstance(text, str) else ""
-    softened = _POLITE_NO.sub("okay", raw)
+    softened = _HEDGE.sub("unsure", _POLITE_NO.sub("okay", raw))
     norm = normalise(softened)
     parsed = parse_intent(softened)
     tokens = norm.split()
@@ -316,11 +382,13 @@ def analyse(text: str) -> TextFlags:
         or (raw.rstrip().endswith("?") and not request_verb)
     )
     negated_actuation = parsed.intent is Intent.UNKNOWN and parsed.negated
-    drop_negated = (
+    refused = (
         (negated_actuation and parsed.matched in _DISPENSE_LABELS)
         or bool(_DROP_NEGATION.search(norm))
         or bool(_NEGATIVE.match(norm))
     )
+    negated_fragment = not refused and _names_what_not_to_drop(softened, norm)
+    drop_negated = refused or negated_fragment
     drop_request = not question and not drop_negated and (
         parsed.intent is Intent.DISPENSE or (request_verb and bool(_PILL_OBJECT.search(norm))))
     confirm_negated = negated_actuation and (parsed.matched in _CONFIRM_LABELS or parsed.matched == "take")
@@ -341,6 +409,7 @@ def analyse(text: str) -> TextFlags:
         request_verb=request_verb,
         drop_request=drop_request,
         drop_negated=drop_negated,
+        negated_fragment=negated_fragment,
         confirm=confirm,
         confirm_negated=confirm_negated,
         multiple=bool(_MULTIPLE.search(norm)),
@@ -385,7 +454,8 @@ def turn_guard(flags: TextFlags) -> TurnGuard:
         block_drop = ("QUESTION", phrases.QUESTION_NO_DROP)
     if block_confirm is None and flags.confirm_negated:
         block_confirm = ("NEGATED", phrases.NOT_MARKED)
-    return TurnGuard(block_drop=block_drop, block_confirm=block_confirm)
+    negated_text = flags.norm if "not" in flags.norm.split() else ""
+    return TurnGuard(block_drop=block_drop, block_confirm=block_confirm, negated_text=negated_text)
 
 
 # --------------------------------------------------------------------------- outcome sentences
@@ -492,6 +562,8 @@ class RulesAgent:
             f.drop_request
             or (f.affirmative and offered)
             or (names_pill and not f.question and (f.request_verb or asked_which or offered or f.please))
+            # "Can I have my pill, not those?" / "not that one" after "Which pill?": _drop asks again
+            or (f.negated_fragment and not f.question and (f.request_verb or asked_which))
         )
         if f.pills_left and not f.drop_request:
             return self._pills_left(containers, mentions, f.container_refs)
@@ -523,9 +595,17 @@ class RulesAgent:
               mentions: list[ContainerInfo], offered: bool) -> str:
         if f.unclear:
             return phrases.UNCLEAR_SPEECH
-        if f.drop_negated:
+        if f.drop_negated and not f.negated_fragment:
             return phrases.NEGATED
-        if f.multiple or len(f.container_refs) > 1:
+        if f.multiple:
+            return phrases.ONE_PILL_ONLY
+        negated = negated_containers(f.norm, status.containers)
+        if f.negated_fragment or negated:
+            # Only what NOT to drop was said: ask again without those, never guess the rest.
+            excluded = {c.container_number for c in negated}
+            options = medication_options(status.containers)
+            return phrases.which_pill([o for o in options if o[0] not in excluded] or options)
+        if len(f.container_refs) > 1:
             return phrases.ONE_PILL_ONLY
         refs = f.container_refs
         if len(mentions) > 1 and not refs:

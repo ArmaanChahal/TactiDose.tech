@@ -30,6 +30,16 @@ _ENV_PREFIXES = (
 _ENV_KEEP_PREFIXES = ("TACTIDOSE_NATIVE_HARNESS_", "TACTIDOSE_GCC_IMAGE")
 
 
+@pytest.fixture(autouse=True, scope="session")
+def _no_dotenv():
+    """A developer's .env (real keys, the live data dir) must never reach a test: plain
+    ``Settings()`` calls (app factory, CLI) would otherwise read it from the working directory."""
+    saved = Settings.model_config.get("env_file")
+    Settings.model_config["env_file"] = None
+    yield
+    Settings.model_config["env_file"] = saved
+
+
 @pytest.fixture(autouse=True)
 def _hermetic_env(monkeypatch: pytest.MonkeyPatch) -> None:
     for name in list(os.environ):

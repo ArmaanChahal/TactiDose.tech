@@ -76,6 +76,10 @@ Wiring lives in `tactidose/app.py` (`build_services`). Rules are listed in `docs
 - Tests: `pytest -q -m "not native"` (~2 min); native firmware tests need Docker (`-m native`);
   conformance: `python -m tactidose conformance --target sim|native`.
 - `python -m tactidose doctor` summarises the environment.
+- Cloud keys go in `.env` in the folder the app is started from (copy `.env.example`; git-ignored;
+  restart the server after editing). `python -m tactidose check-apis` (`--only gemini,elevenlabs`,
+  `--json`) prints the `.env` path it read and makes one tiny live request per configured service
+  (exit 1 when a configured one fails). Do not run it with real AI keys on the work network (§7).
 
 ## 5. Verified vs not verified
 
@@ -98,7 +102,7 @@ chat). Confirmed findings and their status:
 | Fuzzy name match ("vitamin d" dropped Vitamin C; first word only) | **fixed** — every word of the name must match (`agent/tools.py` `name_score`) |
 | Agent requested pills on deferrals/questions ("tonight", "later", "after dinner", "with milk?", "should I take…?") | **fixed** — `turn_guard` blocks `request_pill` for every provider (emergency, unclear, injection, negation, several pills, medication change, deferral, non-due question) |
 | Emergencies → 911 reply; replies claiming a drop that did not happen | already deterministic in `AgentService` (verified by tests); not re-reviewed |
-| Bare negated fragment ("not the calcium") | **open for Gemini**: the rules agent does not drop, but the guard does not hard-block it |
+| Bare negated fragment ("not the calcium", "no, not that one", "can I have my pill, not the calcium") | **fixed** — `turn_guard` blocks `request_pill` for every provider; the rules agent asks "Which pill…?" without the negated pills. The old status was wrong: the rules agent itself dropped the calcium for "not the calcium" after "Which pill?" and for "can I have my pill, not the calcium". Residual: unpunctuated speech "my pill not calcium" is caught by the rules agent only, not by the text-only guard for Gemini |
 | Gemini fallback path could actuate | **not re-verified** (one drop request per message is enforced in the tool executor) |
 | Demo panel usable by any signed-in account; demo drops skipped the cooldown; reset by anyone | **fixed differently**: demo mode stays ON by default for the hackathon, but the panel is limited to the device's patient and linked doctor/family; console and reset are doctor/family only; demo drops obey the global cooldown and the per-pill floor; `DISPENSE_SLOT`/`OPEN_GATE` refused. Set `TACTIDOSE_DEMO_MODE=false` for anything beyond a demo |
 | Same pill twice within 60 min when caregivers set the cooldown to 0 | **fixed** — per-pill floor (`min_dose_interval_minutes`, default 60) for app/agent/button/demo drops, reason `COOLDOWN` |
@@ -126,6 +130,15 @@ platform robustness. Re-run them (see §8) before anything beyond a demo.
 - Corporate TLS-inspecting proxy: Docker containers need its root CA for downloads
   (`firmware/compile_esp32.ps1 -CaSubject …`); some AI-vendor docs/APIs are blocked by the web filter
   (ElevenLabs docs were). The app falls back offline automatically.
+- The work network's web filter redirects GET requests to AI APIs to a sign-in page but lets POST
+  API calls through; all HTTPS is TLS-inspected; Python works because the user env has
+  `SSL_CERT_FILE`/`REQUESTS_CA_BUNDLE` pointing to the proxy bundle (user environment variables:
+  `.env` is not exported to `os.environ`). AI-category traffic is logged there: agents and tests make no live AI calls (they use
+  fakes: `httpx.MockTransport`, scripted SDK clients); the owner runs `check-apis` with their own
+  keys. A personal computer avoids the filter entirely.
+- Git Bash `grep` does not see CR characters: count them with `tr -cd '\r' < file | wc -c`. Some
+  working copies are CRLF; that is harmless (`.gitattributes` stores LF), but normalise files you
+  rewrite to LF.
 - `COM3` is an Intel AMT serial port, not an ESP32 — auto-detect ignores ports without a known USB ID.
 - tzdata 2026 encodes **permanent daylight time for British Columbia**: America/Vancouver has no
   November 2026 fall-back. DST tests use America/Los_Angeles.
@@ -156,11 +169,17 @@ platform robustness. Re-run them (see §8) before anything beyond a demo.
    flash, `python -m tactidose hw-test --port COMx`, then `run --serial auto`. Separate servo
    supply + bulk capacitor (brown-outs mark drops UNCERTAIN and block further drops by design).
 2. Remaining review items: the **open** rows in §6 (slot-count mismatch, no-home-sensor alignment,
-   report email restrictions, Snowflake salt, TTS disk cache, health redaction, CI, vosk pin, the
-   Gemini negated-fragment case). Ask the other Claude chat to re-review the fix commit.
+   report email restrictions, Snowflake salt, TTS disk cache, health redaction, CI, vosk pin).
+   Ask the other Claude chat to re-review the fix commit.
 3. Re-run the stopped reviews (dosing, accessibility, platform); then a human read of `drops.py`,
    `agent/tools.py`, `agent/rules_agent.py`, `hardware/protocol.py` before any real-world use.
-4. Keys to add when available: `GEMINI_API_KEY`, `ELEVENLABS_API_KEY`, SMTP (Gmail app password).
+4. **API keys:** put them in `.env` in the project folder (copy `.env.example`; never commit it),
+   restart the server, then run `python -m tactidose check-apis` and follow its `->` hints (from a
+   personal network, not the work one). The **Gemini key is recommended first** (free at
+   aistudio.google.com/apikey; demo data only). Then ElevenLabs (set `ELEVENLABS_VOICE_ID` or rely
+   on the auto voice), SMTP (Gmail app password), and Snowflake/TiDB only for their sponsor prizes
+   (`python -m tactidose init-db` after `TIDB_*`). Check it in the care portal's Conversations (the
+   model is shown per reply) and in `/api/health` (`agent.gemini_retry_in_s`, `agent.gemini_last_error`).
 5. Nice-to-have: split `drops.py`; tolerant STATUS parsing for teammates' own firmware written from the
    handoff (§14 never defined the STATUS format); simulator turns the carousel the short way round,
    the firmware does not (timing only).

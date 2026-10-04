@@ -515,6 +515,7 @@ def test_doctor_reports_without_secrets(doctor_fakes, capsys, monkeypatch) -> No
                  "1 input (microphone) and 1 output (speaker) device(s)", "default input: Desk Mic",
                  "Gemini: configured", "SMTP e-mail: configured (smtp.example.com:587, STARTTLS)",
                  "ElevenLabs voice: configured", "TiDB: not configured", "up to date", "docker: ok",
+                 "test the keys live on this network (tiny real requests): python -m tactidose check-apis",
                  "All essential checks passed."):
         assert text in out, text
     for value in secrets.values():

@@ -2,7 +2,9 @@
 
 Selection order:
 1. ``TACTIDOSE_DATABASE_URL`` / ``DATABASE_URL`` – any SQLAlchemy URL;
-2. ``TIDB_HOST`` (+ ``TIDB_USER``/``TIDB_PASSWORD``/``TIDB_DATABASE``) – TiDB over TLS;
+2. ``TIDB_HOST`` (+ ``TIDB_USER``/``TIDB_PASSWORD``/``TIDB_DATABASE``) – TiDB over TLS, CA bundle
+   from :func:`tidb_ssl_ca` (``TIDB_SSL_CA``, else ``SSL_CERT_FILE`` / ``REQUESTS_CA_BUNDLE``,
+   else certifi);
 3. otherwise SQLite at ``<data_dir>/tactidose.db``.
 
 Failure policy (handoff §30): callers must treat any database exception as
@@ -12,6 +14,7 @@ Failure policy (handoff §30): callers must treat any database exception as
 from __future__ import annotations
 
 import logging
+import os
 from contextlib import contextmanager
 from typing import Iterator
 
@@ -47,17 +50,37 @@ def tidb_connect_args(settings: Settings) -> dict[str, object]:
     return _tidb_connect_args(settings)
 
 
+#: Environment variables naming the CA bundle of Python's HTTPS clients, in priority order. Set
+#: when a TLS-inspecting proxy re-signs traffic with its own root (the HTTPS clients already
+#: honour them); real environment variables only - pydantic-settings does not export ``.env``.
+CA_BUNDLE_ENV_VARS: tuple[str, ...] = ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE")
+
+
+def tidb_ssl_ca(settings: Settings) -> tuple[str, str | None]:
+    """``(source, path)`` of the CA bundle for TiDB TLS: ``TIDB_SSL_CA`` when set (not checked:
+    a wrong path fails the connection loudly); else the first of :data:`CA_BUNDLE_ENV_VARS` that
+    names an existing file; else certifi. ``("disabled", None)`` when ``TIDB_SSL`` is off,
+    ``("system", None)`` without certifi. ``source`` is the setting / variable name or ``certifi``."""
+    if not settings.tidb_ssl:
+        return "disabled", None
+    if settings.tidb_ssl_ca:
+        return "TIDB_SSL_CA", settings.tidb_ssl_ca
+    for name in CA_BUNDLE_ENV_VARS:
+        path = (os.environ.get(name) or "").strip().strip('"')
+        if path and os.path.isfile(path):
+            return name, path
+    try:
+        import certifi
+
+        return "certifi", certifi.where()
+    except ImportError:  # pragma: no cover - certifi ships with requests/httpx
+        return "system", None
+
+
 def _tidb_connect_args(settings: Settings) -> dict[str, object]:
     args: dict[str, object] = {"connect_timeout": 10, "read_timeout": 15, "write_timeout": 15}
     if settings.tidb_ssl:
-        ca = settings.tidb_ssl_ca
-        if not ca:
-            try:
-                import certifi
-
-                ca = certifi.where()
-            except ImportError:  # pragma: no cover - certifi ships with requests/httpx
-                ca = None
+        _source, ca = tidb_ssl_ca(settings)
         args.update({"ssl_verify_cert": True, "ssl_verify_identity": True})
         if ca:
             args["ssl_ca"] = ca

@@ -62,16 +62,9 @@ def _short_error(exc: BaseException, settings: Settings) -> str:
 
 
 def _ca_source(settings: Settings) -> tuple[str, str | None]:
-    if not settings.tidb_ssl:
-        return "disabled", None
-    if settings.tidb_ssl_ca:
-        return "TIDB_SSL_CA", settings.tidb_ssl_ca
-    try:
-        import certifi
+    from tactidose.db.session import tidb_ssl_ca  # the CA the connection really uses
 
-        return "certifi", certifi.where()
-    except ImportError:  # pragma: no cover - certifi ships with httpx
-        return "system", None
+    return tidb_ssl_ca(settings)
 
 
 def describe(settings: Settings) -> dict[str, Any]:

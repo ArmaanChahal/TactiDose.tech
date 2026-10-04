@@ -88,6 +88,8 @@ def test_tool_loop_status_then_request_then_answer(db_v2, gemini_settings, clock
     assert request_decl.parameters_json_schema["properties"]["container_number"]["maximum"] == 3
     assert "patient_id" not in str(request_decl.parameters_json_schema)
     assert 0 < config.http_options.timeout <= gemini_settings.agent_timeout_s * 1000
+    assert config.http_options.client_args == {"follow_redirects": False}   # per-request options too
+    assert config.thinking_config is None                                    # "" = the model's default
     # step 2: the model's own content (thought signatures) is replayed unchanged + the function response
     second = calls[1]["contents"]
     assert second[-2] is first.candidates[0].content
@@ -386,6 +388,110 @@ def test_gemini_agent_without_key_raises_model_error(settings_v2, clock, db_v2):
         agent.respond(system_instruction="x", history=[], user_text="hi", tools=tools)
 
 
+@pytest.mark.parametrize("level,expected", [
+    ("low", types.ThinkingLevel.LOW), ("medium", types.ThinkingLevel.MEDIUM), ("high", types.ThinkingLevel.HIGH)])
+def test_thinking_level_is_sent_on_every_step(db_v2, gemini_settings, clock, bus, level, expected):
+    settings = gemini_settings.model_copy(update={"agent_thinking_level": level})
+    svc, drops, ids, client = build(db_v2, settings, clock, bus,
+                                    response(fc("get_patient_status")), response(text("Nothing is due right now.")))
+    assert chat(svc, ids, "what's due?").model == MODEL
+    for call in client.calls:
+        thinking = call["config"].thinking_config
+        assert thinking.thinking_level == expected and thinking.thinking_budget is None
+        assert thinking.include_thoughts is None
+
+
+def test_model_errors_keep_the_original_exception_for_classification(settings_v2, clock, db_v2):
+    from tactidose.integrations import netsafe
+
+    quota = errors.ClientError(429, {"error": {"code": 429, "status": "RESOURCE_EXHAUSTED", "message": "quota"}})
+    agent = GeminiAgent(settings_v2.model_copy(update={"agent_provider": "gemini"}), client=FakeGenai(quota))
+    tools = PatientTools(db=db_v2, drops=None, clock=clock, settings=settings_v2, patient_id=1,  # type: ignore[arg-type]
+                         conversation_id=None)
+    with pytest.raises(AgentModelError) as info:
+        agent.respond(system_instruction="x", history=[], user_text="hi", tools=tools)
+    assert info.value.__cause__ is quota and netsafe.classify_exception(info.value).code == netsafe.QUOTA
+    ticks = iter([0.0, 1000.0])
+    agent._now = lambda: next(ticks)
+    with pytest.raises(AgentModelError) as info:
+        agent.respond(system_instruction="x", history=[], user_text="hi", tools=tools)
+    assert netsafe.classify_exception(info.value).code == netsafe.TIMEOUT   # turn budget spent
+
+
+# --------------------------------------------------------------------------- real SDK client, mock HTTP
+
+
+KEY = "AIzaFAKE-agent-key-0123456789"
+
+
+def route_to_mock(genai_client, handler):
+    """Send a real ``genai.Client``'s own httpx client through ``handler`` (no sockets, no proxies)."""
+    import httpx
+
+    seen = []
+
+    def dispatch(request):
+        seen.append(request)
+        return handler(request)
+
+    http = genai_client._api_client._httpx_client
+    http._mounts = {}
+    http._transport = httpx.MockTransport(dispatch)
+    return seen
+
+
+@pytest.fixture
+def real_agent(settings_v2, clock, db_v2):
+    from pydantic import SecretStr
+
+    settings = settings_v2.model_copy(update={"agent_provider": "gemini", "gemini_model": MODEL,
+                                              "gemini_api_key": SecretStr(KEY), "agent_thinking_level": "low"})
+    agent = GeminiAgent(settings)
+    client = agent._get_client(types)            # a real genai.Client: construction makes no network call
+    tools = PatientTools(db=db_v2, drops=None, clock=clock, settings=settings, patient_id=1,  # type: ignore[arg-type]
+                         conversation_id=None)
+    yield agent, client, tools
+    client.close()
+
+
+def test_real_client_and_per_request_options_never_follow_redirects(real_agent):
+    import httpx
+
+    from tactidose.integrations import netsafe
+
+    agent, client, tools = real_agent
+    assert client._api_client._httpx_client.follow_redirects is False
+
+    def handler(request):
+        if request.url.host != "generativelanguage.googleapis.com":
+            return httpx.Response(200, text="<html>sign in</html>")
+        return httpx.Response(307, headers={"location": "https://sso.example.com/login?user=alex"})
+
+    seen = route_to_mock(client, handler)
+    with pytest.raises(AgentModelError) as info:
+        agent.respond(system_instruction="x", history=[], user_text="hi", tools=tools)
+    # the request carried per-request HttpOptions (its own timeout) and still was not followed
+    assert [r.url.host for r in seen] == ["generativelanguage.googleapis.com"]
+    assert 0 < seen[0].extensions["timeout"]["read"] <= agent.settings.agent_timeout_s
+    assert isinstance(info.value.__cause__, errors.APIError) and info.value.__cause__.code == 307
+    failure = netsafe.classify_exception(info.value)
+    assert failure.code == netsafe.BLOCKED and "alex" not in str(failure)
+
+
+def test_real_client_sends_the_thinking_level(real_agent):
+    import json
+
+    import httpx
+
+    agent, client, tools = real_agent
+    body = {"candidates": [{"content": {"role": "model", "parts": [{"text": "Hello."}]}, "finishReason": "STOP"}]}
+    seen = route_to_mock(client, lambda request: httpx.Response(200, json=body))
+    assert agent.respond(system_instruction="x", history=[], user_text="hi", tools=tools).text == "Hello."
+    thinking = json.loads(seen[0].content)["generationConfig"]["thinkingConfig"]
+    assert thinking.get("thinkingLevel", thinking.get("thinking_level")) == "LOW"
+    assert seen[0].headers["x-goog-api-key"] == KEY and KEY not in str(seen[0].url)
+
+
 # --------------------------------------------------------------------------- claim detection units
 
 
@@ -418,3 +524,31 @@ def test_rollover_starts_a_fresh_model_history(db_v2, gemini_settings, clock, bu
     second = chat(svc, ids, "hello", conversation_id=first.conversation_id)
     assert second.conversation_id != first.conversation_id
     assert [c.role for c in client.calls[1]["contents"]] == ["user"]
+
+
+def _request_results(reply):
+    return [m["tool_result"] for m in reply.messages if m["role"] == "tool" and m["tool_name"] == "request_pill"]
+
+
+@pytest.mark.parametrize("msg,args", [
+    ("can i have my pill not calcium", {"medication_name": "Calcium"}),
+    ("i want my pill not the omega 3", {"container_number": 3}),
+])
+def test_a_pill_named_after_not_is_never_dropped_for_the_model(db_v2, gemini_settings, clock, bus, msg, args):
+    svc, drops, ids, client = build(
+        db_v2, gemini_settings, clock, bus,
+        response(fc("request_pill", reason="x", **args)),
+        response(text("Which pill would you like?")),
+    )
+    reply = chat(svc, ids, msg)
+    assert drops.requests == [] and _request_results(reply)[-1]["reason"] == "NEGATED"
+
+
+def test_another_pill_still_drops_when_one_is_named_after_not(db_v2, gemini_settings, clock, bus):
+    svc, drops, ids, client = build(
+        db_v2, gemini_settings, clock, bus,
+        response(fc("request_pill", medication_name="Vitamin C", reason="x")),
+        response(text("Vitamin C dropped from container 1.")),
+    )
+    reply = chat(svc, ids, "can i have my pill not calcium")
+    assert len(drops.requests) == 1 and _request_results(reply)[-1]["status"] == "DROPPED"

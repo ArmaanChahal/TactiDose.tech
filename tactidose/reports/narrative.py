@@ -15,7 +15,9 @@ Two sources (``Narrative.source``):
   whenever Gemini is off, unavailable or fails (``Narrative.fallback_reason`` says why).
 
 The same turn analysis picks the timestamped conversation excerpts printed in the PDF
-(:func:`select_excerpts`). Nothing here can request or authorise a drop.
+(:func:`select_excerpts`). Nothing here can request or authorise a drop. The Gemini client never
+follows redirects (``netsafe.gemini_http_options``: the key is a custom header) and failures are
+logged as a netsafe code + plain message, never raw exception text.
 """
 
 from __future__ import annotations
@@ -28,6 +30,7 @@ from datetime import datetime
 from typing import Any
 
 from tactidose.config import Settings
+from tactidose.integrations import netsafe
 from tactidose.reports.data import (
     MessageRow,
     ReportData,
@@ -465,8 +468,13 @@ class ReportNarrator:
         try:
             text, model = self._generate(build_prompt(data, stats, turns))
         except Exception as exc:  # noqa: BLE001 - any AI failure falls back to the rules summary
-            code = exc.code if isinstance(exc, NarrativeError) else _failure_code(exc)
-            log.warning("report narrative: Gemini not used (%s: %s)", code, self._redact(str(exc))[:200])
+            if isinstance(exc, NarrativeError):   # local check (blocked, empty, unsafe_output, no_api_key...)
+                code = exc.code
+                log.warning("report narrative: Gemini not used (%s)", code)
+            else:   # netsafe code + plain message, never raw exception text (it can carry URLs)
+                code = _failure_code(exc)
+                log.warning("report narrative: Gemini not used (%s; %s)", code,
+                            self._redact(str(netsafe.classify_exception(exc)))[:200])
             return Narrative(rules_text, "rules", fallback_reason=code)
         log.info("report narrative written by %s (%d words)", model, len(text.split()))
         return Narrative(text, "gemini", model=model)
@@ -501,11 +509,12 @@ class ReportNarrator:
                     raise NarrativeError("no_api_key")
                 try:
                     from google import genai
+                    from google.genai import types
                 except ImportError as exc:
                     raise NarrativeError("sdk_missing") from exc
                 timeout_ms = max(1000, round(self._settings.gemini_timeout_s * 1000))
-                self._client = genai.Client(api_key=self._secrets[0], vertexai=False,
-                                            http_options={"timeout": timeout_ms})
+                self._client = genai.Client(api_key=self._secrets[0], vertexai=False,   # never follow redirects
+                                            http_options=netsafe.gemini_http_options(types, timeout_ms))
             return self._client
 
     def _redact(self, text: str) -> str:

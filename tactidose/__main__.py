@@ -12,7 +12,8 @@ simulator              serve a simulated ESP32 on TCP (``socket://127.0.0.1:7777
 hw-test                integration checklist on a real board
 conformance            protocol scenarios (arguments go to ``tactidose.hardware.conformance``)
 ports                  serial ports and the auto-detect choice
-doctor                 configuration and environment check
+doctor                 configuration and environment check (offline)
+check-apis             tiny live requests to each configured cloud service (keys, network)
 download-voice-model   fetch the offline Vosk speech model
 warm-tts-cache         pre-render the critical spoken phrases
 generate-report        PDF report for a patient (optionally saved to a file)
@@ -32,8 +33,10 @@ import argparse
 import getpass
 import importlib
 import importlib.util
+import json
 import logging
 import os
+import shutil
 import sys
 import threading
 from collections.abc import Callable, Sequence
@@ -557,6 +560,7 @@ def _check_services(settings: Settings) -> tuple[str, list[str]]:
                               f"not configured - report e-mails are saved in {settings.outbox_dir}"),
         "Snowflake analytics: " + yes(settings.snowflake_configured, "configured", "not configured"),
         "TiDB: " + yes(bool(settings.tidb_host), f"configured ({settings.tidb_host})", "not configured - SQLite"),
+        "To test the keys live on this network (tiny real requests): python -m tactidose check-apis",
     ]
 
 
@@ -604,6 +608,52 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
         failed += status == "FAIL"
     _out("All essential checks passed." if not failed else f"{failed} essential check(s) failed.")
     return EXIT_FAILURE if failed else EXIT_OK
+
+
+# =========================================================================== check-apis
+
+#: ``check-apis --only`` names, in check order (= ``live_check.SERVICES``; kept here so the parser
+#: does not import the integrations).
+API_SERVICES = ("gemini", "elevenlabs", "snowflake", "tidb", "smtp")
+
+
+def _api_services(text: str) -> list[str]:
+    names = [part.strip().lower() for part in text.split(",") if part.strip()]
+    if not names:
+        raise argparse.ArgumentTypeError(f"name at least one service: {','.join(API_SERVICES)}")
+    unknown = [n for n in names if n not in API_SERVICES]
+    if unknown:
+        raise argparse.ArgumentTypeError(f"unknown service {unknown[0]!r} (choose from {', '.join(API_SERVICES)})")
+    return names
+
+
+def _env_file_path() -> Path:
+    """The ``.env`` file Settings reads (relative to the working directory)."""
+    from tactidose.config import Settings
+
+    configured = Settings.model_config.get("env_file")
+    if isinstance(configured, (list, tuple)):
+        configured = configured[0] if configured else None
+    return Path(configured or ".env").resolve()
+
+
+def _cmd_check_apis(args: argparse.Namespace) -> int:
+    settings = _settings()
+    from tactidose.integrations import live_check
+
+    only = set(args.only) if args.only else None
+    if args.json:
+        results = live_check.run_checks(settings, only=only)
+        _out(_redact(json.dumps([r.to_dict() for r in results], indent=2, default=str), settings))
+    else:
+        _err(f"Contacting the configured services (tiny requests, {live_check.TIMEOUT_S:g} s limit each; "
+             "no email is sent) ...")
+        results = live_check.run_checks(settings, only=only)
+        width = None
+        if sys.stdout is not None and sys.stdout.isatty():      # wrap for a terminal, never for a pipe
+            width = shutil.get_terminal_size((120, 24)).columns - 1
+        _out(_redact(live_check.format_report(results, _env_file_path(), width=width), settings))
+    return EXIT_FAILURE if any(r.failed for r in results) else EXIT_OK
 
 
 # =========================================================================== voice / audio commands
@@ -870,6 +920,16 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("doctor", help="check the configuration and environment")
     p.add_argument("--docker", action="store_true", help="also check Docker (slow)")
     p.set_defaults(handler=_cmd_doctor)
+
+    p = sub.add_parser("check-apis", help="test the configured cloud keys with tiny live requests",
+                       description="Send one tiny real request to each configured cloud service (Gemini, "
+                                   "ElevenLabs, Snowflake, TiDB, SMTP) and report what works from this network. "
+                                   "Services without settings are not contacted, no email is sent and keys are "
+                                   "never printed. Exit code 1 when a configured service fails.")
+    p.add_argument("--only", type=_api_services, action="extend", metavar="NAMES",
+                   help=f"comma-separated subset of {','.join(API_SERVICES)} (default: all)")
+    p.add_argument("--json", action="store_true", help="print the results as a JSON list")
+    p.set_defaults(handler=_cmd_check_apis)
 
     p = sub.add_parser("download-voice-model", help="download the offline Vosk speech model")
     p.add_argument("--dest", help="folder for the model (default: the folder of TACTIDOSE_VOSK_MODEL_PATH)")

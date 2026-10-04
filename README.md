@@ -55,6 +55,115 @@ The **demo panel** (`/demo`) has a demo clock ("jump to the next dose"), simulat
 Run `python -m tactidose doctor` any time to check the setup (database, serial ports, voice model,
 audio devices, which cloud services are configured).
 
+## Cloud services and API keys (optional)
+
+Everything runs offline without any keys: the rule-based assistant, the computer's built-in voice,
+a local SQLite database, and report emails saved as files. Each key you add turns on one cloud
+service. If that service fails later (no internet, quota used up, a blocked network), the app falls
+back to its offline behaviour by itself.
+
+**Where the keys go:** in a file named `.env` in the project folder (the folder you run
+`python -m tactidose` from). Create it from the template (skip the copy if you already have a
+`.env`: it would be overwritten), then fill in only the lines you need:
+
+```powershell
+Copy-Item .env.example .env      # macOS/Linux: cp .env.example .env
+notepad .env
+```
+
+`.env` is git-ignored. **Never commit keys** and never put them in `.env.example`. Write values
+without quotes (`GEMINI_API_KEY=AIza...`). A real environment variable with the same name overrides
+the line in `.env`. **Restart the server after editing `.env`**, because settings are only read at
+start-up.
+
+| Service | Lines to set in `.env` | Where to get it | What it turns on |
+|---|---|---|---|
+| **Gemini** (start here) | `GEMINI_API_KEY` | [aistudio.google.com/apikey](https://aistudio.google.com/apikey) (free) | The assistant understands free-form speech and text instead of fixed phrases. It also writes the factual conversation summary in reports and reads medication labels from photos. |
+| ElevenLabs | `ELEVENLABS_API_KEY`, optional `ELEVENLABS_VOICE_ID` | elevenlabs.io → Developers → API Keys; give the key **Text to Speech** access | A natural voice for spoken replies instead of the built-in one |
+| Email (Gmail) | `SMTP_HOST=smtp.gmail.com`, `SMTP_PORT=587`, `SMTP_USER`, `SMTP_PASSWORD` (a Gmail **app password**), `SMTP_FROM` | [myaccount.google.com/apppasswords](https://myaccount.google.com/apppasswords) (needs 2-Step Verification) | Reports are really emailed to the doctor; without it they are saved as `.eml` files in `data/outbox` |
+| TiDB | `TIDB_HOST`, `TIDB_USER`, `TIDB_PASSWORD`, `TIDB_DATABASE`, then run `python -m tactidose init-db` once | TiDB Cloud → your cluster → Connect | The app's database lives in TiDB Cloud instead of local SQLite |
+| Snowflake | `SNOWFLAKE_ACCOUNT`, `SNOWFLAKE_USER`, `SNOWFLAKE_TOKEN` (a programmatic access token), `SNOWFLAKE_WAREHOUSE`, `TACTIDOSE_ANALYTICS_SALT` (a long random string) | your Snowflake account (a trial works) | De-identified adherence and device events are synced to Snowflake for analytics (tables are created automatically) |
+
+To keep a key in `.env` but stop using it: `TACTIDOSE_AGENT_PROVIDER=rules` (offline assistant),
+`TACTIDOSE_REPORT_AI_SUMMARY=false` (rule-based report summary), `TACTIDOSE_LABEL_EXTRACTOR=disabled`
+(no label scanning), `TACTIDOSE_TTS_PROVIDER=offline` (built-in voice). TiDB, Snowflake and email
+are off while `TIDB_HOST`, `SNOWFLAKE_ACCOUNT` and `SMTP_HOST` are empty.
+
+### Test your keys
+
+```powershell
+python -m tactidose check-apis                           # every configured service
+python -m tactidose check-apis --only gemini,elevenlabs  # just these
+python -m tactidose check-apis --json                    # machine-readable
+```
+
+The first line shows which settings file was read: `Settings file: C:\...\.env (found)`. If it says
+*not found*, you are in the wrong folder. Then there is one row per service (`gemini`,
+`gemini-agent`, `elevenlabs`, `snowflake`, `tidb`, `smtp`) with a status. When something needs
+fixing, a `->` line underneath says what to do. The command sends a tiny live request or two to
+each service you configured; services without settings are not contacted, and no email is sent.
+It exits with code 0 unless a configured service failed.
+
+| Status | Meaning |
+|---|---|
+| `OK` | The service answered and the key works. |
+| `WARN` | It works, with a caveat (for example a fallback model or another voice was used). Read the `->` line. |
+| `NOT_CONFIGURED` | No key yet. The row lists the `.env` lines to add; until then the app uses its offline fallback. |
+| `INVALID_KEY` | The key was rejected. Copy the whole key again (no quotes or spaces) and check it was not revoked. |
+| `QUOTA_EXCEEDED` | Rate limit, daily quota or credits used up. Wait a minute, use a smaller model, or check your plan. |
+| `BLOCKED_BY_NETWORK` | A web filter on this network blocked or redirected the request. The app did not follow the redirect, so the key was not sent on. Use a network that allows the service, or ask its administrator. |
+| `TLS_ERROR` | A TLS-inspecting proxy re-signs HTTPS on this network: see the certificate note below. |
+| `NOT_FOUND` | The model or voice ID in `.env` does not exist for this key (for TiDB: run `init-db`). |
+
+Other codes (`PERMISSION_DENIED`, `TIMEOUT`, `NETWORK_ERROR`, `BAD_REQUEST`, `SERVER_ERROR`, `ERROR`)
+come with their own `->` hint.
+
+Then check it in the app:
+
+1. Start (or restart) it: `python -m tactidose run --sim`.
+2. Sign in as the patient (`alex@demo.tactidose`) and talk to the assistant in your own words.
+3. Sign in as family or doctor (`sam@demo.tactidose` / `dr.lee@demo.tactidose`) and open
+   **Conversations**. Each assistant reply shows the model that wrote it:
+   - `Assistant (gemini-3.8-flash)`: Gemini answered;
+   - `rules (fallback)`: Gemini failed (or is paused after a recent failure), so the offline
+     assistant answered;
+   - `rules`: no Gemini key (or `TACTIDOSE_AGENT_PROVIDER=rules`);
+   - `rules (safety)`: a fixed safety answer instead of Gemini (an emergency, "stop", or a Gemini
+     reply that did not match what the device did).
+4. Open http://127.0.0.1:8000/api/health. The `agent` part shows `provider` (`gemini` or `rules`),
+   `model` and the circuit breaker: `gemini_retry_in_s` is the number of seconds until Gemini is
+   tried again after a failure (0 = not paused), and `gemini_last_error` is the status of the last
+   failure (for example `BLOCKED_BY_NETWORK`).
+
+### Notes on networks, privacy and quotas
+
+- **Work and school networks** often block or redirect AI APIs. The app never follows a redirect
+  while sending a key; it reports `BLOCKED_BY_NETWORK` and uses the offline assistant and voice
+  instead. After a Gemini failure the offline assistant answers at once for
+  `TACTIDOSE_AGENT_RETRY_AFTER_S` seconds (default 60; `0` = try Gemini on every message), so
+  replies don't keep waiting for a timeout.
+- **TLS-inspecting proxies** re-sign HTTPS traffic with their own root certificate. Point the
+  environment variables `SSL_CERT_FILE` and `REQUESTS_CA_BUNDLE` at a CA bundle that includes that
+  root. Python reads these from the environment, not from `.env`, so set them in Windows ("Edit
+  environment variables for your account"), or in the PowerShell window before starting the app:
+  `$env:SSL_CERT_FILE="C:\path\bundle.pem"; $env:REQUESTS_CA_BUNDLE=$env:SSL_CERT_FILE`. TiDB uses
+  `TIDB_SSL_CA` if set, otherwise the file named by `SSL_CERT_FILE` / `REQUESTS_CA_BUNDLE`,
+  otherwise the certifi bundle.
+- **Privacy:** on Gemini's free tier, Google may use prompts to improve its products and people may
+  review them. Use demo data only, never real patient information. A TLS-inspecting proxy can also
+  read your keys in transit, so use keys you can revoke and revoke them after the event.
+- **ElevenLabs voice:** the default voice ("George", `JBFqnCBsd6RMkjVDRZzb`) is a legacy voice that
+  accounts created after March 2026 cannot use. With `TACTIDOSE_ELEVENLABS_AUTO_VOICE=true` (the
+  default), the app switches to your account's first premade voice and logs which
+  `ELEVENLABS_VOICE_ID` to set. Picking a voice means listing your voices, which some networks block,
+  so you can also set `ELEVENLABS_VOICE_ID` yourself (copy an ID from the ElevenLabs Voices page).
+  Free accounts may be refused on shared or proxied networks (`PERMISSION_DENIED`).
+- **Gemini quota:** the free tier's daily quota may be small. When it runs out (`QUOTA_EXCEEDED`),
+  the offline assistant answers until it resets. Setting `GEMINI_MODEL` to a Flash-Lite model
+  (e.g. `gemini-flash-lite-latest`) usually gives higher free limits; `check-apis` confirms the
+  model exists. `TACTIDOSE_AGENT_THINKING_LEVEL=low` makes spoken replies faster (empty = the
+  model's default).
+
 ## Connecting the real ESP32
 
 1. Wire the board and set the pins and mechanism in `firmware/tactidose_esp32/config.h`
@@ -76,14 +185,7 @@ supports the older v1 commands still works: the app drops a pill with `DISPENSE_
 ## Configuration
 
 Copy `.env.example` to `.env`. Everything is optional; without keys the full demo runs offline.
-
-| Service | Settings | Without it |
-|---|---|---|
-| Gemini (assistant, report summary, label scanning) | `GEMINI_API_KEY`, `GEMINI_MODEL` | offline rule-based assistant and summaries |
-| ElevenLabs (natural voice) | `ELEVENLABS_API_KEY`, `ELEVENLABS_VOICE_ID` | built-in OS voice |
-| Email (send reports) | `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM` (Gmail: an app password) | emails are saved as `.eml` files in `data/outbox` |
-| TiDB (cloud database) | `TIDB_HOST`, `TIDB_USER`, `TIDB_PASSWORD`, `TIDB_DATABASE` | local SQLite in `data/` |
-| Snowflake (analytics, optional) | `SNOWFLAKE_*` | analytics stay local |
+Cloud keys and how to test them: [Cloud services and API keys](#cloud-services-and-api-keys-optional).
 
 Useful app settings: `TACTIDOSE_MANUAL_COOLDOWN_MINUTES` (default for new devices),
 `TACTIDOSE_AUTO_DROP_ENABLED`, `TACTIDOSE_NUM_SLOTS` (3), `TACTIDOSE_TIMEZONE`,
@@ -118,6 +220,8 @@ Design rule: **AI interprets, deterministic code authorizes and actuates.** The 
 |---|---|
 | `python -m tactidose run [--sim \| --serial PORT \| --no-hardware] [--no-voice] [--port 8000]` | start the web app |
 | `python -m tactidose doctor` | check configuration and environment |
+| `python -m tactidose check-apis [--only gemini,elevenlabs,snowflake,tidb,smtp] [--json]` | test the cloud keys in `.env` with one tiny live request per configured service |
+| `python -m tactidose init-db` | create the database and tables (run once after setting `TIDB_*`) |
 | `python -m tactidose seed-demo` / `reset-demo` | create / reset the demo accounts and data |
 | `python -m tactidose create-user`, `link`, `bind-device` | manage accounts, caregiver links and the device owner |
 | `python -m tactidose hw-test`, `conformance`, `ports`, `simulator` | hardware checks, protocol tests, port list, TCP simulator |
@@ -160,7 +264,11 @@ tests/          pytest suite
   to boot and home.
 - **Voice input says "not available".** Run `python -m tactidose download-voice-model`, or use the
   browser microphone (Chrome/Edge) in the patient portal.
-- **Gemini / ElevenLabs fail on a corporate network.** Proxies often block them; the app falls back
-  to the offline assistant and voice automatically.
+- **Gemini / ElevenLabs fail on a work network.** Run `python -m tactidose check-apis`.
+  `BLOCKED_BY_NETWORK` means a web filter blocks the service, and `TLS_ERROR` means a TLS-inspecting
+  proxy (see the notes under [Cloud services and API keys](#cloud-services-and-api-keys-optional)).
+  The app falls back to the offline assistant and voice automatically.
+- **A key in `.env` seems to be ignored.** Restart the server, and check that `check-apis` prints
+  the `.env` you edited (`Settings file: ... (found)`).
 - **The repository is in OneDrive/Dropbox.** Prefer a normal folder: sync clients can lock the
   SQLite database and slow everything down.

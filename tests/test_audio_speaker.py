@@ -5,16 +5,18 @@ from __future__ import annotations
 import threading
 from typing import Any, Callable
 
+import httpx
 import pytest
 from pydantic import SecretStr
 
+from tactidose.agent.voice import ReplyTTS
 from tactidose.audio.cache import TTSCache
 from tactidose.audio.playback import NullPlayer, pcm_to_wav, read_wav
 from tactidose.audio.speaker import DEGRADED_S, MAX_QUEUE, SpeakerService
 from tactidose.core import phrases
 from tactidose.core.bus import EventBus, Topic
 from tactidose.core.interfaces import Speaker
-from tactidose.integrations.elevenlabs import ElevenLabsError, ElevenLabsUnavailable
+from tactidose.integrations.elevenlabs import ElevenLabsClient, ElevenLabsError, ElevenLabsUnavailable
 from tests.fakes import wait_until
 
 CLOUD_PCM = b"\x01\x00" * 160
@@ -280,6 +282,55 @@ def test_say_before_start_is_spoken_after_start(make, bus):
     assert spoken(bus)[-1]["text"] == "Queued early."
 
 
+# --------------------------------------------------------------------------- real client (httpx.MockTransport)
+
+
+def cloud_client(handler: Callable[[httpx.Request], httpx.Response], **http_kw: Any) -> ElevenLabsClient:
+    http = httpx.Client(transport=httpx.MockTransport(handler), **http_kw)
+    return ElevenLabsClient("sk-test", "voice-1", "model-1", "pcm_16000", client=http, auto_voice=True)
+
+
+def test_a_network_redirect_falls_back_to_offline_speech(make, bus):
+    hosts: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        hosts.append(request.url.host)
+        return httpx.Response(307, headers={"location": "https://sso.corp.example/login"})
+
+    svc = make(tts=cloud_client(handler, follow_redirects=True), offline=FakeOffline())
+    svc.say("First.")
+    svc.say("Second.")
+    assert svc.wait_idle(2)
+    assert [e["audio"] for e in spoken(bus)] == ["offline", "offline"]
+    assert hosts == ["api.elevenlabs.io"]  # one request, never to the sign-in host; then degraded for 60 s
+    status = svc.status()
+    assert status["degraded"] is True and "blocked by the network" in status["last_error"]
+    assert [e.data["code"] for e in bus.recent(50, [Topic.NOTICE])] == ["TTS_DEGRADED"]
+
+
+def test_an_auto_voice_switch_is_cached_under_the_voice_actually_used(make, bus):
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(f"{request.method} {request.url.path}")
+        if request.method == "GET":
+            voices = [{"voice_id": "voice-2", "name": "Roger", "category": "premade"}]
+            return httpx.Response(200, json={"voices": voices})
+        if request.url.path.endswith("/voice-1"):
+            return httpx.Response(404, json={"detail": {"status": "voice_not_found", "message": "voice not found"}})
+        return httpx.Response(200, content=CLOUD_PCM)
+
+    svc = make(tts=cloud_client(handler), offline=FakeOffline())
+    svc.say("Hello there.")
+    svc.say("Hello there.")
+    assert svc.wait_idle(2)
+    assert [e["audio"] for e in spoken(bus)] == ["elevenlabs", "cache"]
+    assert calls == ["POST /v1/text-to-speech/voice-1", "GET /v1/voices", "POST /v1/text-to-speech/voice-2"]
+    assert svc._cache.contains(TTSCache.key("elevenlabs", "voice-2", "model-1", "pcm_16000", "Hello there."))
+    assert not svc._cache.contains(TTSCache.key("elevenlabs", "voice-1", "model-1", "pcm_16000", "Hello there."))
+    assert svc.status()["degraded"] is False
+
+
 # --------------------------------------------------------------------------- warm_cache
 
 
@@ -316,6 +367,13 @@ def test_warm_cache_continues_after_a_single_bad_request(make):
     assert (result["rendered"], result["failed"], result["total"]) == (2, 1, 3)
 
 
+def test_warm_cache_stops_calling_cloud_after_a_voice_refusal(make):
+    tts = FakeTTS(fail=ElevenLabsError(404, "voice_not_found: gone", voice_error=True))
+    svc = make(tts=tts, offline=FakeOffline(), start=False)
+    result = svc.warm_cache(["a", "b", "c"])
+    assert (result["rendered"], result["failed"]) == (0, 3) and len(tts.calls) == 1
+
+
 def test_warm_cache_offline_and_none(make):
     offline = FakeOffline()
     svc = make("offline", offline=offline, start=False)
@@ -336,12 +394,40 @@ def test_status_contract(make):
     assert st["provider"] == "none" and st["elevenlabs"] is False and st["degraded_until"] is None
 
 
-def test_configured_key_builds_a_client_without_network(settings, bus):
-    s = settings.model_copy(update={"tts_provider": "elevenlabs", "elevenlabs_api_key": SecretStr("sk-test")})
+AUTO_VOICE = pytest.mark.parametrize("update,auto", [({}, True), ({"elevenlabs_auto_voice": False}, False)])
+
+
+@AUTO_VOICE
+def test_configured_key_builds_a_client_without_network(settings, bus, update, auto):
+    s = settings.model_copy(update={"tts_provider": "elevenlabs", "elevenlabs_api_key": SecretStr("sk-test"), **update})
     svc = SpeakerService(s, bus, offline=FakeOffline(), player=GatePlayer())
     assert svc.status()["elevenlabs"] is True
     assert svc._tts.voice_id == s.elevenlabs_voice_id and svc._tts._client is None
+    assert svc._tts.auto_voice is auto
     svc.close()
+
+
+@AUTO_VOICE
+def test_reply_tts_builds_the_client_with_auto_voice_from_settings(settings, update, auto):
+    s = settings.model_copy(update={"tts_provider": "elevenlabs", "elevenlabs_api_key": SecretStr("sk-test"), **update})
+    tts = ReplyTTS(s, offline=FakeOffline())
+    assert isinstance(tts._client, ElevenLabsClient) and tts._client.auto_voice is auto
+    assert tts._client.voice_id == s.elevenlabs_voice_id and tts._client._client is None  # no network yet
+    tts.close()
+
+
+def test_reply_tts_caches_under_the_voice_actually_used(settings):
+    class Switching(FakeTTS):
+        def synthesize(self, text: str) -> bytes:
+            self.voice_id = "voice-2"  # what auto voice does when voice-1 is refused
+            return super().synthesize(text)
+
+    cloud = Switching()
+    tts = ReplyTTS(settings.model_copy(update={"tts_provider": "elevenlabs"}), client=cloud, offline=FakeOffline())
+    first = tts.synthesize("Hi.")
+    assert first[:4] == b"RIFF"
+    assert tts._cache.contains(TTSCache.key("elevenlabs", "voice-2", "model-1", "pcm_16000", "Hi."))
+    assert tts.synthesize("Hi.") == first and cloud.calls == ["Hi."]
 
 
 def test_non_pcm_format_disables_cloud(settings, bus):

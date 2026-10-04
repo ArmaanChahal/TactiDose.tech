@@ -178,6 +178,9 @@ class TurnGuard:
 
     block_drop: tuple[str, str] | None = None
     block_confirm: tuple[str, str] | None = None
+    #: Normalised patient text when it contains "not": a pill named right after it is never
+    #: requested ("can i have my pill not calcium"), whichever provider resolved the target.
+    negated_text: str = ""
 
 
 @dataclass
@@ -465,6 +468,13 @@ class PatientTools:
         if isinstance(target, dict):
             return target
         slot, medication_id = target
+        if self.guard.negated_text:
+            from tactidose.agent.rules_agent import negated_containers  # rules_agent imports this module
+
+            negated = negated_containers(self.guard.negated_text, status.containers)
+            if any((slot is not None and c.slot == slot)
+                   or (medication_id is not None and c.medication_id == medication_id) for c in negated):
+                return self._not_requested("NEGATED", phrases.NEGATED)
         self._drop_requests += 1
         try:
             outcome = self._drops.request_drop(

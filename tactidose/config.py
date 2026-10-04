@@ -107,6 +107,11 @@ class Settings(BaseSettings):
     agent_max_steps: int = Field(4, ge=1, le=10)
     agent_timeout_s: float = Field(30.0, gt=0, le=120)
     agent_history_messages: int = Field(20, ge=2, le=100)
+    #: Gemini 3.x thinking level for the agent ("" = the model's default; "low" answers faster).
+    agent_thinking_level: Literal["", "low", "medium", "high"] = ""
+    #: After a Gemini failure (network block, quota, bad key, timeout) the rules agent answers
+    #: straight away for this many seconds before Gemini is tried again (0 = retry every turn).
+    agent_retry_after_s: float = Field(60.0, ge=0, le=3600)
 
     # ------------------------------------------------------------------ v2 reports & email
     report_max_days: int = Field(90, ge=1, le=366)
@@ -151,7 +156,8 @@ class Settings(BaseSettings):
     tidb_user: str | None = Field(None, validation_alias=_alias("TIDB_USER", "TACTIDOSE_TIDB_USER"))
     tidb_password: SecretStr | None = Field(None, validation_alias=_alias("TIDB_PASSWORD", "TACTIDOSE_TIDB_PASSWORD"))
     tidb_database: str = Field("tactidose", validation_alias=_alias("TIDB_DATABASE", "TIDB_DB_NAME", "TACTIDOSE_TIDB_DATABASE"))
-    #: CA bundle path for TLS. Empty = certifi bundle (works for TiDB Cloud).
+    #: CA bundle path for TLS. Empty = the file named by SSL_CERT_FILE / REQUESTS_CA_BUNDLE if it
+    #: exists, else the certifi bundle (db/session.tidb_ssl_ca).
     tidb_ssl_ca: str | None = Field(None, validation_alias=_alias("TIDB_SSL_CA", "TIDB_CA_PATH", "CA_PATH"))
     tidb_ssl: bool = Field(True, validation_alias=_alias("TIDB_SSL", "TACTIDOSE_TIDB_SSL"))
 
@@ -170,6 +176,9 @@ class Settings(BaseSettings):
     elevenlabs_api_key: SecretStr | None = Field(None, validation_alias=_alias("ELEVENLABS_API_KEY", "TACTIDOSE_ELEVENLABS_API_KEY"))
     elevenlabs_voice_id: str = Field("JBFqnCBsd6RMkjVDRZzb", validation_alias=_alias("ELEVENLABS_VOICE_ID", "TACTIDOSE_ELEVENLABS_VOICE_ID"))
     elevenlabs_model_id: str = Field("eleven_flash_v2_5", validation_alias=_alias("ELEVENLABS_MODEL_ID", "TACTIDOSE_ELEVENLABS_MODEL_ID"))
+    #: If the configured voice is not available to the account (the default "George" is a legacy
+    #: voice new accounts do not have), use the account's first premade voice instead.
+    elevenlabs_auto_voice: bool = True
     #: Raw PCM so playback needs no MP3 decoder. pcm_16000/22050/24000 work on all tiers.
     elevenlabs_output_format: str = "pcm_22050"
     tts_timeout_s: float = Field(6.0, gt=0, le=60)

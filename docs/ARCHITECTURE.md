@@ -259,7 +259,8 @@ startup: create_all → seed (demo) → drops.recover_on_startup() → scheduler
 | Device disconnected / FAULT | `DENIED/DEVICE_UNAVAILABLE`; scheduled doses retry until their window closes, then MISSED + notification. |
 | Uncertain drop | `UNCERTAIN` + `needs_review`; cooldown applies; further drops `NEEDS_REVIEW` until a caregiver resolves it. |
 | Empty container | `DENIED/EMPTY` (or `ERR NO_PILL` from the drop sensor) + EMPTY notification. |
-| Agent tool error / model error | reply "I can't do that right now — please use the Drop button or ask your caregiver."; logged. |
+| Agent tool error | reply "I can't do that right now — please use the Drop button or ask your caregiver."; logged. |
+| Gemini error, quota or blocked network | the rules agent answers (`model="rules (fallback)"`) and Gemini is skipped for `agent_retry_after_s` (§13). |
 
 ## 13. Facts from the wave-1 build (binding for v2 work)
 
@@ -292,8 +293,46 @@ or from a background thread. Offline Windows speech costs ~1.9 s per new sentenc
 Raw Vosk text keeps `[unk]` tokens; pills are never dispensed/confirmed from text containing `[unk]`.
 
 **Integrations** — `create_label_extractor(settings)` returns None when disabled/no key.
-`SnowflakeSync` is safe to construct when not configured. Gemini: default temperature recommended
-for Gemini 3 models (the label extractor uses 0 — revisit if output degrades).
+`SnowflakeSync` is safe to construct when not configured. Gemini: default sampling everywhere (no
+`temperature`; a low temperature can make Gemini 3 models loop or truncate).
+
+**Cloud calls (API-keys round)**
+* **No redirects with a key.** Every cloud HTTP client is built with `integrations/netsafe.py`
+  (`NO_REDIRECTS` for httpx, `gemini_http_options` for google-genai): keys travel in custom headers
+  (`x-goog-api-key`, `xi-api-key`), which httpx keeps on cross-origin redirects. Any 3xx means
+  `BLOCKED_BY_NETWORK` (a web filter's sign-in or block page). `classify_status` /
+  `classify_exception` map failures to the netsafe codes (`OK`, `NOT_CONFIGURED`,
+  `BLOCKED_BY_NETWORK`, `TLS_ERROR`, `TIMEOUT`, `NETWORK_ERROR`, `INVALID_KEY`, `PERMISSION_DENIED`,
+  `QUOTA_EXCEEDED`, `NOT_FOUND`, `BAD_REQUEST`, `SERVER_ERROR`, `ERROR`) for logs, fallbacks and
+  `check-apis`. Secrets only appear as `netsafe.redact(...)`.
+* **`python -m tactidose check-apis [--only gemini,elevenlabs,snowflake,tidb,smtp] [--json]`**
+  (`integrations/live_check.py`) sends one tiny live request per *configured* service. Rows are
+  `gemini`, `gemini-agent`, `elevenlabs`, `snowflake`, `tidb` and `smtp`, after a first line with
+  the `.env` path it read. It exits 0 unless a configured row failed (`OK`, `WARN` and
+  `NOT_CONFIGURED` pass).
+* **Assistant circuit breaker** (`AgentService`): after a Gemini failure, the rules agent answers
+  at once (`model="rules (fallback)"`) for `agent_retry_after_s` seconds (default 60). This is
+  monotonic time, so demo clock travel does not count; 0 = try Gemini every turn. The first turn
+  after the pause tries Gemini again, and a success closes the breaker. `/api/health` shows
+  `agent.gemini_retry_in_s` and `agent.gemini_last_error` (a netsafe code). `agent_thinking_level`
+  ("" = the model's default) sets the agent's Gemini thinking level.
+* **ElevenLabs auto voice** (`elevenlabs_auto_voice`, default on): when the account cannot use the
+  configured voice (e.g. the legacy default "George" on accounts created after March 2026), the
+  client lists the account's voices, switches to the first premade one, logs the
+  `ELEVENLABS_VOICE_ID` to set and retries once. If the list cannot be fetched, the original error
+  stands and the offline voice speaks.
+* **TiDB CA** (`db/session.tidb_ssl_ca`): `TIDB_SSL_CA` if set, else the first existing file named
+  by the `SSL_CERT_FILE` / `REQUESTS_CA_BUNDLE` environment variables (a TLS-inspecting proxy's
+  bundle), else certifi. The engine and `init-db` share it.
+* **Turn guard: negated fragments** (`rules_agent.analyse`): a fragment that names what NOT to drop
+  sets `drop_negated`, so `turn_guard` blocks `request_pill` for every provider. That is a typed
+  clause starting with "not" (but not "not feeling / well / good"), or, anywhere, "not" followed
+  by the / this / my / those / these / that or a pill word. Examples: "not the calcium", "no, not
+  that one", "can I have my pill, not the calcium". A hedge that ends its own clause ("I'm not
+  sure, drop my pill") negates nothing; unpunctuated speech ("im not sure drop my pill") fails
+  closed. For such a request the rules agent asks "Which pill would you like?" without the negated
+  containers. It also never drops a medication named right after "not" ("my pill not calcium"),
+  which the text-only guard cannot recognise for Gemini.
 
 **UI serving** — mount `tactidose/ui/static` at `/static`; on Windows call
 `mimetypes.add_type("text/javascript", ".js")` (plus `.css`, `.svg`) **before** mounting, or

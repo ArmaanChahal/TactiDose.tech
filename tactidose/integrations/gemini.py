@@ -25,6 +25,11 @@ scheduled. Nothing in this module can create a medication or authorise motion.
   human reviewer knows.
 * If the configured model id is rejected (HTTP 404 / ``NOT_FOUND``) the fallback model
   is tried once. If the fallback works, later scans use it straight away.
+* Default sampling (no ``temperature``): Gemini 3 models are tuned for it, and a low
+  temperature can make them loop or truncate.
+* The client never follows redirects (the key is a custom header; a filtering proxy's
+  "307 -> sign-in page" comes back as ``api_error:307``, logged as ``BLOCKED_BY_NETWORK``).
+  Failures are logged as :mod:`~tactidose.integrations.netsafe` code + plain message.
 * The API key and the image bytes are never logged.
 
 Manual check from a shell (prints the result as JSON)::
@@ -51,11 +56,12 @@ from pydantic import ValidationError
 
 from tactidose.config import Settings
 from tactidose.core.interfaces import ExtractionResult, LabelExtraction, LabelExtractor
+from tactidose.integrations import netsafe
 
 log = logging.getLogger(__name__)
 
 __all__ = [
-    "SYSTEM_INSTRUCTION", "PROMPT", "TEMPERATURE",
+    "SYSTEM_INSTRUCTION", "PROMPT",
     "MAX_NAME_CHARS", "MAX_STRENGTH_CHARS", "MAX_INSTRUCTIONS_CHARS", "MAX_WARNINGS",
     "MAX_WARNING_CHARS", "MAX_NOTES_CHARS",
     "ERR_TIMEOUT", "ERR_NETWORK", "ERR_BLOCKED", "ERR_INVALID_RESPONSE", "ERR_UNREADABLE",
@@ -74,11 +80,6 @@ MAX_WARNINGS = 20
 MAX_WARNING_CHARS = 300
 MAX_NOTES_CHARS = 1000
 MAX_RAW_TEXT_CHARS = 20000      # raw model text kept for audit
-
-#: Deterministic decoding for transcription. Note: Google's Gemini 3 guidance recommends
-#: the default temperature (1.0); if a Gemini 3 model starts looping or truncating, the
-#: result is ``invalid_response`` (fail closed) and this constant is the knob to revisit.
-TEMPERATURE = 0.0
 
 ERR_TIMEOUT = "timeout"
 ERR_NETWORK = "network"
@@ -537,7 +538,7 @@ class GeminiLabelExtractor:
             return _failure(ERR_NO_API_KEY, model=model)
         except Exception as exc:  # noqa: BLE001
             code = classify_exception(exc)
-            log.warning("Gemini client could not be created: %s (%s)", code, type(exc).__name__)
+            log.warning("Gemini client could not be created: %s (%s)", code, self._describe(exc))
             return _failure(code, model=model)
 
         try:
@@ -569,7 +570,7 @@ class GeminiLabelExtractor:
                 self._client = genai.Client(
                     api_key=self._secrets[0],
                     vertexai=False,
-                    http_options=types.HttpOptions(timeout=timeout_ms),
+                    http_options=netsafe.gemini_http_options(types, timeout_ms),   # never follow redirects
                 )
             return self._client
 
@@ -579,7 +580,6 @@ class GeminiLabelExtractor:
             system_instruction=SYSTEM_INSTRUCTION,
             response_mime_type="application/json",
             response_json_schema=response_json_schema(),
-            temperature=TEMPERATURE,
             # No tools are ever offered; disabling AFC keeps the SDK on its plain request path.
             automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
         )
@@ -588,9 +588,13 @@ class GeminiLabelExtractor:
 
     def _exception_result(self, exc: BaseException, model: str) -> ExtractionResult:
         code = classify_exception(exc)
-        log.warning("Gemini request failed: %s (%s: %s)", code, type(exc).__name__,
-                    self._redact(str(exc))[:300])
+        log.warning("Gemini request failed: %s (%s)", code, self._describe(exc))
         return _failure(code, model=model)
+
+    def _describe(self, exc: BaseException) -> str:
+        """netsafe code + plain message (e.g. ``BLOCKED_BY_NETWORK: the network redirected the
+        request to sso.example.com``): never raw exception text, which can carry URLs."""
+        return self._redact(str(netsafe.classify_exception(exc)))[:300]
 
     def _interpret(self, response: Any, model: str) -> ExtractionResult:
         text = _response_text(response)

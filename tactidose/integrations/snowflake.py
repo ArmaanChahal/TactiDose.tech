@@ -55,7 +55,7 @@ __all__ = [
     "SnowflakeSync", "SfColumn", "NamedQuery", "PreparedBatch",
     "ADHERENCE_COLUMNS", "DEVICE_EVENT_COLUMNS", "ADHERENCE_TABLE", "DEVICE_EVENTS_TABLE",
     "ADHERENCE_STAGE", "DEVICE_EVENTS_STAGE", "TOPIC_SYNC",
-    "snowflake_auth_kwargs", "auth_mode", "describe_config",
+    "snowflake_auth_kwargs", "auth_mode", "describe_config", "connection_kwargs",
     "adherence_table_ddl", "device_events_table_ddl", "adherence_stage_ddl",
     "device_events_stage_ddl", "adherence_stage_insert_sql", "device_events_stage_insert_sql",
     "adherence_merge_sql", "device_events_merge_sql", "prepare_batch",
@@ -578,6 +578,27 @@ def describe_config(settings: Settings) -> dict[str, Any]:
     }
 
 
+def connection_kwargs(settings: Settings) -> dict[str, Any]:
+    """Keyword arguments for ``snowflake.connector.connect`` (contains secrets). Used by
+    :class:`SnowflakeSync` and by ``python -m tactidose check-apis``."""
+    kw: dict[str, Any] = {
+        "account": settings.snowflake_account,
+        "user": settings.snowflake_user,
+        "database": settings.snowflake_database,
+        "schema": settings.snowflake_schema,
+        "login_timeout": LOGIN_TIMEOUT_S,
+        "network_timeout": NETWORK_TIMEOUT_S,
+        "application": APPLICATION,
+        "paramstyle": "pyformat",
+    }
+    if settings.snowflake_warehouse:
+        kw["warehouse"] = settings.snowflake_warehouse
+    if settings.snowflake_role:
+        kw["role"] = settings.snowflake_role
+    kw.update(snowflake_auth_kwargs(settings))
+    return kw
+
+
 def _default_connect(**kwargs: Any) -> Any:
     import snowflake.connector  # optional dependency: tactidose[snowflake]
 
@@ -669,23 +690,7 @@ class SnowflakeSync:
 
     def connection_kwargs(self) -> dict[str, Any]:
         """Keyword arguments for ``snowflake.connector.connect`` (contains secrets)."""
-        s = self._settings
-        kw: dict[str, Any] = {
-            "account": s.snowflake_account,
-            "user": s.snowflake_user,
-            "database": s.snowflake_database,
-            "schema": s.snowflake_schema,
-            "login_timeout": LOGIN_TIMEOUT_S,
-            "network_timeout": NETWORK_TIMEOUT_S,
-            "application": APPLICATION,
-            "paramstyle": "pyformat",
-        }
-        if s.snowflake_warehouse:
-            kw["warehouse"] = s.snowflake_warehouse
-        if s.snowflake_role:
-            kw["role"] = s.snowflake_role
-        kw.update(snowflake_auth_kwargs(s))
-        return kw
+        return connection_kwargs(self._settings)   # the module-level helper
 
     def backoff_delay(self, failures: int) -> float:
         """Seconds until the next attempt after ``failures`` consecutive failures."""

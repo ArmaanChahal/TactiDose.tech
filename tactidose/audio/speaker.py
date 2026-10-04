@@ -9,8 +9,10 @@ are queued and spoken in order by the ``speaker`` thread. For each utterance:
 2. Audio is chosen by the fallback chain:
 
    * cache hit for the ElevenLabs rendering -> play (works offline once warmed);
-   * else, provider ``elevenlabs`` with a key -> synthesize (``tts_timeout_s``) -> cache ->
-     play. On any ElevenLabs error the cloud is marked *degraded* for 60 s and skipped
+   * else, provider ``elevenlabs`` with a key -> synthesize (``tts_timeout_s``; with
+     ``elevenlabs_auto_voice`` the client replaces a voice the account cannot use, and the
+     cache key follows the voice actually used) -> cache -> play. On any ElevenLabs error
+     (including "blocked by the network") the cloud is marked *degraded* for 60 s and skipped
      quickly; speech falls back to offline TTS;
    * else, offline OS speech (renders are cached too, because PowerShell start-up is slow);
    * else, captions only.
@@ -95,6 +97,7 @@ class SpeakerService:
                         model_id=settings.elevenlabs_model_id,
                         output_format=settings.elevenlabs_output_format,
                         timeout_s=settings.tts_timeout_s,
+                        auto_voice=settings.elevenlabs_auto_voice,
                     )
                     self._owns_tts = True
                 else:
@@ -239,7 +242,8 @@ class SpeakerService:
                     audio = self._tts.synthesize(text)
                 except ElevenLabsError as exc:
                     error(str(exc))
-                    if isinstance(exc, ElevenLabsUnavailable) or exc.status in _FATAL_HTTP or exc.status >= 500:
+                    if (isinstance(exc, ElevenLabsUnavailable) or exc.status in _FATAL_HTTP or exc.status >= 500
+                            or getattr(exc, "voice_error", False)):  # a refused voice fails every phrase
                         abort = f"skipped after: {exc}"
                         self._mark_degraded(exc)
                     continue
@@ -247,6 +251,7 @@ class SpeakerService:
                     error(f"{type(exc).__name__}: {exc}")
                     continue
                 try:
+                    key = self._cloud_key(text)  # re-keyed: the client may have switched voices
                     stored = self._store_cloud(key, audio) is not None and self._cache.contains(key)
                 except Exception as exc:  # noqa: BLE001 - e.g. unusable output format
                     error(f"{type(exc).__name__}: {exc}")
@@ -323,7 +328,7 @@ class SpeakerService:
             if wav is not None:
                 return "cache", True, wav
             if self._tts is not None and not self._degraded():
-                wav = self._synth_cloud(text, key)
+                wav = self._synth_cloud(text)
                 if wav is not None:
                     return "elevenlabs", False, wav
         if self._offline_available():
@@ -383,10 +388,11 @@ class SpeakerService:
         self._cache.put(key, wav)
         return wav
 
-    def _synth_cloud(self, text: str, key: str) -> bytes | None:
+    def _synth_cloud(self, text: str) -> bytes | None:
         try:
             audio = self._tts.synthesize(text)  # type: ignore[union-attr]
-            return self._store_cloud(key, audio)
+            # keyed after synthesis: with auto voice the client may have switched to another voice
+            return self._store_cloud(self._cloud_key(text), audio)
         except Exception as exc:  # noqa: BLE001 - ElevenLabsError or anything unexpected
             self._mark_degraded(exc)
             return None

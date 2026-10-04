@@ -24,7 +24,7 @@ dependencies = [
 
 [project.optional-dependencies]
 voice = ["vosk>=0.3.45", "sounddevice>=0.4.6", "numpy>=1.26"]
-gemini = ["google-genai>=2.0"]
+gemini = ["google-genai>=2.0,<3"]
 tidb = ["pymysql>=1.1", "certifi>=2024.2.2", "cryptography>=42"]
 snowflake = ["snowflake-connector-python>=4.0"]
 dev = ["pytest>=8", "pytest-timeout>=2.3", "pypdf>=5"]

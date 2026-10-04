@@ -14,10 +14,17 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.exc import OperationalError
 
 from tactidose.config import Settings
-from tactidose.db.session import Database
+from tactidose.db.session import CA_BUNDLE_ENV_VARS, Database, tidb_connect_args, tidb_ssl_ca
 from tactidose.integrations import tidb
 
 PASSWORD = "tidb-PASS-secret-1"
+
+
+@pytest.fixture(autouse=True)
+def _no_ca_bundle_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Machines behind a TLS-inspecting proxy set these; the CA tests below set them explicitly."""
+    for name in CA_BUNDLE_ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
 
 
 @pytest.fixture
@@ -244,6 +251,58 @@ def test_ensure_database_custom_ca_and_no_tls(tidb_settings):
     assert not any(k.startswith("ssl") for k in fake.calls[-1])
 
 
+# --------------------------------------------------------------------------- CA bundle
+
+
+def _bundle(tmp_path, name: str) -> str:
+    path = tmp_path / name
+    path.write_text("-----BEGIN CERTIFICATE-----\nnot a real certificate\n-----END CERTIFICATE-----\n")
+    return str(path)
+
+
+def test_ca_bundle_env_order_and_certifi_default(tidb_settings, tmp_path, monkeypatch):
+    assert CA_BUNDLE_ENV_VARS == ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE")
+    assert tidb_ssl_ca(tidb_settings) == ("certifi", certifi.where())
+    requests_ca = _bundle(tmp_path, "requests.pem")
+    monkeypatch.setenv("REQUESTS_CA_BUNDLE", requests_ca)
+    assert tidb_ssl_ca(tidb_settings) == ("REQUESTS_CA_BUNDLE", requests_ca)
+    ssl_cert = _bundle(tmp_path, "proxy bundle.pem")         # first existing file wins
+    monkeypatch.setenv("SSL_CERT_FILE", f'  "{ssl_cert}" ')   # quotes / spaces from a hand-set variable
+    assert tidb_ssl_ca(tidb_settings) == ("SSL_CERT_FILE", ssl_cert)
+    assert tidb_connect_args(tidb_settings)["ssl_ca"] == ssl_cert
+
+
+@pytest.mark.parametrize("value", ["", "   ", "missing.pem", "dir"])
+def test_ca_bundle_env_ignores_blank_missing_or_directory(tidb_settings, tmp_path, monkeypatch, value):
+    (tmp_path / "dir").mkdir()
+    monkeypatch.setenv("SSL_CERT_FILE", str(tmp_path / value) if value.strip() else value)
+    requests_ca = _bundle(tmp_path, "requests.pem")
+    monkeypatch.setenv("REQUESTS_CA_BUNDLE", requests_ca)
+    assert tidb_ssl_ca(tidb_settings) == ("REQUESTS_CA_BUNDLE", requests_ca)
+    monkeypatch.setenv("REQUESTS_CA_BUNDLE", str(tmp_path / "gone.pem"))
+    assert tidb_ssl_ca(tidb_settings) == ("certifi", certifi.where())
+
+
+def test_tidb_ssl_ca_setting_wins_and_tls_off_ignores_env(tidb_settings, tmp_path, monkeypatch):
+    monkeypatch.setenv("SSL_CERT_FILE", _bundle(tmp_path, "proxy.pem"))
+    custom = tidb_settings.model_copy(update={"tidb_ssl_ca": "C:/certs/isrgrootx1.pem"})
+    assert tidb_ssl_ca(custom) == ("TIDB_SSL_CA", "C:/certs/isrgrootx1.pem")
+    assert tidb_connect_args(custom)["ssl_ca"] == "C:/certs/isrgrootx1.pem"
+    off = tidb_settings.model_copy(update={"tidb_ssl": False})
+    assert tidb_ssl_ca(off) == ("disabled", None)
+    assert not any(k.startswith("ssl") for k in tidb_connect_args(off))
+
+
+def test_ensure_database_uses_the_env_ca_bundle(tidb_settings, tmp_path, monkeypatch):
+    """The bootstrap connection (init-db) and the engine share the CA choice."""
+    proxy_ca = _bundle(tmp_path, "proxy.pem")
+    monkeypatch.setenv("SSL_CERT_FILE", proxy_ca)
+    fake = FakePyMySQL()
+    ok, _ = tidb.ensure_database(tidb_settings, connect=fake.connect)
+    assert ok and fake.calls[-1]["ssl_ca"] == proxy_ca
+    assert fake.calls[-1]["ssl_verify_cert"] is True and fake.calls[-1]["ssl_verify_identity"] is True
+
+
 def test_ensure_database_quotes_name(tidb_settings):
     fake = FakePyMySQL()
     ok, _ = tidb.ensure_database(tidb_settings.model_copy(update={"tidb_database": "td`x"}), connect=fake.connect)
@@ -291,3 +350,11 @@ def test_database_session_still_creates_sqlite_schema(settings):
         assert ok
     finally:
         db.dispose()
+
+
+def test_describe_reports_a_ca_bundle_from_the_environment(tidb_settings, monkeypatch, tmp_path):
+    bundle = tmp_path / "proxy-bundle.pem"
+    bundle.write_text("-----BEGIN CERTIFICATE-----", encoding="utf-8")
+    monkeypatch.setenv("SSL_CERT_FILE", str(bundle))
+    d = tidb.describe(tidb_settings)
+    assert d["ca_source"] == "SSL_CERT_FILE" and d["ca_path"] == str(bundle)

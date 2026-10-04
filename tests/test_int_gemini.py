@@ -120,7 +120,7 @@ def test_success_and_request_shape(gsettings):
     assert isinstance(cfg, types.GenerateContentConfig)
     assert cfg.system_instruction == g.SYSTEM_INSTRUCTION
     assert cfg.response_mime_type == "application/json"
-    assert cfg.temperature == 0
+    assert cfg.temperature is None and cfg.top_p is None and cfg.top_k is None   # Gemini 3: default sampling
     assert cfg.response_schema is None
     assert cfg.response_json_schema == g.response_json_schema()
     assert cfg.tools is None and cfg.automatic_function_calling.disable is True
@@ -453,6 +453,61 @@ def test_real_client_created_lazily_with_timeout(gsettings, monkeypatch):
     assert kw["api_key"] == API_KEY and kw["vertexai"] is False
     assert isinstance(kw["http_options"], types.HttpOptions)
     assert kw["http_options"].timeout == 45000
+    assert kw["http_options"].client_args == {"follow_redirects": False}
+
+
+def test_failures_are_logged_as_netsafe_code_and_message(gsettings, caplog):
+    url = "https://generativelanguage.googleapis.com/v1beta/models/x:generateContent?trace=abc"
+    ex, _ = extractor(gsettings, httpx.ConnectError(f"cannot reach {url}", request=_REQ),
+                      httpx.ReadTimeout(f"timed out {url}", request=_REQ))
+    with caplog.at_level(logging.WARNING):
+        assert_failed(ex.extract(PNG, "image/png"), "network")
+        assert_failed(ex.extract(PNG, "image/png"), "timeout")
+    assert "network (NETWORK_ERROR: could not connect" in caplog.text
+    assert "timeout (TIMEOUT: the service did not answer in time)" in caplog.text
+    assert "googleapis.com" not in caplog.text and "trace=abc" not in caplog.text
+
+
+def test_temperature_constant_is_gone():
+    assert not hasattr(g, "TEMPERATURE") and "TEMPERATURE" not in g.__all__
+
+
+def route_to_mock(genai_client: Any, handler: Any) -> list[httpx.Request]:
+    """Send a real ``genai.Client``'s own httpx client through ``handler`` (no sockets, no proxy
+    mounts). Unlike ``MockHttp`` this keeps the client (and its redirect setting) the app built."""
+    seen: list[httpx.Request] = []
+
+    def dispatch(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return handler(request)
+
+    http = genai_client._api_client._httpx_client
+    http._mounts = {}
+    http._transport = httpx.MockTransport(dispatch)
+    return seen
+
+
+def redirect_to_sign_in(request: httpx.Request) -> httpx.Response:
+    """What a corporate web filter answers: 307 to its sign-in page (which must never get the key)."""
+    if request.url.host == "sso.example.com":
+        return httpx.Response(200, text="<html>sign in</html>")
+    return httpx.Response(307, headers={"location": "https://sso.example.com/login?user=alex"})
+
+
+def test_real_client_never_follows_redirects(gsettings, caplog):
+    ex = g.GeminiLabelExtractor(gsettings)       # builds a real genai.Client (no network at construction)
+    client = ex._get_client()
+    try:
+        assert client._api_client._httpx_client.follow_redirects is False
+        seen = route_to_mock(client, redirect_to_sign_in)
+        with caplog.at_level(logging.WARNING):
+            result = ex.extract(PNG, "image/png")
+        assert_failed(result, "api_error:307")
+        assert [r.url.host for r in seen] == ["generativelanguage.googleapis.com"]   # 307 not followed
+        assert "BLOCKED_BY_NETWORK: the network redirected the request" in caplog.text
+        assert API_KEY not in caplog.text and "alex" not in caplog.text and "/login" not in caplog.text
+    finally:
+        client.close()
 
 
 # --------------------------------------------------------------------------- real SDK, mock HTTP
@@ -520,7 +575,7 @@ def test_real_sdk_request_and_fallback_over_mock_http(gsettings, mock_http):
     body = json.loads(request.content)
     assert "tools" not in body
     gen = body["generationConfig"]
-    assert gen["responseMimeType"] == "application/json" and gen["temperature"] == 0
+    assert gen["responseMimeType"] == "application/json" and "temperature" not in gen
     assert gen["responseJsonSchema"] == g.response_json_schema()
     assert gen["responseJsonSchema"]["required"] == list(LabelExtraction.model_fields)
     assert body["systemInstruction"]["parts"][0]["text"] == g.SYSTEM_INSTRUCTION

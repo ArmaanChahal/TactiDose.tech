@@ -201,6 +201,45 @@ def test_narrator_without_sdk_client_or_key(scenario, settings_v2, monkeypatch):
     assert n.source == "rules" and n.fallback_reason == "sdk_missing"
 
 
+def test_narrator_real_client_never_follows_redirects(scenario, ai_settings, caplog):
+    import httpx
+
+    data, stats = scenario
+    narrator = ReportNarrator(ai_settings)
+    client = narrator._get_client()          # a real genai.Client: construction makes no network call
+    try:
+        http = client._api_client._httpx_client
+        assert http.follow_redirects is False
+        seen: list[httpx.Request] = []
+
+        def filter_proxy(request: httpx.Request) -> httpx.Response:
+            seen.append(request)
+            if request.url.host == "sso.example.com":
+                return httpx.Response(200, text="<html>sign in</html>")
+            return httpx.Response(307, headers={"location": "https://sso.example.com/login?user=alex"})
+
+        http._mounts = {}                    # no proxy mounts, no sockets: everything goes to the mock
+        http._transport = httpx.MockTransport(filter_proxy)
+        with caplog.at_level("WARNING"):
+            n = narrator.build(data, stats)
+        assert n.source == "rules" and n.fallback_reason == "api_error:307"
+        assert [r.url.host for r in seen] == ["generativelanguage.googleapis.com"]   # 307 not followed
+        assert "api_error:307; BLOCKED_BY_NETWORK: the network redirected the request" in caplog.text
+        assert "alex" not in caplog.text and "test-key-123" not in caplog.text
+    finally:
+        client.close()
+
+
+def test_narrator_logs_netsafe_messages_not_raw_exception_text(scenario, ai_settings, caplog):
+    data, stats = scenario
+    err = ConnectionError("cannot reach https://generativelanguage.googleapis.com/v1beta/models/x?trace=abc")
+    with caplog.at_level("WARNING"):
+        n = ReportNarrator(ai_settings, client=FakeGenaiClient(err)).build(data, stats)
+    assert n.fallback_reason == "network"
+    assert "network; NETWORK_ERROR: could not connect" in caplog.text
+    assert "googleapis.com" not in caplog.text and "trace=abc" not in caplog.text
+
+
 def test_build_prompt_is_bounded(scenario):
     data, stats = scenario
     prompt = build_prompt(data, stats)

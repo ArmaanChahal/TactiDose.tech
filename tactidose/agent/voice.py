@@ -189,7 +189,8 @@ class ReplyTTS:
                 key = settings.elevenlabs_api_key.get_secret_value() if settings.elevenlabs_api_key else ""
                 self._client = ElevenLabsClient(
                     api_key=key, voice_id=settings.elevenlabs_voice_id, model_id=settings.elevenlabs_model_id,
-                    output_format=settings.elevenlabs_output_format, timeout_s=settings.tts_timeout_s)
+                    output_format=settings.elevenlabs_output_format, timeout_s=settings.tts_timeout_s,
+                    auto_voice=settings.elevenlabs_auto_voice)
                 self._owns_client = True
         if settings.tts_provider == "none":
             self._offline = None
@@ -220,7 +221,7 @@ class ReplyTTS:
                 if wav is not None:
                     return wav
                 if self._now() >= self._degraded_until:
-                    wav = self._synth_cloud(cleaned, key)
+                    wav = self._synth_cloud(cleaned)
                     if wav is not None:
                         return wav
             if self._offline_available():
@@ -261,7 +262,7 @@ class ReplyTTS:
         except Exception:  # noqa: BLE001
             return False
 
-    def _synth_cloud(self, text: str, key: str) -> bytes | None:
+    def _synth_cloud(self, text: str) -> bytes | None:
         try:
             audio = self._client.synthesize(text)  # type: ignore[union-attr]
             if is_wav(audio):
@@ -276,7 +277,7 @@ class ReplyTTS:
                             exc, int(self.degraded_s))
             self._degraded_until = self._now() + self.degraded_s
             return None
-        self._cache.put(key, wav)
+        self._cache.put(self._cloud_key(text), wav)  # keyed after synthesis: auto voice may have switched voices
         return wav
 
 

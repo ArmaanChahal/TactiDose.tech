@@ -9,19 +9,25 @@ import wave
 from datetime import timedelta
 
 import pytest
+from google.genai import errors
+from pydantic import SecretStr
 from sqlalchemy import select
 
 from tactidose.agent import AgentInputError, AgentNotAllowed, AgentUnavailable
-from tactidose.agent.service import CONVERSATION_ROLLOVER, clean_reply
+from tactidose.agent.service import CONVERSATION_ROLLOVER, MODEL_FALLBACK, MODEL_SAFETY, clean_reply
 from tactidose.agent.voice import MAX_PCM_BYTES, AudioStore, ReplyTTS, VoskTranscriber
+from tactidose.core import phrases
 from tactidose.core.bus import Topic
 from tactidose.core.interfaces import AgentServiceAPI
 from tactidose.db.models import Conversation, ConversationMessage, Role, User
 from tests.test_agent_support import (
+    FakeGenai,
     fake_vosk_module,
     make_model_dir,
     make_service,
+    response,
     roles,
+    text,
 )
 
 
@@ -194,6 +200,128 @@ def test_status_summary_is_cheap(env, tmp_path):
     svc, _, _ = env
     st = svc.status()
     assert st["provider"] == "rules" and st["model"] == "rules" and st["stt"] in ("available", "unavailable")
+    assert st["gemini_retry_in_s"] == 0 and st["gemini_last_error"] is None
+
+
+# --------------------------------------------------------------------------- Gemini circuit breaker
+
+GEMINI = "gemini-3.8-flash"
+BREAKER_LOG = "tactidose.agent.service"
+
+
+def blocked() -> errors.APIError:
+    """What google-genai raises when a web filter answers 307 (the client does not follow it)."""
+    return errors.APIError(307, {"message": "", "status": "Temporary Redirect"})
+
+
+@pytest.fixture
+def gemini_env(db_v2, settings_v2, clock, bus):
+    """AgentService on a scripted Gemini fake with an injected monotonic time (``t[0]``)."""
+    settings = settings_v2.model_copy(update={"agent_provider": "gemini", "gemini_model": GEMINI})
+
+    def build(*script, **overrides):
+        client = FakeGenai(*script)
+        svc, drops, ids = make_service(db_v2, settings, clock, bus, genai=client, **overrides)
+        t = [1000.0]
+        svc._monotonic = lambda: t[0]
+        return svc, drops, ids["patient_id"], client, t
+
+    return build
+
+
+def breaker_warnings(caplog) -> list[str]:
+    return [r.getMessage() for r in caplog.records
+            if r.name == BREAKER_LOG and r.levelname == "WARNING" and "Gemini unavailable" in r.getMessage()]
+
+
+def test_a_gemini_failure_pauses_gemini_then_it_is_retried(gemini_env, clock, caplog):
+    svc, drops, pid, client, t = gemini_env(blocked(), response(text("Hello again.")))
+    with caplog.at_level("INFO", logger=BREAKER_LOG):
+        first = chat(svc, pid, "hello")
+        assert first.model == MODEL_FALLBACK and len(client.calls) == 1
+        st = svc.status()
+        assert st["gemini_retry_in_s"] == 60 and st["gemini_last_error"] == "BLOCKED_BY_NETWORK"
+        assert st["provider"] == "gemini" and st["model"] == GEMINI          # existing keys unchanged
+
+        t[0] += 30                        # paused: the rules agent answers at once, tools still work
+        dropped = chat(svc, pid, "drop my vitamin c")
+        assert dropped.model == MODEL_FALLBACK and dropped.text == "Vitamin C dropped from container 1."
+        assert len(drops.requests) == 1 and len(client.calls) == 1
+        assert svc.status()["gemini_retry_in_s"] == 30
+
+        clock.advance(timedelta(hours=5))  # demo clock travel does not shorten (or extend) the pause
+        assert chat(svc, pid, "hello").model == MODEL_FALLBACK and len(client.calls) == 1
+        assert svc.status()["gemini_retry_in_s"] == 30
+
+        t[0] += 30                        # pause over: Gemini is tried again; a success closes the breaker
+        again = chat(svc, pid, "hello")
+        assert again.model == GEMINI and again.text == "Hello again." and len(client.calls) == 2
+        assert svc.status()["gemini_retry_in_s"] == 0 and svc.status()["gemini_last_error"] is None
+    assert breaker_warnings(caplog) == [
+        "Gemini unavailable (BLOCKED_BY_NETWORK: the network redirected the request to another site); "
+        "the offline assistant answers for the next 60 s"]
+    assert "Gemini is answering again" in caplog.text
+
+
+def test_a_failed_retry_reopens_the_breaker(gemini_env, caplog):
+    quota = errors.ClientError(429, {"error": {"code": 429, "status": "RESOURCE_EXHAUSTED", "message": "quota"}})
+    svc, drops, pid, client, t = gemini_env(blocked(), quota, agent_retry_after_s=10)
+    with caplog.at_level("WARNING", logger=BREAKER_LOG):
+        assert chat(svc, pid, "hello").model == MODEL_FALLBACK
+        t[0] += 5
+        assert chat(svc, pid, "hello").model == MODEL_FALLBACK and len(client.calls) == 1
+        t[0] += 5.5
+        assert chat(svc, pid, "hello").model == MODEL_FALLBACK and len(client.calls) == 2
+    assert svc.status()["gemini_retry_in_s"] == 10 and svc.status()["gemini_last_error"] == "QUOTA_EXCEEDED"
+    assert len(breaker_warnings(caplog)) == 2 and "QUOTA_EXCEEDED: too many requests" in breaker_warnings(caplog)[1]
+
+
+def test_retry_after_zero_tries_gemini_every_turn(gemini_env, caplog):
+    timeout = TimeoutError("read timed out")
+    svc, drops, pid, client, t = gemini_env(timeout, ConnectionError("down"), response(text("Hi.")),
+                                            agent_retry_after_s=0)
+    with caplog.at_level("WARNING", logger=BREAKER_LOG):
+        models = [chat(svc, pid, "hello").model for _ in range(3)]
+    assert models == [MODEL_FALLBACK, MODEL_FALLBACK, GEMINI] and len(client.calls) == 3
+    assert svc.status()["gemini_retry_in_s"] == 0 and svc.status()["gemini_last_error"] is None
+    assert [w.split(";")[1].strip() for w in breaker_warnings(caplog)] == [
+        "the offline assistant answers this turn"] * 2
+
+
+def test_emergency_and_stop_stay_deterministic_while_paused(gemini_env):
+    svc, drops, pid, client, t = gemini_env(blocked())
+    assert chat(svc, pid, "hello").model == MODEL_FALLBACK
+    emergency = chat(svc, pid, "I have chest pain and can't breathe")
+    assert emergency.text == phrases.EMERGENCY and emergency.model == MODEL_SAFETY
+    drops.moving = True
+    stop = chat(svc, pid, "stop")
+    assert stop.text == phrases.STOPPED and stop.model == MODEL_SAFETY and drops.interrupts == 1
+    assert len(client.calls) == 1 and drops.requests == []
+
+
+def test_an_unexpected_provider_error_opens_the_breaker_too(gemini_env, monkeypatch, caplog):
+    svc, drops, pid, client, t = gemini_env()
+
+    def broken(**kw):
+        raise KeyError("provider bug")
+
+    monkeypatch.setattr(svc._gemini_agent(), "respond", broken)
+    with caplog.at_level("WARNING", logger=BREAKER_LOG):
+        assert chat(svc, pid, "help").model == MODEL_FALLBACK
+        assert chat(svc, pid, "help").model == MODEL_FALLBACK
+    assert svc.status()["gemini_last_error"] == "ERROR" and svc.status()["gemini_retry_in_s"] == 60
+    assert len(breaker_warnings(caplog)) == 1
+    assert any(r.levelname == "ERROR" and r.exc_info for r in caplog.records)   # the bug keeps its traceback
+
+
+def test_breaker_warning_never_contains_the_key(gemini_env, caplog):
+    key = "AIzaFAKE-service-key-0123456789"
+    leaky = errors.ClientError(403, {"error": {"code": 403, "status": "PERMISSION_DENIED",
+                                               "message": f"API key {key} has no access"}})
+    svc, drops, pid, client, t = gemini_env(leaky, gemini_api_key=SecretStr(key))
+    with caplog.at_level("DEBUG"):
+        assert chat(svc, pid, "hello").model == MODEL_FALLBACK
+    assert "PERMISSION_DENIED" in caplog.text and key not in caplog.text
 
 
 # --------------------------------------------------------------------------- reply audio

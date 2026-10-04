@@ -14,6 +14,13 @@
    the rules agent answers (``model="rules (fallback)"``). Tools are bound to this patient
    and turn (:class:`~tactidose.agent.tools.PatientTools`), with a :class:`TurnGuard` from the
    patient's own words.
+   **Circuit breaker** - after a Gemini failure (classified with ``netsafe.classify_exception``;
+   one warning ``Gemini unavailable (<code>: <message>); the offline assistant answers for the
+   next N s``) the next turns skip Gemini for ``agent_retry_after_s`` seconds of
+   ``time.monotonic`` (demo clock travel does not count) and the rules agent answers at once,
+   also as ``"rules (fallback)"``; 0 = try Gemini every turn. The first turn after the pause
+   tries Gemini again; a success closes the breaker. ``status()`` shows ``gemini_retry_in_s``
+   and ``gemini_last_error`` (netsafe code or None).
 4. **Reply check** (Gemini replies) - a reply that claims a drop although no request in this
    turn returned DROPPED, that denies a DROPPED drop, or that follows a FAILED/UNCERTAIN drop is
    replaced by the deterministic sentence (``model="rules (safety)"``).
@@ -31,11 +38,13 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 import threading
+import time
 import unicodedata
 from datetime import datetime, timedelta
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from sqlalchemy import func, select
 
@@ -58,6 +67,7 @@ from tactidose.core.clock import Clock
 from tactidose.core.interfaces import AgentReply, DropServiceAPI
 from tactidose.db.models import Conversation, ConversationMessage, Role, User
 from tactidose.db.session import Database
+from tactidose.integrations import netsafe
 
 log = logging.getLogger(__name__)
 
@@ -182,6 +192,10 @@ class AgentService:
         self._lock = threading.Lock()
         self._patient_locks: dict[int, threading.Lock] = {}
         self._provider_warned = False
+        # Gemini circuit breaker (guarded by _lock). Real elapsed time, never the demo clock.
+        self._monotonic: Callable[[], float] = time.monotonic
+        self._gemini_retry_at: float | None = None
+        self._gemini_failure: netsafe.Failure | None = None
 
     # ================================================================== provider
     @property
@@ -206,13 +220,57 @@ class AgentService:
             return self._gemini
 
     def status(self) -> dict[str, Any]:
-        """Cheap summary for ``/api/health``: provider, model, speech availability."""
+        """Cheap summary for ``/api/health``: provider, model, speech availability, and the Gemini
+        breaker: ``gemini_retry_in_s`` (whole seconds until Gemini is tried again, 0 = not paused)
+        and ``gemini_last_error`` (netsafe code of the last failure, None after a success)."""
+        with self._lock:
+            failure = self._gemini_failure
         return {
             "provider": self.provider,
             "model": self.model,
             "stt": "loaded" if self._stt.loaded else ("available" if self._stt.available() else "unavailable"),
             "tts": bool(self._tts_engine() is not None and getattr(self._tts_engine(), "available", True)),
+            "gemini_retry_in_s": math.ceil(self._gemini_pause_s()),
+            "gemini_last_error": failure.code if failure is not None else None,
         }
+
+    # ================================================================== Gemini circuit breaker
+    def _gemini_pause_s(self) -> float:
+        """Seconds until Gemini is tried again (0 = call it now)."""
+        with self._lock:
+            if self._gemini_retry_at is None:
+                return 0.0
+            return max(0.0, self._gemini_retry_at - self._monotonic())
+
+    def _gemini_failed(self, exc: BaseException) -> None:
+        """Record a failure and open the breaker for ``agent_retry_after_s`` (one warning per opening)."""
+        failure = netsafe.classify_exception(exc)
+        wait = max(0.0, float(self.settings.agent_retry_after_s))
+        with self._lock:
+            now = self._monotonic()
+            already_open = self._gemini_retry_at is not None and now < self._gemini_retry_at
+            self._gemini_failure = failure
+            self._gemini_retry_at = now + wait if wait > 0 else None
+        if already_open:   # a concurrent turn failed too: the breaker is already open and logged
+            return
+        what = self._redact_key(str(failure))[:300]
+        if wait > 0:
+            log.warning("Gemini unavailable (%s); the offline assistant answers for the next %d s",
+                        what, math.ceil(wait))
+        else:
+            log.warning("Gemini unavailable (%s); the offline assistant answers this turn", what)
+
+    def _gemini_succeeded(self) -> None:
+        with self._lock:
+            was_failing = self._gemini_failure is not None
+            self._gemini_retry_at = None
+            self._gemini_failure = None
+        if was_failing:
+            log.info("Gemini is answering again")
+
+    def _redact_key(self, text: str) -> str:
+        key = self.settings.gemini_api_key.get_secret_value() if self.settings.gemini_api_key else ""
+        return text.replace(key, "***") if key else text
 
     # ================================================================== chat
     def chat(self, *, patient_id: int, text: str, input_mode: str = "text",
@@ -246,17 +304,19 @@ class AgentService:
             return self._rules.respond(text, tools, history=history), deterministic
         if provider != "gemini":
             return self._rules.respond(text, tools, history=history), MODEL_RULES
+        if self._gemini_pause_s() > 0:   # breaker open: answer at once instead of waiting on a timeout
+            return self._rules.respond(text, tools, history=history), MODEL_FALLBACK
         try:
             turn = self._gemini_agent().respond(
                 system_instruction=system_prompt(patient_name=patient_name, now_local=self.clock.local_now(),
                                                  num_slots=int(self.settings.num_slots)),
                 history=history, user_text=text, tools=tools)
-        except AgentModelError as exc:
-            log.warning("Gemini agent unavailable (%s); answering with the rules agent", exc)
+        except Exception as exc:  # noqa: BLE001 - never let a provider failure or bug break the turn
+            if not isinstance(exc, AgentModelError):
+                log.exception("Gemini agent failed unexpectedly; answering with the rules agent")
+            self._gemini_failed(exc)
             return self._rules.respond(text, tools, history=history), MODEL_FALLBACK
-        except Exception:  # noqa: BLE001 - never let a provider bug break the turn
-            log.exception("Gemini agent failed; answering with the rules agent")
-            return self._rules.respond(text, tools, history=history), MODEL_FALLBACK
+        self._gemini_succeeded()
         checked = self._check_model_reply(clean_reply(turn.text), tools)
         if checked is None:
             log.warning("Gemini reply did not match the drop outcome; using the deterministic reply")

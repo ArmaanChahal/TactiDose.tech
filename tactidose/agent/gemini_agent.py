@@ -13,13 +13,24 @@ One :meth:`GeminiAgent.respond` call = one patient turn:
   (when ``agent_max_steps >= 2``) forbids further calls (``FunctionCallingConfig(mode="NONE")``)
   so the model must answer in text;
 * the whole turn shares one ``agent_timeout_s`` budget (per-request ``HttpOptions.timeout``);
+* ``settings.agent_thinking_level`` "low" / "medium" / "high" sends
+  ``ThinkingConfig(thinking_level=...)``; "" leaves the model's default (no ``thinking_config``);
 * the configured model (``settings.effective_agent_model``) falls back once to
   ``settings.gemini_fallback_model`` on HTTP 404 / NOT_FOUND and keeps using it afterwards.
 
-Any model/network/SDK problem raises :class:`AgentModelError`; ``AgentService`` then answers
-with the rules agent. ``client`` may be any object with ``client.models.generate_content(model=,
-contents=, config=)`` (tests pass a scripted fake); otherwise a ``genai.Client`` is created
-lazily, so construction never touches the network. The API key is never logged.
+Redirects: the client is built with ``netsafe.gemini_http_options`` (``follow_redirects=False``;
+the key is a custom header). google-genai 2.28 (read in ``_api_client.py``) never builds an httpx
+client per request: a per-request ``HttpOptions`` only patches URL/headers/timeout/extra body
+(``_build_request``) and retries (``_request``), and ``_request_once`` always sends through the
+client's own ``_httpx_client``. The per-request options carry the same ``client_args`` anyway, so
+an SDK version that did build one would inherit "no redirects".
+
+Any model/network/SDK problem raises :class:`AgentModelError` *from* the original exception (or
+from a ``TimeoutError`` when the turn budget runs out), so ``netsafe.classify_exception`` can
+classify it; ``AgentService`` then answers with the rules agent. ``client`` may be any object with
+``client.models.generate_content(model=, contents=, config=)`` (tests pass a scripted fake);
+otherwise a ``genai.Client`` is created lazily, so construction never touches the network. The
+API key is never logged.
 """
 
 from __future__ import annotations
@@ -32,11 +43,14 @@ from typing import Any, Callable, Mapping, Sequence
 
 from tactidose.agent.tools import MODEL_TOOLS, PatientTools, tool_declarations
 from tactidose.config import Settings
+from tactidose.integrations import netsafe
 
 log = logging.getLogger(__name__)
 
 #: Function calls handled per model step (a model asking for more gets an error result).
 MAX_CALLS_PER_STEP = 6
+#: ``agent_thinking_level`` -> ``types.ThinkingLevel`` member name ("minimal" is never sent).
+THINKING_LEVELS = {"low": "LOW", "medium": "MEDIUM", "high": "HIGH"}
 
 
 class AgentModelError(Exception):
@@ -149,6 +163,7 @@ class GeminiAgent:
             contents.append(types.Content(role="user", parts=[user_part]))
         tool = types.Tool(function_declarations=[
             self._declaration(types, d) for d in tool_declarations(int(self.settings.num_slots))])
+        thinking = self._thinking_config(types)
         max_steps = int(self.settings.agent_max_steps)
         for step in range(1, max_steps + 1):
             text_only = max_steps > 1 and step == max_steps
@@ -158,7 +173,8 @@ class GeminiAgent:
                 automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
                 tool_config=types.ToolConfig(function_calling_config=types.FunctionCallingConfig(mode="NONE"))
                 if text_only else None,
-                http_options=types.HttpOptions(timeout=self._request_timeout_ms(deadline)),
+                thinking_config=thinking,
+                http_options=netsafe.gemini_http_options(types, self._request_timeout_ms(deadline)),
             )
             response = self._generate(client, contents, config)
             calls = list(getattr(response, "function_calls", None) or [])
@@ -201,17 +217,21 @@ class GeminiAgent:
                     self._client = genai.Client(
                         api_key=self._secrets[0],
                         vertexai=False,
-                        http_options=types.HttpOptions(
-                            timeout=max(1000, int(round(float(self.settings.agent_timeout_s) * 1000)))),
+                        http_options=netsafe.gemini_http_options(   # never follow redirects
+                            types, max(1000, int(round(float(self.settings.agent_timeout_s) * 1000)))),
                     )
                 except Exception as exc:  # noqa: BLE001
                     raise AgentModelError(f"Gemini client could not be created ({describe_error(exc)})") from exc
             return self._client
 
+    def _thinking_config(self, types: Any) -> Any | None:
+        level = THINKING_LEVELS.get(str(self.settings.agent_thinking_level or "").strip().lower())
+        return types.ThinkingConfig(thinking_level=types.ThinkingLevel[level]) if level else None
+
     def _request_timeout_ms(self, deadline: float) -> int:
         remaining = deadline - self._now()
         if remaining <= 0:
-            raise AgentModelError("agent_timeout_s exceeded")
+            raise AgentModelError("agent_timeout_s exceeded") from TimeoutError("agent_timeout_s exceeded")
         return int(max(self.min_request_timeout_s, remaining) * 1000)
 
     def _generate(self, client: Any, contents: list[Any], config: Any) -> Any:
