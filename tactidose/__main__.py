@@ -1050,7 +1050,7 @@ def build_parser() -> argparse.ArgumentParser:
     hw.add_argument("--no-hardware", action="store_true", help="no device: every drop is refused")
     hw.add_argument("--wifi", metavar="URL", nargs="?", const="",
                     help="the ESP32 over Wi-Fi at URL (default: TACTIDOSE_ESP32_URL, else the static "
-                         "http://192.168.1.45 in tactidose/hardware/wifi_config.py)")
+                         "http://172.20.10.9 in tactidose/hardware/wifi_config.py)")
     p.add_argument("--no-voice", action="store_true", help="turn off the device-side microphone loop")
     p.add_argument("--demo-pause-seconds", type=_float_in(0, 120, "the pause"), metavar="N",
                    help="pause between the guided demo's slots (default: TACTIDOSE_DEMO_PAUSE_SECONDS or 7)")

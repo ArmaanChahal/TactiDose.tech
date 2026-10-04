@@ -348,7 +348,9 @@ The Wi-Fi ESP32 does not speak this line protocol. It has three HTTP endpoints:
 * `GET /` (reachability)
 
 The host maps them in `tactidose/hardware/wifi_device.py`, using the IP and paths in
-`tactidose/hardware/wifi_config.py`. For example, `DROP_SLOT n` becomes `/dispense?pill=n+1`.
+`tactidose/hardware/wifi_config.py`. For example, `DROP_SLOT n` becomes `/lid?state=open`, then
+`/dispense?pill=n+1`, then `/lid?state=close` 5 s later. A lid that does not open means nothing is
+dispensed.
 Outcomes:
 
 | HTTP result | Outcome |

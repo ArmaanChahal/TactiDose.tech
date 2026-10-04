@@ -378,7 +378,15 @@ async function start() {
   });
 
   byId('device-stop').addEventListener('click', stopDevice);
-  const lid = createLidControls(byId('lid-controls'), { notify: (m, k) => notify(m, k) });
+  const lid = createLidControls(byId('lid-controls'), {
+    notify: (m, k) => notify(m, k),
+    // Wi-Fi dispenser: "Dispense pill N" = the Drop pill button of container N (same rules, same feedback).
+    onDispense: (number) => {
+      const v = (state.status?.containers || []).map(containerView).find((c) => c.number === number);
+      if (v) requestDrop(v);
+      else notify(`Container ${number} is not set up.`, 'error');
+    },
+  });
   renderShare();
 
   assistant = createAssistant({

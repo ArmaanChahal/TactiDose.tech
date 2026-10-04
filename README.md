@@ -227,18 +227,31 @@ supports the older v1 commands still works: the app drops a pill with `DISPENSE_
 
 ### Connecting the ESP32 over Wi-Fi
 
-The ESP32 dispenser on the network has a static IP, **`http://192.168.1.45`**, and three endpoints:
+The ESP32 dispenser on the network has a static IP, **`http://172.20.10.9`**, and three endpoints:
 
 | Action | ESP32 endpoint | In the website |
 |---|---|---|
 | Open the lid | `GET /lid?state=open` | **Open lid** button: patient Home (Pill device card) and care portal Device tab |
 | Close the lid | `GET /lid?state=close` | **Close lid** button: same places |
-| Dispense pill 1, 2, 3 | `GET /dispense?pill=1` (`2`, `3`) | the **Drop pill** button on each container (patient Home), the assistant, and scheduled doses |
+| Dispense pill 1, 2, 3 | `GET /dispense?pill=1` (`2`, `3`) | **Dispense pill 1 / 2 / 3** buttons (patient Home, Pill device card) and the **Drop pill** button on each container; the assistant and scheduled doses use it too |
 
-**How dispensing works.** A dispense always goes through the app's drop rules first: the global
-cooldown, the double-dose guard, pill counts, and the history and notifications. Only then does the
-app call `/dispense?pill=N`. Container 1 is `pill=1`. A pill can't be dropped by calling the URL from
-the website without those checks. The lid buttons never dispense.
+**How dispensing works.** The patient presses **Dispense pill N** (or **Drop pill** on a container)
+on the website. The app's drop rules run first: the global cooldown, the double-dose guard, pill
+counts, and the history and notifications. Only then does the app talk to the ESP32:
+
+1. `GET /lid?state=open`. If the lid doesn't open, **nothing is dispensed** ("the lid did not open").
+2. `GET /dispense?pill=N`. Container 1 is `pill=1`.
+3. `GET /lid?state=close` **5 seconds later**, also when the dispense failed.
+
+The website shows the result straight away and doesn't wait for the close. Another dispense within
+those 5 s restarts the timer, so the lid closes once.
+
+A pill can't be dropped from the website without those checks, and the Open/Close lid buttons never
+dispense. Doctor/family can use the lid buttons but cannot dispense, which is the existing
+permission rule.
+
+To change the 5 s or turn the lid step off, edit `LID_CLOSE_AFTER_S` and `OPEN_LID_FOR_DISPENSE` in
+`wifi_config.py`.
 
 What the ESP32's answer means:
 
@@ -246,6 +259,7 @@ What the ESP32's answer means:
 |---|---|
 | HTTP 200 | **dropped** (pill count −1) |
 | Another HTTP status | **failed** (nothing dropped) |
+| The lid did not open | **failed** (nothing was dispensed) |
 | Not reachable | refused as **device unavailable** (nothing was sent) |
 | Reached, but no answer within 20 s | **uncertain**: further drops wait until a caregiver checks (History → "It dropped" / "It did not drop") |
 
@@ -253,7 +267,7 @@ The app checks every 5 s that the ESP32 is reachable (`GET /`) and shows it as o
 
 **Run it:**
 ```bash
-python -m tactidose run --wifi                        # uses http://192.168.1.45
+python -m tactidose run --wifi                        # uses http://172.20.10.9
 python -m tactidose run --wifi http://192.168.1.60    # another address for this run
 python -m tactidose doctor                            # "the ESP32 answered" when it is reachable
 ```
@@ -264,6 +278,7 @@ To make Wi-Fi the default, put `TACTIDOSE_HARDWARE_MODE=wifi` in `.env`. Optiona
 [`tactidose/hardware/wifi_config.py`](tactidose/hardware/wifi_config.py):
 * `ESP32_BASE_URL` (the static IP)
 * `LID_OPEN_PATH`, `LID_CLOSE_PATH`, `DISPENSE_PATH` (`{pill}` = container 1–3)
+* `OPEN_LID_FOR_DISPENSE`, `LID_CLOSE_AFTER_S` (the open → dispense → close-after-5-s sequence)
 * `HEALTH_PATH`, `METHOD`
 * the timeouts
 
@@ -307,7 +322,7 @@ Design rule: **AI interprets, deterministic code authorizes and actuates.** The 
 
 | Command | What it does |
 |---|---|
-| `python -m tactidose run [--sim \| --serial PORT \| --wifi [URL] \| --no-hardware] [--no-voice] [--port 8000]` | start the web app (`--wifi`: the ESP32 at http://192.168.1.45) |
+| `python -m tactidose run [--sim \| --serial PORT \| --wifi [URL] \| --no-hardware] [--no-voice] [--port 8000]` | start the web app (`--wifi`: the ESP32 at http://172.20.10.9) |
 | `python -m tactidose doctor` | check configuration and environment |
 | `python -m tactidose check-apis [--only gemini,elevenlabs,snowflake,tidb,smtp] [--json]` | test the cloud keys in `.env` with one tiny live request per configured service |
 | `python -m tactidose init-db` | create the database and tables (run once after setting `TIDB_*`) |

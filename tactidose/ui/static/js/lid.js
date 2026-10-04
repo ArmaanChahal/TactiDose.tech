@@ -1,8 +1,11 @@
 /**
  * Open lid / Close lid buttons for the Wi-Fi ESP32 dispenser (POST /api/device/lid), shared by
  * the patient's Home and the care portal's Device tab. Shown only when the device has a lid
- * (GET /api/device -> lid_supported). Dispensing is not here: the Drop pill buttons go through
- * the drop rules (cooldown, double-dose guard) and then to the ESP32's /dispense endpoint.
+ * (GET /api/device -> lid_supported).
+ *
+ * Patient only (``onDispense`` given): "Dispense pill 1 / 2 / 3" buttons. They hand the container
+ * number to the page, which asks for it like the Drop pill buttons (POST /api/patients/{pid}/drops):
+ * the drop rules decide, then the server opens the lid, dispenses and closes the lid 5 s later.
  */
 
 import { get, post } from './api.js';
@@ -11,16 +14,34 @@ import { icon } from './icons.js';
 
 const LID_WORDS = Object.freeze({ open: 'Lid is open', closed: 'Lid is closed' });
 
-/** Mount in `root` (hidden until the device reports a lid). Options: notify(message, kind). */
-export function createLidControls(root, { notify = () => {} } = {}) {
+/**
+ * Mount in `root` (hidden until the device reports a lid). Options: notify(message, kind),
+ * onDispense(containerNumber) (patient only: adds the Dispense pill buttons).
+ */
+export function createLidControls(root, { notify = () => {}, onDispense = null } = {}) {
   const openBtn = h('button', { type: 'button', class: 'btn' }, icon('open'), 'Open lid');
   const closeBtn = h('button', { type: 'button', class: 'btn' }, icon('gate'), 'Close lid');
   const stateLine = h('p', { class: 'status-note', role: 'status' }, '');
-  replaceChildren(root, h('div', { class: 'btn-row' }, openBtn, closeBtn), stateLine);
+  const dispenseRow = h('div', { class: 'btn-row lid-dispense', hidden: true });
+  replaceChildren(root, h('div', { class: 'btn-row' }, openBtn, closeBtn), dispenseRow, stateLine);
   root.hidden = true;
+  let dispenseCount = 0;
+
+  function renderDispense(count) {
+    if (!onDispense || count === dispenseCount) return;
+    dispenseCount = count;
+    dispenseRow.hidden = count < 1;
+    replaceChildren(dispenseRow, Array.from({ length: count }, (_, i) => h('button', {
+      type: 'button',
+      class: 'btn btn-primary',
+      'aria-label': `Dispense pill ${i + 1}: opens the lid, drops a pill from container ${i + 1}, closes the lid after 5 seconds`,
+      on: { click: () => onDispense(i + 1) },
+    }, icon('pill'), `Dispense pill ${i + 1}`)));
+  }
 
   function render(device) {
     root.hidden = !device?.lid_supported;
+    if (device?.lid_supported) renderDispense(Number(device.num_slots_reported) || 3);
     stateLine.textContent = LID_WORDS[device?.lid] || (device?.connected === false ? 'Dispenser offline' : '');
   }
 

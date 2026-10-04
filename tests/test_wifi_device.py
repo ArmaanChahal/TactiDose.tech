@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import time
 from datetime import datetime
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
@@ -17,7 +18,7 @@ from tactidose.config import Settings
 from tactidose.hardware import protocol as p
 from tactidose.hardware import wifi_config
 from tactidose.hardware.serial_client import create_hardware
-from tactidose.hardware.wifi_device import HTTP_ERROR, WifiDispenser
+from tactidose.hardware.wifi_device import HTTP_ERROR, LID_ERROR, WifiDispenser
 
 TZ = "America/Vancouver"
 
@@ -29,6 +30,7 @@ class FakeEsp32:
         self.requests: list[str] = []
         self.mode = "ok"            # ok | error | refuse | hang
         self.lid = "closed"
+        self.lid_status = 200       # HTTP status of /lid
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         path = request.url.raw_path.decode()
@@ -42,6 +44,8 @@ class FakeEsp32:
                 return httpx.Response(500, text="motor error")
             return httpx.Response(200, text="dispensed")
         if path.startswith("/lid"):
+            if self.lid_status != 200:
+                return httpx.Response(self.lid_status, text="lid jammed")
             self.lid = "open" if path.endswith("open") else "closed"
             return httpx.Response(200, text=f"lid {self.lid}")
         return httpx.Response(200, text="TactiDose ESP32")
@@ -53,9 +57,24 @@ def _settings(**over: Any) -> Settings:
     return Settings(**base)
 
 
-def _device(fake: FakeEsp32, settings: Settings | None = None, *, bus: Any = None) -> WifiDispenser:
+def _config(**over: Any) -> SimpleNamespace:
+    """wifi_config with some values changed (e.g. a short lid delay for the tests)."""
+    values = {k: getattr(wifi_config, k) for k in dir(wifi_config) if k.isupper()}
+    values.update(over)
+    return SimpleNamespace(**values)
+
+
+def _device(fake: FakeEsp32, settings: Settings | None = None, *, bus: Any = None,
+            config: Any = wifi_config) -> WifiDispenser:
     client = httpx.Client(transport=httpx.MockTransport(fake), follow_redirects=False)
-    return WifiDispenser(settings or _settings(), bus=bus, client=client)
+    return WifiDispenser(settings or _settings(), bus=bus, client=client, config=config)
+
+
+def _wait_for(predicate: Any, timeout: float = 3.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while not predicate() and time.monotonic() < deadline:
+        time.sleep(0.02)
+    return predicate()
 
 
 # --------------------------------------------------------------------------- the driver
@@ -64,7 +83,7 @@ def _device(fake: FakeEsp32, settings: Settings | None = None, *, bus: Any = Non
 def test_static_ip_default_and_override():
     hw, sim = create_hardware(_settings())
     assert isinstance(hw, WifiDispenser) and sim is None
-    assert hw.base_url == wifi_config.ESP32_BASE_URL == "http://192.168.1.45"
+    assert hw.base_url == wifi_config.ESP32_BASE_URL == "http://172.20.10.9"
     hw.close()
     other, _ = create_hardware(_settings(esp32_url="http://10.0.0.7/"))
     assert other.base_url == "http://10.0.0.7"
@@ -121,6 +140,58 @@ def test_health_check_tracks_online_offline():
     assert dev.snapshot().ready_for_motion is False
 
 
+def test_dispense_opens_the_lid_first_and_closes_it_after_the_delay():
+    fake = FakeEsp32()
+    dev = _device(fake, config=_config(LID_CLOSE_AFTER_S=0.2))
+    result = dev.drop_slot(0)
+    assert result.code == "DROPPED"
+    assert fake.requests == ["/lid?state=open", "/dispense?pill=1"]       # result returns before the close
+    assert dev.lid_state == "open"
+    assert _wait_for(lambda: fake.requests[-1] == "/lid?state=close")
+    assert dev.lid_state == "closed" and fake.requests.count("/lid?state=close") == 1
+
+
+def test_default_lid_delay_is_five_seconds():
+    assert wifi_config.OPEN_LID_FOR_DISPENSE is True and wifi_config.LID_CLOSE_AFTER_S == 5.0
+
+
+def test_lid_closes_even_when_the_dispense_fails():
+    fake = FakeEsp32()
+    dev = _device(fake, config=_config(LID_CLOSE_AFTER_S=0.1))
+    fake.mode = "error"
+    assert dev.drop_slot(2).code == HTTP_ERROR
+    assert _wait_for(lambda: fake.requests[-1] == "/lid?state=close")
+
+
+def test_lid_that_does_not_open_means_nothing_is_dispensed():
+    fake = FakeEsp32()
+    dev = _device(fake, config=_config(LID_CLOSE_AFTER_S=0.1))
+    fake.lid_status = 500
+    result = dev.drop_slot(1)
+    assert not result.ok and result.code == LID_ERROR and result.definitive
+    assert p.drop_certainty(result) is p.DropCertainty.NOT_DROPPED
+    time.sleep(0.2)
+    assert not any(r.startswith("/dispense") for r in fake.requests)
+
+
+def test_lid_sequence_can_be_switched_off():
+    fake = FakeEsp32()
+    dev = _device(fake, config=_config(OPEN_LID_FOR_DISPENSE=False))
+    assert dev.drop_slot(0).code == "DROPPED"
+    time.sleep(0.1)
+    assert fake.requests == ["/dispense?pill=1"]
+
+
+def test_new_dispense_cancels_the_pending_close():
+    fake = FakeEsp32()
+    dev = _device(fake, config=_config(LID_CLOSE_AFTER_S=0.3))
+    dev.drop_slot(0)
+    dev.drop_slot(1)                                     # within the delay: one close, at the end
+    assert _wait_for(lambda: fake.requests[-1] == "/lid?state=close")
+    time.sleep(0.4)
+    assert fake.requests.count("/lid?state=close") == 1
+
+
 # --------------------------------------------------------------------------- the website
 
 
@@ -153,7 +224,7 @@ def test_drop_pill_button_goes_through_the_rules_to_the_esp32(site):
     pid = services.device_patient_id()
     first = client.post(f"/api/patients/{pid}/drops", headers=alex, json={"slot": 0}).json()
     assert first["status"] == "DROPPED", first
-    assert "/dispense?pill=1" in fake.requests
+    assert fake.requests[-2:] == ["/lid?state=open", "/dispense?pill=1"]       # lid first, then the pill
     sent = len([r for r in fake.requests if r.startswith("/dispense")])
     second = client.post(f"/api/patients/{pid}/drops", headers=alex, json={"slot": 2}).json()
     assert second["status"] == "DENIED" and second["reason"] == "COOLDOWN"
@@ -204,4 +275,4 @@ def test_cli_run_wifi_flag():
     from tactidose.__main__ import build_parser
 
     assert build_parser().parse_args(["run", "--wifi"]).wifi == ""
-    assert build_parser().parse_args(["run", "--wifi", "http://192.168.1.45"]).wifi == "http://192.168.1.45"
+    assert build_parser().parse_args(["run", "--wifi", "http://172.20.10.9"]).wifi == "http://172.20.10.9"

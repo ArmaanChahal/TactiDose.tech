@@ -166,7 +166,7 @@ class Settings(BaseSettings):
     #: "auto" (USB VID/PID scan), "COM5", "/dev/ttyUSB0", "socket://127.0.0.1:7777", "loop://"
     serial_port: str = "auto"
     serial_baud: int = 115200
-    #: hardware_mode "wifi": the ESP32's address. Empty = wifi_config.ESP32_BASE_URL (http://192.168.1.45).
+    #: hardware_mode "wifi": the ESP32's address. Empty = wifi_config.ESP32_BASE_URL (http://172.20.10.9).
     esp32_url: str | None = None
     #: Home automatically after connecting if the device reports it is not homed.
     hw_auto_home: bool = True

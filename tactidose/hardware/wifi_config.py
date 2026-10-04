@@ -6,15 +6,15 @@ Used when ``TACTIDOSE_HARDWARE_MODE=wifi`` (or ``python -m tactidose run --wifi`
 
 Endpoints of the ESP32 (2026-10-04):
 
-    open lid        GET http://192.168.1.45/lid?state=open
-    close lid       GET http://192.168.1.45/lid?state=close
-    dispense pill N GET http://192.168.1.45/dispense?pill=N     (N = 1, 2, 3 = container 1, 2, 3)
+    open lid        GET http://172.20.10.9/lid?state=open
+    close lid       GET http://172.20.10.9/lid?state=close
+    dispense pill N GET http://172.20.10.9/dispense?pill=N     (N = 1, 2, 3 = container 1, 2, 3)
 """
 
 from __future__ import annotations
 
 #: The ESP32's static IP address. ``TACTIDOSE_ESP32_URL`` in .env overrides it (e.g. another board).
-ESP32_BASE_URL = "http://192.168.1.45"
+ESP32_BASE_URL = "http://172.20.10.9"
 
 #: HTTP method of every request (the endpoints work from a browser address bar, so GET).
 METHOD = "GET"
@@ -23,6 +23,13 @@ METHOD = "GET"
 LID_OPEN_PATH = "/lid?state=open"
 LID_CLOSE_PATH = "/lid?state=close"
 DISPENSE_PATH = "/dispense?pill={pill}"
+
+#: Every dispense: open the lid first, dispense, then close the lid LID_CLOSE_AFTER_S seconds later
+#: (so the patient can take the pill). If the lid does not open, nothing is dispensed.
+#: False = dispense only (the lid buttons still work).
+OPEN_LID_FOR_DISPENSE = True
+#: Seconds the lid stays open after a dispense before it closes by itself.
+LID_CLOSE_AFTER_S = 5.0
 
 #: Reachability check: any HTTP answer from this path means the ESP32 is on the network.
 HEALTH_PATH = "/"
