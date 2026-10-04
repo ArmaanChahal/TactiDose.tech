@@ -154,7 +154,7 @@ Access to `/api/reports/{rid}…` follows the report's patient (patient themself
 |---|---|---|
 | `GET /api/notifications?unread=true&limit=50` | – | `[Notification]` for the current user |
 | `POST /api/notifications/read` | `{ids?: [int]}` (omitted = all) | `{updated: int}` |
-| `GET /api/events` | – | **SSE**, filtered per user: a patient receives events about themself; a caregiver about linked patients. Events: `notification` (Notification), `drop` (PillDropView), `status` (PatientStatus-lite `{patient_id}` = refetch hint), `agent` (`{patient_id, conversation_id}`), `device` (DeviceSnapshot, only to users linked to the device's patient). Each SSE message: `event: <name>`, `data: <json>`; comment keep-alive every 15 s. |
+| `GET /api/events` | – | **SSE**, filtered per user: a patient receives events about themself; a caregiver about linked patients. Each message is `event: <bus topic>` + `data: {"seq", "topic", "data", "ts"}` (the same envelope as v1), comment keep-alive every 15 s, the last 50 *permitted* events replayed on connect. Topics (exact strings from `core/bus.py`): `notification` (Notification; only to its recipient `user_id`), `drop.updated` (PillDropView), `patient.status` (`{patient_id, reason}` = refetch hint), `agent.message` (`{patient_id, conversation_id, message_id, role}`), `report.updated` (`{patient_id, report_id, status}`), `device.state` (DeviceSnapshot; users linked to the device's patient). Demo mode adds `device.line`, `device.event`, `sim.physical`, `clock.changed`, `system.notice` for users linked to the device's patient. |
 
 ## Device & demo
 
