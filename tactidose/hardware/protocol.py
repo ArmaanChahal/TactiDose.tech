@@ -1,4 +1,10 @@
-"""TactiDose host <-> ESP32 serial protocol, v1.
+"""TactiDose host <-> ESP32 serial protocol, v1.1.
+
+v1.1 adds ``DROP_SLOT n`` (drop exactly one pill from container n, gate re-closes
+automatically) with ``OK DROPPED n`` / ``ERR NO_PILL``, and ``proto=``/``drop_sensor=``
+keys in ``STATUS``. Everything from v1 is unchanged, so v1 firmware still works: the host
+emulates a drop with ``DISPENSE_SLOT n`` + ``CLOSE_GATE`` when the device does not report
+``proto=1.1``.
 
 This module is the host-side single source of truth for the wire format.
 The normative description lives in ``docs/SERIAL_PROTOCOL.md``; the shared
@@ -23,10 +29,11 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Mapping
 
-PROTOCOL_VERSION = 1
+PROTOCOL_VERSION = "1.1"
 DEFAULT_BAUD = 115200
 MAX_LINE_LENGTH = 64
-DEFAULT_NUM_SLOTS = 6
+#: v2 device has 3 pill containers; firmware/simulator may be configured for 2–12.
+DEFAULT_NUM_SLOTS = 3
 MIN_SLOTS = 2
 MAX_SLOTS = 12
 MAX_SLOT_DIGITS = 3
@@ -39,7 +46,8 @@ __all__ = [
     "Command", "ParsedCommand", "Message", "StatusReport", "CommandResult",
     "parse_command", "parse_message", "format_message", "classify",
     "DEFAULT_TIMEOUTS_S", "BUSY_STATES", "UNHOMED_STATES", "GATE_OPENING_COMMANDS",
-    "LONG_RUNNING_COMMANDS", "compartment_number", "compartment_label",
+    "LONG_RUNNING_COMMANDS", "DROP_COMMANDS", "compartment_number", "compartment_label",
+    "DropCertainty", "drop_certainty", "supports_drop_slot",
 ]
 
 
@@ -103,15 +111,20 @@ class CommandName(str, Enum):
     OPEN_GATE = "OPEN_GATE"
     CLOSE_GATE = "CLOSE_GATE"
     STOP = "STOP"
+    DROP_SLOT = "DROP_SLOT"   # v1.1
 
 
-SLOT_COMMANDS = frozenset({CommandName.MOVE_SLOT, CommandName.DISPENSE_SLOT})
+SLOT_COMMANDS = frozenset({CommandName.MOVE_SLOT, CommandName.DISPENSE_SLOT, CommandName.DROP_SLOT})
 #: Commands whose (possibly uncertain) execution could leave the gate open.
-GATE_OPENING_COMMANDS = frozenset({CommandName.DISPENSE_SLOT, CommandName.OPEN_GATE})
+GATE_OPENING_COMMANDS = frozenset(
+    {CommandName.DISPENSE_SLOT, CommandName.OPEN_GATE, CommandName.DROP_SLOT}
+)
 #: Commands that run over time on the device and can be interrupted (``ERR STOPPED``).
 LONG_RUNNING_COMMANDS = frozenset(
-    {CommandName.HOME, CommandName.MOVE_SLOT, CommandName.DISPENSE_SLOT}
+    {CommandName.HOME, CommandName.MOVE_SLOT, CommandName.DISPENSE_SLOT, CommandName.DROP_SLOT}
 )
+#: Commands that can release a pill.
+DROP_COMMANDS = frozenset({CommandName.DISPENSE_SLOT, CommandName.DROP_SLOT})
 
 
 class MessageKind(str, Enum):
@@ -133,6 +146,7 @@ class Ok(str, Enum):
     GATE_OPEN = "GATE_OPEN"
     GATE_CLOSED = "GATE_CLOSED"
     STOPPED = "STOPPED"
+    DROPPED = "DROPPED"   # v1.1: "OK DROPPED n"
 
 
 class Err(str, Enum):
@@ -146,6 +160,7 @@ class Err(str, Enum):
     INVALID_STATE = "INVALID_STATE"
     UNKNOWN_COMMAND = "UNKNOWN_COMMAND"
     STOPPED = "STOPPED"
+    NO_PILL = "NO_PILL"   # v1.1: drop sensor saw no pill (container empty / jammed)
 
 
 class Ev(str, Enum):
@@ -190,6 +205,7 @@ DEFAULT_TIMEOUTS_S: Mapping[CommandName, float] = {
     CommandName.OPEN_GATE: 5.0,
     CommandName.CLOSE_GATE: 5.0,
     CommandName.STOP: 3.0,
+    CommandName.DROP_SLOT: 30.0,
 }
 
 
@@ -283,6 +299,11 @@ class Command:
         return cls(CommandName.DISPENSE_SLOT, cls._check_slot(slot, num_slots))
 
     @classmethod
+    def drop_slot(cls, slot: int, num_slots: int = DEFAULT_NUM_SLOTS) -> "Command":
+        """v1.1: drop exactly one pill from container ``slot`` (gate re-closes on its own)."""
+        return cls(CommandName.DROP_SLOT, cls._check_slot(slot, num_slots))
+
+    @classmethod
     def open_gate(cls) -> "Command":
         return cls(CommandName.OPEN_GATE)
 
@@ -371,8 +392,8 @@ class Message:
 
     @property
     def slot(self) -> int | None:
-        """Slot argument of ``OK MOVING n`` / ``OK AT_SLOT n`` (else ``None``)."""
-        if self.kind is MessageKind.OK and self.code in (Ok.MOVING.value, Ok.AT_SLOT.value):
+        """Slot argument of ``OK MOVING n`` / ``OK AT_SLOT n`` / ``OK DROPPED n`` (else ``None``)."""
+        if self.kind is MessageKind.OK and self.code in _SLOT_TAGGED:
             if self.args and _DIGITS.match(self.args[0]):
                 return int(self.args[0])
         return None
@@ -423,7 +444,7 @@ def format_message(kind: MessageKind | str, code: Enum | str, *args: object) -> 
 
 @dataclass(frozen=True)
 class StatusReport:
-    """Parsed ``OK STATUS state=… homed=… slot=… gate=… slots=… fw=…``."""
+    """Parsed ``OK STATUS state=… homed=… slot=… gate=… slots=… fw=… [proto=1.1 drop_sensor=0|1]``."""
 
     state: DeviceState = DeviceState.UNKNOWN
     homed: bool | None = None
@@ -432,6 +453,9 @@ class StatusReport:
     num_slots: int | None = None
     fw: str | None = None
     extra: Mapping[str, str] = field(default_factory=dict)
+    #: v1.1 keys. ``proto`` None = a v1 device (no DROP_SLOT).
+    proto: str | None = None
+    drop_sensor: bool | None = None
 
     @classmethod
     def parse(cls, msg: Message | str) -> "StatusReport":
@@ -457,6 +481,7 @@ class StatusReport:
             if slot < 0:
                 slot = None
         num_slots = int(slots_raw) if slots_raw and slots_raw.isdigit() else None
+        sensor_raw = pairs.pop("drop_sensor", None)
         return cls(
             state=DeviceState.parse(pairs.pop("state", None)),
             homed=homed,
@@ -464,6 +489,8 @@ class StatusReport:
             gate=GateState.parse(pairs.pop("gate", None)),
             num_slots=num_slots,
             fw=pairs.pop("fw", None),
+            proto=pairs.pop("proto", None),
+            drop_sensor=None if sensor_raw is None else sensor_raw in ("1", "true", "TRUE", "yes"),
             extra=dict(pairs),
         )
 
@@ -479,8 +506,23 @@ class StatusReport:
             parts.append(f"slots={self.num_slots}")
         if self.fw:
             parts.append(f"fw={self.fw}")
+        if self.proto:
+            parts.append(f"proto={self.proto}")
+        if self.drop_sensor is not None:
+            parts.append(f"drop_sensor={1 if self.drop_sensor else 0}")
         parts.extend(f"{k}={v}" for k, v in self.extra.items())
         return "OK STATUS " + " ".join(parts)
+
+
+def supports_drop_slot(proto: str | None) -> bool:
+    """True when a device reporting ``proto=<proto>`` implements ``DROP_SLOT`` (v1.1+)."""
+    if not proto:
+        return False
+    try:
+        major, _, minor = proto.partition(".")
+        return (int(major), int(minor or 0)) >= (1, 1)
+    except ValueError:
+        return False
 
 
 # --------------------------------------------------------------------------- classify
@@ -489,6 +531,9 @@ _PROGRESS: Mapping[CommandName, frozenset[str]] = {
     CommandName.HOME: frozenset({Ok.HOMING.value}),
     CommandName.MOVE_SLOT: frozenset({Ok.MOVING.value}),
     CommandName.DISPENSE_SLOT: frozenset({Ok.MOVING.value, Ok.AT_SLOT.value}),
+    CommandName.DROP_SLOT: frozenset(
+        {Ok.MOVING.value, Ok.AT_SLOT.value, Ok.GATE_OPEN.value, Ok.GATE_CLOSED.value}
+    ),
 }
 
 _SUCCESS: Mapping[CommandName, str] = {
@@ -500,6 +545,7 @@ _SUCCESS: Mapping[CommandName, str] = {
     CommandName.OPEN_GATE: Ok.GATE_OPEN.value,
     CommandName.CLOSE_GATE: Ok.GATE_CLOSED.value,
     CommandName.STOP: Ok.STOPPED.value,
+    CommandName.DROP_SLOT: Ok.DROPPED.value,
 }
 
 _MOTION_FAILURES = frozenset(
@@ -527,9 +573,10 @@ _FAILURES: Mapping[CommandName, frozenset[str]] = {
     ),
     CommandName.CLOSE_GATE: frozenset({Err.BUSY.value, Err.UNKNOWN_COMMAND.value}),
     CommandName.STOP: frozenset(),
+    CommandName.DROP_SLOT: _MOTION_FAILURES | {Err.NO_PILL.value},
 }
 
-_SLOT_TAGGED = frozenset({Ok.MOVING.value, Ok.AT_SLOT.value})
+_SLOT_TAGGED = frozenset({Ok.MOVING.value, Ok.AT_SLOT.value, Ok.DROPPED.value})
 
 
 def classify(command: Command, msg: Message) -> Disposition:
@@ -611,3 +658,35 @@ class CommandResult:
             gate_may_be_open=uncertain and command.may_open_gate,
             detail=detail,
         )
+
+    @property
+    def drop_certainty(self) -> "DropCertainty":
+        return drop_certainty(self)
+
+
+class DropCertainty(str, Enum):
+    DROPPED = "DROPPED"            # device confirmed the pill was released
+    NOT_DROPPED = "NOT_DROPPED"    # device (or host, before writing) guarantees nothing was released
+    UNCERTAIN = "UNCERTAIN"        # a pill may or may not have dropped -> fail closed, needs review
+
+
+def drop_certainty(result: CommandResult) -> DropCertainty:
+    """Did this ``DROP_SLOT`` / ``DISPENSE_SLOT`` release a pill?
+
+    * ``OK DROPPED n`` (or ``OK GATE_OPEN`` for the v1 ``DISPENSE_SLOT`` emulation) -> DROPPED.
+    * ``ERR NO_PILL`` and any ERR before the gate opened -> NOT_DROPPED.
+    * ``ERR STOPPED`` / ``DEVICE_RESET`` after ``OK GATE_OPEN`` was seen -> UNCERTAIN.
+    * TIMEOUT / DISCONNECTED (bytes may have reached the device) -> UNCERTAIN.
+    """
+    if result.command.name not in DROP_COMMANDS:
+        return DropCertainty.NOT_DROPPED
+    if result.ok:
+        if result.code in (Ok.DROPPED.value, Ok.GATE_OPEN.value):
+            return DropCertainty.DROPPED
+        return DropCertainty.UNCERTAIN
+    if not result.definitive:
+        return DropCertainty.UNCERTAIN
+    gate_opened = any(m.is_ok(Ok.GATE_OPEN) for m in result.messages)
+    if result.code in (Err.STOPPED.value, HostCode.DEVICE_RESET.value) and gate_opened:
+        return DropCertainty.UNCERTAIN
+    return DropCertainty.NOT_DROPPED

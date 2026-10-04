@@ -98,7 +98,12 @@ def enqueue_adherence(
     tz: tzinfo | None = None,
     recorded_at: datetime | None = None,
 ) -> AnalyticsOutbox:
-    """Call after every DoseEvent status change, in the same transaction."""
+    """Call after every DoseEvent status change, in the same transaction.
+
+    ``recorded_at`` orders upserts downstream (latest wins), so it must stay **wall-clock**
+    UTC: leave the default. Never pass the demo ``Clock.now()`` — time travel would make an
+    older state look newer in Snowflake.
+    """
     if event.event_id is None:
         session.flush()
     payload = adherence_payload(event, salt=salt, tz=tz, recorded_at=recorded_at)

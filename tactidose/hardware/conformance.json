@@ -1,14 +1,19 @@
 {
-  "version": 1,
-  "description": "TactiDose serial protocol v1 conformance scenarios. Normative reference: docs/SERIAL_PROTOCOL.md. Executed against the Python simulator, the native-compiled firmware core, and (hardware_safe scenarios only) a real ESP32.",
+  "version": 2,
+  "description": "TactiDose serial protocol v1.1 conformance scenarios (v1 scenarios + DROP_SLOT). Normative reference: docs/SERIAL_PROTOCOL.md. Executed against the Python simulator, the native-compiled firmware core, and (hardware_safe scenarios only) a real ESP32.",
   "harness": {
     "num_slots": 6,
     "steps_per_carousel_rev": 3200,
     "initial_physical_offset_steps": 1600,
     "gate_max_open_ms": 120000,
+    "drop_sensor": true,
+    "initial_pills_per_slot": 20,
     "notes": [
+      "v1.1: the harness device has a drop sensor and every container starts with 20 pills. A successful DROP_SLOT removes one pill; DROP_SLOT on an empty container ends with ERR NO_PILL. The release (gate open, hold, close) inside DROP_SLOT is atomic; STOP received during it is processed after OK DROPPED / ERR NO_PILL and OK READY.",
+      "Step type pills: [slot, count] sets the physical pill count of one container (no lines, no time advance).",
       "The first boot of a scenario places the carousel physically 1600 steps (180 deg) before the home sensor (homing direction is +). Later boots keep the physical position. boot sets the home-sensor mode; jam state is physical and persists across boots.",
       "Home sensor model: active while (physical_position mod steps_per_carousel_rev) is in [0, 40).",
+      "boot none: firmware built without a home sensor; the physical sensor mode is left unchanged (it is not read).",
       "Step types: boot (ok|dead|none), send (line), press (CONFIRM|CANCEL: pressed 100 ms then released), sensor (ok|dead), jam (true|false), and pure wait (wait_ms with no other action).",
       "After the action, the runner advances simulated time in 1 ms ticks and collects device lines (ignoring lines that start with '#') until len(collected) == len(expect) or within_ms elapses; then compares element-wise. Lines produced after a step's expectation is satisfied carry over into the next step's collection.",
       "quiet_ms (default 0): after the expectation is met keep ticking that long and fail if any further line appears.",
@@ -339,6 +344,82 @@
         {"wait_ms": 100000, "expect": []},
         {"wait_ms": 30000, "expect": ["OK GATE_CLOSED", "OK READY"]},
         {"send": "STATUS", "expect": ["status:state=READY,gate=CLOSED"]}
+      ]
+    },
+    {
+      "name": "drop_slot_happy_path",
+      "hardware_safe": true,
+      "steps": [
+        {"boot": "ok", "expect": ["re:EVENT BOOT \\S+", "OK HOMING", "OK HOMED", "OK READY"]},
+        {"send": "STATUS", "expect": ["status:state=READY,proto=1.1"]},
+        {"send": "DROP_SLOT 2", "within_ms": 30000, "expect": ["OK MOVING 2", "OK AT_SLOT 2", "OK GATE_OPEN", "OK GATE_CLOSED", "OK DROPPED 2", "OK READY"]},
+        {"send": "STATUS", "expect": ["status:state=READY,homed=1,slot=2,gate=CLOSED"]},
+        {"send": "drop_slot 2", "within_ms": 30000, "expect": ["OK MOVING 2", "OK AT_SLOT 2", "OK GATE_OPEN", "OK GATE_CLOSED", "OK DROPPED 2", "OK READY"]},
+        {"send": "DROP_SLOT 0", "within_ms": 30000, "expect": ["OK MOVING 0", "OK AT_SLOT 0", "OK GATE_OPEN", "OK GATE_CLOSED", "OK DROPPED 0", "OK READY"]}
+      ]
+    },
+    {
+      "name": "drop_slot_interlocks",
+      "hardware_safe": true,
+      "steps": [
+        {"boot": "ok", "expect": ["re:EVENT BOOT \\S+", "OK HOMING", "OK HOMED", "OK READY"]},
+        {"send": "DROP_SLOT 6", "expect": ["ERR INVALID_SLOT"]},
+        {"send": "DROP_SLOT x", "expect": ["ERR INVALID_SLOT"]},
+        {"send": "DROP_SLOT", "expect": ["ERR INVALID_SLOT"]},
+        {"send": "OPEN_GATE", "expect": ["OK GATE_OPEN"]},
+        {"send": "DROP_SLOT 1", "expect": ["ERR INVALID_STATE"]},
+        {"send": "CLOSE_GATE", "expect": ["OK GATE_CLOSED", "OK READY"]},
+        {"send": "MOVE_SLOT 3", "expect": ["OK MOVING 3"]},
+        {"send": "DROP_SLOT 1", "expect": ["ERR BUSY"]},
+        {"wait_ms": 20000, "expect": ["OK AT_SLOT 3", "OK READY"]},
+        {"send": "STOP", "expect": ["OK STOPPED"]},
+        {"send": "DROP_SLOT 1", "expect": ["ERR NOT_HOMED"]}
+      ]
+    },
+    {
+      "name": "drop_slot_empty_container_reports_no_pill",
+      "hardware_safe": false,
+      "tags": ["fault"],
+      "steps": [
+        {"boot": "ok", "expect": ["re:EVENT BOOT \\S+", "OK HOMING", "OK HOMED", "OK READY"]},
+        {"pills": [1, 1], "expect": []},
+        {"send": "DROP_SLOT 1", "within_ms": 30000, "expect": ["OK MOVING 1", "OK AT_SLOT 1", "OK GATE_OPEN", "OK GATE_CLOSED", "OK DROPPED 1", "OK READY"]},
+        {"send": "DROP_SLOT 1", "within_ms": 30000, "expect": ["OK MOVING 1", "OK AT_SLOT 1", "OK GATE_OPEN", "OK GATE_CLOSED", "ERR NO_PILL", "OK READY"]},
+        {"send": "STATUS", "expect": ["status:state=READY,homed=1,gate=CLOSED,drop_sensor=1"]}
+      ]
+    },
+    {
+      "name": "stop_during_drop_motion_never_releases",
+      "hardware_safe": true,
+      "steps": [
+        {"boot": "ok", "expect": ["re:EVENT BOOT \\S+", "OK HOMING", "OK HOMED", "OK READY"]},
+        {"send": "DROP_SLOT 3", "expect": ["OK MOVING 3"]},
+        {"send": "STOP", "expect": ["ERR STOPPED", "OK STOPPED"]},
+        {"wait_ms": 3000, "expect": []},
+        {"send": "STATUS", "expect": ["status:state=SAFE_STOP,homed=0,gate=CLOSED"]}
+      ]
+    },
+    {
+      "name": "cancel_button_during_drop_motion_stops",
+      "hardware_safe": false,
+      "tags": ["buttons"],
+      "steps": [
+        {"boot": "ok", "expect": ["re:EVENT BOOT \\S+", "OK HOMING", "OK HOMED", "OK READY"]},
+        {"send": "DROP_SLOT 4", "expect": ["OK MOVING 4"]},
+        {"press": "CANCEL", "expect": ["EVENT CANCEL_BUTTON", "ERR STOPPED", "OK STOPPED"]},
+        {"send": "STATUS", "expect": ["status:state=SAFE_STOP,gate=CLOSED"]}
+      ]
+    },
+    {
+      "name": "drop_slot_with_motor_jam_faults_without_release",
+      "hardware_safe": false,
+      "tags": ["fault"],
+      "steps": [
+        {"boot": "ok", "expect": ["re:EVENT BOOT \\S+", "OK HOMING", "OK HOMED", "OK READY"]},
+        {"jam": true, "expect": []},
+        {"send": "DROP_SLOT 2", "within_ms": 30000, "expect": ["OK MOVING 2", "ERR MOTOR_FAULT"]},
+        {"wait_ms": 2000, "expect": []},
+        {"send": "STATUS", "expect": ["status:state=FAULT,gate=CLOSED"]}
       ]
     }
   ]

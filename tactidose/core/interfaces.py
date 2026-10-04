@@ -55,6 +55,9 @@ class DeviceSnapshot:
     num_slots_reported: int | None = None
     last_rx_age_s: float | None = None    # seconds since last line from the device
     resets_seen: int = 0                  # EVENT BOOT count since start
+    #: v1.1: protocol version from STATUS (None = v1 firmware, no DROP_SLOT) and drop sensor presence.
+    proto: str | None = None
+    drop_sensor: bool | None = None
 
     @property
     def ready_for_motion(self) -> bool:
@@ -94,12 +97,26 @@ class HardwareController(Protocol):
     def close_gate(self) -> CommandResult: ...
     def stop(self) -> CommandResult: ...
 
+    def drop_slot(self, slot: int) -> CommandResult:
+        """v1.1: drop one pill from container ``slot``. Sends ``DROP_SLOT n`` when the device
+        reports ``proto >= 1.1``; otherwise emulates it with ``DISPENSE_SLOT n`` + wait
+        ``drop_close_delay_ms`` + ``CLOSE_GATE`` and returns a result whose
+        ``protocol.drop_certainty`` is meaningful either way."""
+        ...
+
+    def reconnect(self) -> bool:
+        """Drop the link and reconnect now. False if refused (a command is in flight,
+        not started, closed, or hardware_mode='none')."""
+        ...
+
     def send_raw(self, line: str) -> CommandResult:
         """Demo console: parse ``line`` with ``protocol.parse_command`` and send it."""
         ...
 
     def add_event_listener(self, callback: Callable[[Message], None]) -> Callable[[], None]:
-        """Receive every ``EVENT …`` message (button presses, boot). Returns an unsubscribe fn.
+        """Receive every ``EVENT …`` message (button presses, boot) plus unsolicited
+        ``ERR HOME_TIMEOUT`` / ``ERR MOTOR_FAULT`` that did not terminate an in-flight
+        command (``msg.kind is MessageKind.ERR``). Returns an unsubscribe fn.
         Callbacks run on the reader thread: they must be quick and must not call
         blocking command methods (enqueue work instead)."""
         ...
@@ -120,6 +137,8 @@ class Intent(str, Enum):
     PRIMARY_ACTION = "PRIMARY_ACTION"
     #: Internal: gate has been open too long without confirmation.
     GATE_TIMEOUT = "GATE_TIMEOUT"
+    #: Internal: device/system announcement ("The device restarted", "needs attention").
+    NOTICE = "NOTICE"
     UNKNOWN = "UNKNOWN"
 
 
@@ -182,6 +201,13 @@ class LabelExtraction(BaseModel):
 
 @dataclass(frozen=True)
 class ExtractionResult:
+    """Outcome of one label extraction. Consumers must branch on ``ok``.
+
+    ``data`` may also be set when ``ok`` is False (``error == "unreadable"``) — for audit only,
+    never to be treated as a successful read. ``error`` vocabulary: timeout | network | blocked |
+    invalid_response | unreadable | invalid_image | api_error:<http code|unknown|no_api_key|sdk_missing>.
+    """
+
     ok: bool
     data: LabelExtraction | None = None
     model: str = ""
@@ -259,9 +285,12 @@ class DueSummary:
     accessed: tuple[DoseInfo, ...] = ()                 # in window and DISPENSED/TAKEN
     blocked: tuple[tuple[DoseInfo, BlockReason], ...] = ()
     next_upcoming: DoseInfo | None = None               # next SCHEDULED dose after now
+    #: Set (e.g. "DB_ERROR") when the schedule could not be read: callers must fail closed
+    #: and must NOT report "nothing due".
+    error: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        out: dict[str, Any] = {
             "now_local": self.now_local.isoformat(),
             "due": [d.to_dict() for d in self.due],
             "awaiting_confirmation": [d.to_dict() for d in self.awaiting_confirmation],
@@ -269,6 +298,9 @@ class DueSummary:
             "blocked": [{"dose": d.to_dict(), "reason": r.value} for d, r in self.blocked],
             "next_upcoming": self.next_upcoming.to_dict() if self.next_upcoming else None,
         }
+        if self.error:
+            out["error"] = self.error
+        return out
 
 
 class DispenseStatus(str, Enum):
@@ -369,9 +401,10 @@ class DoseServiceAPI(Protocol):
         *,
         on_motion_start: Callable[[DoseInfo], None] | None = None,
     ) -> DispenseOutcome:
-        """Dispense the next eligible dose. ``on_motion_start`` is called (on the calling
-        thread) right before ``DISPENSE_SLOT`` is sent, so the assistant can warn
-        "keep your hands clear". It is not called when nothing will move."""
+        """Dispense the next eligible dose. ``on_motion_start`` is called once, on the calling
+        thread, right before the first carousel motion (a preparatory ``HOME`` or the
+        ``DISPENSE_SLOT``), so the assistant can warn "keep your hands clear". It is not
+        called when nothing will move."""
         ...
 
     def confirm_taken(self, source: IntentSource) -> ConfirmOutcome: ...
@@ -420,3 +453,262 @@ class Reply:
             "outcome": self.outcome,
             "spoken": self.spoken,
         }
+
+
+# =========================================================================== v2: drops, inventory, agent, reports, auth
+#
+# v2 product structure (2026-10-03): pills DROP from 3 containers; scheduled doses drop
+# automatically; one global cooldown blocks repeated manual/agent drops; an LLM agent talks
+# with the patient (voice + text) and may *request* a drop; PDF reports; patient vs
+# doctor/family portals. Deterministic rules in DropService have the final say on every drop.
+
+
+@dataclass(frozen=True)
+class ContainerInfo:
+    """One container (slot) of the patient's device with its inventory."""
+
+    slot: int
+    compartment_id: int
+    medication_id: int | None
+    medication_name: str | None
+    strength: str | None
+    pill_count: int
+    capacity: int
+    low_stock_threshold: int
+    loaded_at: datetime | None = None
+
+    @property
+    def container_number(self) -> int:
+        return self.slot + 1
+
+    @property
+    def empty(self) -> bool:
+        return self.pill_count <= 0
+
+    @property
+    def low_stock(self) -> bool:
+        return 0 < self.pill_count <= self.low_stock_threshold
+
+    def to_dict(self) -> dict[str, Any]:
+        d = asdict(self)
+        d["loaded_at"] = self.loaded_at.isoformat() if self.loaded_at else None
+        d.update(container_number=self.container_number, empty=self.empty, low_stock=self.low_stock)
+        return d
+
+
+@dataclass(frozen=True)
+class DropOutcome:
+    """Result of one drop request (manual, agent, schedule, button or demo).
+
+    ``status``: DROPPED | DENIED | FAILED | UNCERTAIN (db.models.DropStatus values).
+    ``reason``: a db.models.DenyReason value for DENIED, a hardware code for FAILED/UNCERTAIN.
+    ``message``: deterministic, user-facing sentence (the agent may rephrase but must not contradict it).
+    """
+
+    status: str
+    source: str
+    message: str
+    reason: str | None = None
+    drop_id: int | None = None
+    slot: int | None = None
+    medication_id: int | None = None
+    medication_name: str | None = None
+    pill_count_after: int | None = None
+    cooldown_remaining_s: int = 0
+    next_allowed_at: datetime | None = None
+    hardware: CommandResult | None = None
+
+    @property
+    def dropped(self) -> bool:
+        return self.status == "DROPPED"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "status": self.status,
+            "reason": self.reason,
+            "message": self.message,
+            "drop_id": self.drop_id,
+            "slot": self.slot,
+            "container_number": None if self.slot is None else self.slot + 1,
+            "medication_id": self.medication_id,
+            "medication_name": self.medication_name,
+            "source": self.source,
+            "pill_count_after": self.pill_count_after,
+            "cooldown_remaining_s": self.cooldown_remaining_s,
+            "next_allowed_at": self.next_allowed_at.isoformat() if self.next_allowed_at else None,
+            "hardware": self.hardware.hardware_result if self.hardware else None,
+        }
+
+
+@dataclass(frozen=True)
+class PatientStatus:
+    """Everything the agent and the portals need to describe the patient's situation now."""
+
+    patient_id: int
+    display_name: str
+    now_local: datetime
+    containers: tuple[ContainerInfo, ...] = ()
+    cooldown_minutes: int = 0
+    cooldown_remaining_s: int = 0
+    next_manual_allowed_at: datetime | None = None
+    last_drop: dict[str, Any] | None = None          # PillDropView
+    today: tuple[dict[str, Any], ...] = ()            # DoseView dicts for today's local date
+    next_scheduled: dict[str, Any] | None = None      # DoseView
+    auto_drop_enabled: bool = True
+    device: dict[str, Any] = field(default_factory=dict)
+    alerts: tuple[dict[str, Any], ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "patient_id": self.patient_id,
+            "display_name": self.display_name,
+            "now_local": self.now_local.isoformat(),
+            "containers": [c.to_dict() for c in self.containers],
+            "cooldown_minutes": self.cooldown_minutes,
+            "cooldown_remaining_s": self.cooldown_remaining_s,
+            "next_manual_allowed_at": self.next_manual_allowed_at.isoformat() if self.next_manual_allowed_at else None,
+            "last_drop": self.last_drop,
+            "today": list(self.today),
+            "next_scheduled": self.next_scheduled,
+            "auto_drop_enabled": self.auto_drop_enabled,
+            "device": self.device,
+            "alerts": list(self.alerts),
+        }
+
+
+@runtime_checkable
+class DropServiceAPI(Protocol):
+    """Deterministic drop logic (medication/drops.py). Never raises for expected failures.
+
+    Rules applied to every request (ARCHITECTURE v2 §5): the patient has a device; the slot
+    holds an active, confirmed medication; pill_count > 0; global cooldown for
+    manual/agent/button sources; scheduled doses not already satisfied; device ready; one drop
+    at a time (lock + DB claim); uncertain hardware outcomes fail closed (UNCERTAIN, needs review).
+    """
+
+    def request_drop(
+        self,
+        *,
+        patient_id: int,
+        source: str,
+        slot: int | None = None,
+        medication_id: int | None = None,
+        requested_by_user_id: int | None = None,
+        conversation_id: int | None = None,
+        dose_event_id: int | None = None,
+    ) -> DropOutcome: ...
+
+    def patient_status(self, patient_id: int) -> PatientStatus: ...
+
+    def recent_drops(self, patient_id: int, *, days: int = 7, limit: int = 200) -> list[dict[str, Any]]: ...
+
+    def run_scheduled_drops(self) -> int:
+        """Drop every scheduled dose whose time has come and that is not yet satisfied.
+        Called by the scheduler loop; returns the number of drop attempts made."""
+        ...
+
+    def interrupt(self) -> bool:
+        """Send STOP immediately if a drop/motion is in flight (bypasses locks)."""
+        ...
+
+
+@runtime_checkable
+class NotificationServiceAPI(Protocol):
+    def notify(
+        self,
+        *,
+        patient_id: int,
+        kind: str,
+        title: str,
+        body: str = "",
+        data: dict[str, Any] | None = None,
+        to_patient: bool = True,
+        to_caregivers: bool = True,
+    ) -> list[int]:
+        """Store one Notification per recipient, publish ``Topic.NOTIFICATION``; returns ids."""
+        ...
+
+    def list_for_user(self, user_id: int, *, unread_only: bool = False, limit: int = 50) -> list[dict[str, Any]]: ...
+
+    def mark_read(self, user_id: int, ids: list[int] | None = None) -> int: ...
+
+
+@dataclass
+class AgentReply:
+    conversation_id: int
+    text: str
+    model: str                                   # e.g. "gemini-3.8-flash" or "rules"
+    actions: list[dict[str, Any]] = field(default_factory=list)   # DropOutcome.to_dict() per drop attempt
+    messages: list[dict[str, Any]] = field(default_factory=list)  # messages stored this turn
+    audio_url: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "conversation_id": self.conversation_id,
+            "text": self.text,
+            "model": self.model,
+            "actions": self.actions,
+            "messages": self.messages,
+            "audio_url": self.audio_url,
+        }
+
+
+@runtime_checkable
+class AgentServiceAPI(Protocol):
+    """Conversational agent for the *patient*. Every turn is persisted (patients only)."""
+
+    def chat(
+        self,
+        *,
+        patient_id: int,
+        text: str,
+        input_mode: str = "text",
+        conversation_id: int | None = None,
+    ) -> AgentReply: ...
+
+    def conversations(self, patient_id: int, *, limit: int = 50) -> list[dict[str, Any]]: ...
+
+    def messages(self, patient_id: int, conversation_id: int) -> list[dict[str, Any]]: ...
+
+
+@runtime_checkable
+class ReportServiceAPI(Protocol):
+    def generate(self, *, patient_id: int, days: int, created_by_user_id: int) -> dict[str, Any]: ...
+    def list(self, patient_id: int) -> list[dict[str, Any]]: ...
+    def get(self, report_id: int) -> dict[str, Any]: ...
+    def pdf_bytes(self, report_id: int) -> bytes: ...
+    def send(self, report_id: int, *, sent_by_user_id: int, to_email: str | None = None) -> dict[str, Any]: ...
+
+
+@dataclass(frozen=True)
+class AuthUser:
+    user_id: int
+    display_name: str
+    role: str                       # db.models.Role value
+    email: str | None = None
+
+    @property
+    def is_patient(self) -> bool:
+        return self.role == "patient"
+
+    @property
+    def is_caregiver(self) -> bool:
+        return self.role in ("doctor", "family")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"user_id": self.user_id, "display_name": self.display_name, "role": self.role, "email": self.email}
+
+
+@runtime_checkable
+class AuthServiceAPI(Protocol):
+    def register(self, *, email: str, password: str, display_name: str, role: str,
+                 phone: str | None = None) -> AuthUser: ...
+    def login(self, email: str, password: str, *, user_agent: str | None = None) -> tuple[AuthUser, str]: ...
+    def resolve(self, token: str) -> AuthUser | None: ...
+    def logout(self, token: str) -> None: ...
+    def link_patient(self, *, caregiver: AuthUser, patient_id: int, link_code: str) -> dict[str, Any]: ...
+    def unlink_patient(self, *, caregiver: AuthUser, patient_id: int) -> None: ...
+    def can_view(self, user: AuthUser, patient_id: int) -> bool: ...
+    def can_edit(self, user: AuthUser, patient_id: int) -> bool: ...
+    def linked_patient_ids(self, user: AuthUser) -> list[int]: ...
+    def caregiver_ids(self, patient_id: int) -> list[int]: ...

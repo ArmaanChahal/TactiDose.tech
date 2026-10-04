@@ -221,7 +221,7 @@ def _template(tmp_path_factory: pytest.TempPathFactory, name: str, *, tick: bool
                 mp.delenv(key, raising=False)
         st = Settings(_env_file=None, data_dir=root / "data", hardware_mode="none", voice_enabled=False,
                       tts_provider="none", label_extractor="fake", timezone=TEST_TZ, demo_mode=True,
-                      hw_boot_wait_s=0)
+                      hw_boot_wait_s=0, num_slots=6)
         database = Database(st)
         database.create_all()
         m = build(st, Clock(TEST_TZ, frozen_at=TEST_NOW_LOCAL), database, EventBus(), FakeHardware(), tick=tick)

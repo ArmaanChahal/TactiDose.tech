@@ -42,6 +42,11 @@ def build_database_url(settings: Settings) -> str | URL:
     return f"sqlite:///{settings.sqlite_path.resolve().as_posix()}"
 
 
+def tidb_connect_args(settings: Settings) -> dict[str, object]:
+    """PyMySQL connect kwargs (TLS + timeouts) used for TiDB; shared by integrations/tidb.py."""
+    return _tidb_connect_args(settings)
+
+
 def _tidb_connect_args(settings: Settings) -> dict[str, object]:
     args: dict[str, object] = {"connect_timeout": 10, "read_timeout": 15, "write_timeout": 15}
     if settings.tidb_ssl:

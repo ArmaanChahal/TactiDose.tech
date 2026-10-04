@@ -145,7 +145,7 @@ def test_conformance_file_is_well_formed():
     data = json.loads(path.read_text(encoding="utf-8"))
     names = [s["name"] for s in data["scenarios"]]
     assert len(names) == len(set(names)) >= 20
-    allowed = {"boot", "send", "press", "sensor", "jam", "wait_ms", "expect", "within_ms", "quiet_ms"}
+    allowed = {"boot", "send", "press", "sensor", "jam", "pills", "wait_ms", "expect", "within_ms", "quiet_ms"}
     for sc in data["scenarios"]:
         assert sc["steps"][0].get("boot"), sc["name"]
         for step in sc["steps"]:
@@ -357,3 +357,104 @@ def test_fake_hardware_interlocks():
     hw.script(p.CommandName.DISPENSE_SLOT, "TIMEOUT")
     r = hw.dispense_slot(2)
     assert not r.definitive and r.gate_may_be_open
+
+
+# --------------------------------------------------------------------------- v2 foundation
+
+
+def test_protocol_v11_drop_slot_classification():
+    cmd = p.Command.drop_slot(2, 3)
+    D = p.Disposition
+    assert cmd.to_line() == "DROP_SLOT 2" and cmd.may_open_gate
+    for line in ("OK MOVING 2", "OK AT_SLOT 2", "OK GATE_OPEN", "OK GATE_CLOSED"):
+        assert p.classify(cmd, _m(line)) is D.PROGRESS, line
+    assert p.classify(cmd, _m("OK DROPPED 2")) is D.SUCCESS
+    assert p.classify(cmd, _m("OK DROPPED 1")) is D.UNRELATED
+    assert p.classify(cmd, _m("ERR NO_PILL")) is D.FAILURE
+    assert p.parse_command("drop_slot 1", 3).command == p.Command.drop_slot(1, 3)
+    assert p.parse_command("DROP_SLOT 3", 3).error is p.Err.INVALID_SLOT
+
+
+def test_drop_certainty_rules():
+    cmd = p.Command.drop_slot(1, 3)
+    C = p.DropCertainty
+    assert p.CommandResult(cmd, True, "DROPPED").drop_certainty is C.DROPPED
+    assert p.CommandResult(cmd, False, "NO_PILL").drop_certainty is C.NOT_DROPPED
+    before = p.CommandResult(cmd, False, "STOPPED", (_m("OK MOVING 1"),))
+    after = p.CommandResult(cmd, False, "STOPPED", (_m("OK MOVING 1"), _m("OK GATE_OPEN")))
+    assert before.drop_certainty is C.NOT_DROPPED and after.drop_certainty is C.UNCERTAIN
+    assert p.CommandResult.host_failure(cmd, p.HostCode.TIMEOUT).drop_certainty is C.UNCERTAIN
+    reset = p.CommandResult.host_failure(cmd, p.HostCode.DEVICE_RESET, messages=(_m("OK GATE_OPEN"),))
+    assert reset.drop_certainty is C.UNCERTAIN
+    legacy = p.CommandResult(p.Command.dispense_slot(1, 3), True, "GATE_OPEN")
+    assert legacy.drop_certainty is C.DROPPED  # v1 emulation path
+    assert p.CommandResult(p.Command.ping(), True, "PONG").drop_certainty is C.NOT_DROPPED
+
+
+def test_status_report_v11_keys():
+    rep = p.StatusReport.parse("OK STATUS state=READY homed=1 slot=0 gate=CLOSED slots=3 fw=x proto=1.1 drop_sensor=1")
+    assert rep.proto == "1.1" and rep.drop_sensor is True and p.supports_drop_slot(rep.proto)
+    assert not p.supports_drop_slot(None) and not p.supports_drop_slot("1.0") and p.supports_drop_slot("2.0")
+    assert p.StatusReport.parse("OK STATUS state=READY").proto is None
+    assert "proto=1.1" in rep.to_line() and "drop_sensor=1" in rep.to_line()
+
+
+def test_settings_v2_defaults():
+    s = Settings(_env_file=None)
+    assert s.num_slots == 3 and s.manual_cooldown_minutes == 60 and s.auto_drop_enabled
+    assert s.effective_agent_provider == "rules" and not s.smtp_configured
+    assert s.command_timeout_s(p.CommandName.DROP_SLOT) == s.timeout_drop_s
+
+
+def test_settings_v2_env_aliases(monkeypatch):
+    monkeypatch.setenv("SMTP_HOST", "smtp.example.com")
+    monkeypatch.setenv("SMTP_FROM", "tactidose@example.com")
+    monkeypatch.setenv("GEMINI_API_KEY", "k")
+    s = Settings(_env_file=None)
+    assert s.smtp_configured and s.effective_agent_provider == "gemini"
+    assert s.effective_agent_model == s.gemini_model
+
+
+def test_v2_tables_and_seed(db_v2, settings_v2):
+    from tactidose.db.models import (
+        CareLink, Compartment, Conversation, ConversationMessage, Notification, PillDrop, Report,
+    )
+    from tests.fakes import seed_v2
+
+    ids = seed_v2(db_v2, settings_v2)
+    with db_v2.session() as s:
+        assert s.scalars(select(CareLink)).all().__len__() == 2
+        comps = s.scalars(select(Compartment).order_by(Compartment.slot_number)).all()
+        assert [c.pill_count for c in comps] == [20, 20, 20] and all(c.medication_id for c in comps)
+        s.add(PillDrop(patient_id=ids["patient_id"], device_id=ids["device_id"], slot_number=0,
+                       source="manual", status="DROPPED", pill_count_before=20, pill_count_after=19))
+        conv = Conversation(patient_id=ids["patient_id"])
+        s.add(conv)
+        s.flush()
+        s.add(ConversationMessage(conversation_id=conv.conversation_id, patient_id=ids["patient_id"],
+                                  role="user", content="Can I have my pill?", input_mode="voice"))
+        s.add(Notification(user_id=ids["patient_id"], patient_id=ids["patient_id"], kind="PILL_DROPPED",
+                           title="Pill dropped"))
+        now = datetime.now(timezone.utc)
+        s.add(Report(patient_id=ids["patient_id"], created_by_user_id=ids["doctor_id"], days=7,
+                     period_start=now - timedelta(days=7), period_end=now, title="t",
+                     pdf=b"%PDF-1.4 test", pdf_size=13))
+    with db_v2.session() as s:
+        rep = s.scalars(select(Report)).one()
+        assert rep.pdf == b"%PDF-1.4 test"
+        assert s.scalars(select(ConversationMessage)).one().input_mode == "voice"
+
+
+def test_fake_hardware_drop_slot():
+    from tests.fakes import FakeDropHardware
+
+    hw = FakeDropHardware(pills=1)
+    assert hw.snapshot().proto == "1.1" and hw.num_slots == 3
+    r = hw.drop_slot(2)
+    assert r.ok and r.code == "DROPPED" and r.drop_certainty is p.DropCertainty.DROPPED and hw.pills[2] == 0
+    empty = hw.drop_slot(2)
+    assert empty.code == "NO_PILL" and empty.drop_certainty is p.DropCertainty.NOT_DROPPED
+    assert hw.drop_slot(3).code == "INVALID_ARGUMENT"
+    hw.stop()
+    assert hw.drop_slot(0).code == "NOT_HOMED"
+    assert hw.reconnect() is True

@@ -40,6 +40,13 @@ class Topic:
     DATA_CHANGED = "data.changed"          # {"entity": "medication"|"schedule"|"compartment"|"scan", "id"}
     CLOCK_CHANGED = "clock.changed"        # {"now_local", "offset_s"}
     NOTICE = "system.notice"               # {"level": "info"|"warning"|"error", "message"}
+    ANALYTICS_SYNC = "analytics.sync"      # SnowflakeSync.sync_once() report
+    # ---- v2 (every payload carries "patient_id" so the SSE endpoint can filter per user)
+    NOTIFICATION = "notification"          # Notification view incl. "user_id" (recipient) and "patient_id"
+    DROP = "drop.updated"                  # PillDropView (has "patient_id")
+    PATIENT_STATUS = "patient.status"      # {"patient_id", "reason"} — refetch hint for portals
+    AGENT = "agent.message"                # {"patient_id", "conversation_id", "message_id", "role"}
+    REPORT = "report.updated"              # {"patient_id", "report_id", "status"}
 
 
 @dataclass(frozen=True)

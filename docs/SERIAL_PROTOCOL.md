@@ -1,4 +1,4 @@
-# TactiDose Serial Protocol — v1 (frozen contract)
+# TactiDose Serial Protocol — v1.1 (frozen contract)
 
 This document is the **single source of truth** for the host ↔ ESP32 interface.
 The Python host (`tactidose/hardware/protocol.py`), the Python ESP32 simulator
@@ -159,14 +159,18 @@ Precedence for `MOVE_SLOT`/`DISPENSE_SLOT`: argument validation first
    position before starting any move or homing.
 2. **Gate travel is atomic.** Servo moves block for `GATE_TRAVEL_MS` (≤ 600 ms)
    before `OK GATE_OPEN` / `OK GATE_CLOSED` is sent. Serial input received meanwhile
-   is processed afterwards.
+   is processed afterwards. In particular a `STOP` or cancel press that arrives while a
+   `DISPENSE_SLOT` gate is already travelling open is handled *after* `OK GATE_OPEN`: the
+   dispense counts as successful (the compartment was accessible) and duplicate prevention applies.
 3. **Motion is non-blocking.** `PING`, `STATUS` and `STOP` are answered while moving/homing.
 4. **Settle before opening.** In `DISPENSE_SLOT`, wait `SETTLE_MS` (≈ 300 ms) in
    `AT_TARGET` after the motor stops, then open the gate. `STOP` during settle aborts
    with `ERR STOPPED` and the gate never opens.
 5. **Homing.** Rotate slowly in one direction until the home sensor activates
-   (debounced). Max travel 1.25 carousel revolutions *or* `HOME_TIMEOUT_MS`,
-   whichever comes first → `ERR HOME_TIMEOUT`, state `FAULT`. Optional back-off + slow re-approach.
+   (debounced). The *seek* for the sensor edge is limited to 1.25 carousel revolutions; if the
+   sensor is already active the device first leaves it (≤ 0.25 rev); the whole `HOME` is
+   limited by `HOME_TIMEOUT_MS`. Any limit hit → `ERR HOME_TIMEOUT`, state `FAULT`. A sensor
+   stuck active is never accepted as home. Optional back-off + slow re-approach.
 6. **Motion timeout.** If a move does not finish within `2 × expected + 2 s`,
    stop, send `ERR MOTOR_FAULT`, enter `FAULT`.
 7. **Gate auto-close (safety net).** If `GATE_OPEN` lasts longer than
@@ -177,8 +181,10 @@ Precedence for `MOVE_SLOT`/`DISPENSE_SLOT`: argument validation first
    * Cancel → `EVENT CANCEL_BUTTON` **first**, then a local safety action:
      while `HOMING`/`MOVING`/`AT_TARGET` → `ERR STOPPED`, `OK STOPPED` (→ `SAFE_STOP`);
      while `GATE_OPEN` → `OK GATE_CLOSED`, `OK READY`; otherwise nothing.
-9. **Boot.** Close gate first, then `EVENT BOOT <fw>`, then auto-home if a home sensor is
-   configured (`OK HOMING` … `OK HOMED`, `OK READY` or `ERR HOME_TIMEOUT`).
+9. **Boot.** Close gate first, then `EVENT BOOT <fw>` (sent once the closing travel has
+   completed, i.e. about `GATE_TRAVEL_MS` after reset; a simulator may send it immediately),
+   then auto-home if a home sensor is configured (`OK HOMING` … `OK HOMED`, `OK READY` or
+   `ERR HOME_TIMEOUT`).
 10. **Never trust the host for interlocks.** Every rule in §7 is enforced on the device
     even though the host also checks them.
 
@@ -251,7 +257,80 @@ Precedence for `MOVE_SLOT`/`DISPENSE_SLOT`: argument validation first
 
 ## 11. Testing the contract
 
-* `python -m tactidose hw-test --port COM5` runs the non-destructive conformance
-  scenarios against a real board (it will move the carousel and open the gate).
-* `pytest tests/test_conformance.py` runs the full suite (including fault injection)
-  against the Python simulator and, when built, the native firmware core.
+* `python -m tactidose hw-test --port COM5` runs the handoff §29 integration checklist on a real
+  board (PING, STATUS, HOME, every slot, dispense/drop, STOP, unknown command; it moves the
+  carousel and opens the gate).
+* `python -m tactidose.hardware.conformance --target serial --port COM5` runs the `hardware_safe`
+  conformance scenarios on a real board.
+* `pytest tests/test_hw_conformance_sim.py` runs the full suite (including fault injection)
+  against the Python simulator; `pytest tests/test_fw_native.py -m native` runs it against the
+  natively compiled firmware core (Docker).
+* Either jam model is conformant: a simulator may let the step counter run on while the carousel
+  stays put (Python twin) or freeze it (native harness); only the reply sequences are normative.
+
+## 12. v1.1 — `DROP_SLOT` (pill drop) **(added 2026-10-03)**
+
+The v2 product drops **one pill** from one of **3 containers** instead of presenting a compartment at
+an open gate. v1.1 adds one command; everything above is unchanged, so v1 firmware keeps working
+(the host emulates a drop, see 12.5).
+
+### 12.1 Command
+
+```
+DROP_SLOT <n>
+```
+
+Drop exactly one pill from container `n` (0-based; user-facing "container n+1") into the output
+chute. Device-side macro: gate/release closed → move to slot `n` (designs with a fixed release per
+container skip the motion and report it immediately) → settle → **release** (open, hold
+`DROP_OPEN_MS`, close — atomic, ≤ ~1.5 s) → optional drop-sensor check → report.
+
+### 12.2 Output
+
+From `READY`:
+
+```
+OK MOVING n
+OK AT_SLOT n
+OK GATE_OPEN
+OK GATE_CLOSED
+OK DROPPED n        ← terminal success
+OK READY
+```
+
+Failures: every `MOVE_SLOT` failure (`ERR INVALID_SLOT`, `NOT_HOMED`, `BUSY`, `INVALID_STATE`,
+`MOTOR_FAULT`, `STOPPED`, `UNKNOWN_COMMAND`) plus:
+
+| Message | Meaning |
+|---|---|
+| `ERR NO_PILL` | Only with a drop sensor: no pill passed the sensor during the release (container empty or jammed). Sent after `OK GATE_CLOSED`; the device then returns to `READY` (`OK READY`). |
+
+Acceptance (§7): same row as `DISPENSE_SLOT`. Argument validation first (`ERR INVALID_SLOT` in every state).
+
+### 12.3 Interruption
+
+* `STOP` / cancel button **during motion or settle** → `ERR STOPPED`, `OK STOPPED` — the release
+  never happened.
+* The release itself is atomic: a `STOP` received during it is processed after `OK DROPPED n` /
+  `ERR NO_PILL` and `OK READY`.
+* Host rule: if `ERR STOPPED` or a reset (`EVENT BOOT`) arrives **after** `OK GATE_OPEN`, a pill may
+  have dropped → the host records the drop as **UNCERTAIN** (fail closed).
+
+### 12.4 STATUS additions
+
+`OK STATUS … proto=1.1 drop_sensor=<0|1>` — v1 devices omit `proto`. Hosts must ignore unknown keys.
+
+### 12.5 Host behaviour
+
+* Device reports `proto ≥ 1.1` → the host sends `DROP_SLOT n` (timeout 30 s).
+* Otherwise (v1 firmware) → `DISPENSE_SLOT n`, wait `drop_close_delay_ms` (default 1.5 s), `CLOSE_GATE`.
+* `OK DROPPED n` → the host decrements that container's pill count. `ERR NO_PILL` → the host sets it
+  to 0 and notifies "container empty". No sensor → `OK DROPPED` means "release cycle completed".
+
+### 12.6 Hardware mapping guidance
+
+| Mechanism | `MOVE`/`AT_SLOT` | "gate" (release) |
+|---|---|---|
+| Carousel (stepper) over one chute + trapdoor servo | stepper positions container `n` over the chute | trapdoor servo |
+| 3 fixed containers, one dispensing wheel/servo each | no motion (report `OK MOVING n`, `OK AT_SLOT n` immediately) | servo of container `n` rotates one pocket |
+| Drop sensor (optional, recommended) | – | IR break-beam in the chute sampled during the release |

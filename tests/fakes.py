@@ -52,11 +52,18 @@ class FakeHardware:
         connected: bool = True,
         state: DeviceState = DeviceState.READY,
         homed: bool = True,
+        pills: int = 20,
+        drop_sensor: bool = True,
+        proto: str | None = "1.1",
     ) -> None:
         self.num_slots = num_slots
         self.sent: list[str] = []
         self.started = False
         self.closed = False
+        self.reconnects = 0
+        #: v1.1 physical pill counts per container (DROP_SLOT decrements; 0 + sensor -> ERR NO_PILL).
+        self.pills: dict[int, int] = {s: pills for s in range(num_slots)}
+        self.drop_sensor = drop_sensor
         self._snap = DeviceSnapshot(
             mode="fake",
             port="fake://",
@@ -66,8 +73,10 @@ class FakeHardware:
             homed=homed,
             slot=0 if homed else None,
             gate=GateState.CLOSED,
-            fw_version="fake-1.0",
+            fw_version="fake-1.1",
             num_slots_reported=num_slots,
+            proto=proto,
+            drop_sensor=drop_sensor,
         )
         self._scripts: dict[CommandName, deque[Any]] = defaultdict(deque)
         self._listeners: list[Callable[[Message], None]] = []
@@ -148,6 +157,17 @@ class FakeHardware:
     def close_gate(self) -> CommandResult:
         return self._run(Command.close_gate())
 
+    def drop_slot(self, slot: int) -> CommandResult:
+        """v1.1 ``DROP_SLOT n`` (this fake always speaks v1.1, regardless of ``proto``)."""
+        return self._build_and_run(lambda: Command.drop_slot(slot, self.num_slots), CommandName.DROP_SLOT)
+
+    def set_pills(self, slot: int, count: int) -> None:
+        self.pills[slot] = count
+
+    def reconnect(self) -> bool:
+        self.reconnects += 1
+        return self.snapshot().mode != "none"
+
     def send_raw(self, line: str) -> CommandResult:
         parsed = parse_command(line, self.num_slots)
         if parsed.command is None:
@@ -194,7 +214,9 @@ class FakeHardware:
                 self._snap = replace(self._snap, in_flight=cmd.to_line())
             if cmd.name in self._holds:
                 self._holds.discard(cmd.name)
-                if cmd.slot is not None and cmd.name in (CommandName.MOVE_SLOT, CommandName.DISPENSE_SLOT):
+                if cmd.slot is not None and cmd.name in (
+                    CommandName.MOVE_SLOT, CommandName.DISPENSE_SLOT, CommandName.DROP_SLOT,
+                ):
                     self.set_state(state=DeviceState.MOVING, target_slot=cmd.slot, slot=None)
                 self.holding.set()
                 self._release.wait(timeout=30)
@@ -283,6 +305,21 @@ class FakeHardware:
             self.set_state(gate=GateState.CLOSED, state=new_state)
             msgs = [_msg("OK", "GATE_CLOSED")] + ([_msg("OK", "READY")] if was_open else [])
             return CommandResult(cmd, True, Ok.GATE_CLOSED.value, tuple(msgs))
+        if n is CommandName.DROP_SLOT:
+            if busy:
+                return err(Err.BUSY)
+            if s.gate is GateState.OPEN:
+                return err(Err.INVALID_STATE)
+            if unhomed:
+                return err(Err.NOT_HOMED)
+            slot = int(cmd.slot)  # type: ignore[arg-type]
+            self.set_state(state=DeviceState.READY, slot=slot, gate=GateState.CLOSED)
+            release = (_msg("OK", f"MOVING {slot}"), _msg("OK", f"AT_SLOT {slot}"),
+                       _msg("OK", "GATE_OPEN"), _msg("OK", "GATE_CLOSED"))
+            if self.drop_sensor and self.pills.get(slot, 0) <= 0:
+                return CommandResult(cmd, False, Err.NO_PILL.value, release + (_msg("ERR", "NO_PILL"),))
+            self.pills[slot] = max(0, self.pills.get(slot, 0) - 1)
+            return CommandResult(cmd, True, Ok.DROPPED.value, release + (_msg("OK", f"DROPPED {slot}"),))
         raise AssertionError(f"unhandled command {cmd}")
 
 
@@ -404,6 +441,81 @@ def seed_minimal(db, settings, *, now: datetime | None = None) -> dict[str, Any]
         }
 
 
+class FakeDropHardware(FakeHardware):
+    """v2 default device: 3 containers, 20 pills each, drop sensor, protocol 1.1."""
+
+    def __init__(self, num_slots: int = 3, **kw: Any) -> None:
+        super().__init__(num_slots, **kw)
+
+
+def seed_v2(db, settings, *, now: datetime | None = None, pills: int = 20,
+            cooldown_minutes: int = 60) -> dict[str, Any]:
+    """Raw-ORM v2 seed (no service code): patient + family + doctor accounts (no passwords),
+    care links, a device bound to the patient with ``settings.num_slots`` containers, three
+    confirmed demo medications in slots 0, 1, 2 (``pills`` each) and daily schedules
+    08:00 (med 0), 13:00 (med 1), 20:00 (med 2), created by the doctor.
+
+    Returns ids: {patient_id, family_id, doctor_id, device_id, med_ids, compartment_ids,
+    schedule_ids, link_code}.
+    """
+    from tactidose.db.models import (
+        CareLink, Compartment, Device, Medication, Role, Schedule, User, utcnow,
+    )
+
+    created = now or utcnow() - timedelta(days=2)
+    catalog = [
+        ("Vitamin C (demo candy)", "1 piece", "Take one piece."),
+        ("Calcium (demo token)", "1 token", "Take with water."),
+        ("Omega-3 (demo candy)", "1 piece", "Take with dinner."),
+    ]
+    with db.session() as s:
+        patient = User(display_name="Alex Rivera", role=Role.PATIENT.value, email="alex@test.tactidose",
+                       link_code="ALEX2026", created_at=created)
+        family = User(display_name="Sam Rivera", role=Role.FAMILY.value, email="sam@test.tactidose",
+                      created_at=created)
+        doctor = User(display_name="Dr. Lee", role=Role.DOCTOR.value, email="dr.lee@test.tactidose",
+                      created_at=created)
+        s.add_all([patient, family, doctor])
+        s.flush()
+        s.add_all([
+            CareLink(caregiver_id=family.user_id, patient_id=patient.user_id, relationship_kind="family"),
+            CareLink(caregiver_id=doctor.user_id, patient_id=patient.user_id, relationship_kind="doctor"),
+        ])
+        dev = Device(device_id=settings.device_id, user_id=patient.user_id, name="Test unit",
+                     num_slots=settings.num_slots, manual_cooldown_minutes=cooldown_minutes,
+                     created_at=created)
+        s.add(dev)
+        s.flush()
+        comps = [Compartment(device_id=dev.device_id, slot_number=i, active=True, pill_count=pills,
+                             capacity=30, low_stock_threshold=3) for i in range(settings.num_slots)]
+        s.add_all(comps)
+        meds = []
+        for name, strength, instr in catalog[: settings.num_slots]:
+            m = Medication(user_id=patient.user_id, name=name, strength=strength, instructions_text=instr,
+                           warnings=["Demo only"], source="demo_seed", confirmed_by_user=True,
+                           confirmed_by="test", confirmed_at=created, created_at=created)
+            s.add(m)
+            meds.append(m)
+        s.flush()
+        for comp, med in zip(comps, meds):
+            comp.medication_id = med.medication_id
+        times = ["08:00", "13:00", "20:00"]
+        scheds = [Schedule(medication_id=m.medication_id, time_of_day=t, created_at=created,
+                           created_by_user_id=doctor.user_id) for m, t in zip(meds, times)]
+        s.add_all(scheds)
+        s.flush()
+        return {
+            "patient_id": patient.user_id,
+            "family_id": family.user_id,
+            "doctor_id": doctor.user_id,
+            "device_id": dev.device_id,
+            "med_ids": [m.medication_id for m in meds],
+            "compartment_ids": [c.compartment_id for c in comps],
+            "schedule_ids": [sc.schedule_id for sc in scheds],
+            "link_code": "ALEX2026",
+        }
+
+
 def wait_until(predicate: Callable[[], bool], timeout: float = 5.0, interval: float = 0.01) -> bool:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -413,4 +525,7 @@ def wait_until(predicate: Callable[[], bool], timeout: float = 5.0, interval: fl
     return predicate()
 
 
-__all__ = ["FakeHardware", "FakeSpeaker", "FakeExtractor", "seed_minimal", "wait_until", "dtime"]
+__all__ = [
+    "FakeHardware", "FakeDropHardware", "FakeSpeaker", "FakeExtractor",
+    "seed_minimal", "seed_v2", "wait_until", "dtime",
+]

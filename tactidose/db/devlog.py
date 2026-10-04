@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -17,7 +18,9 @@ def log_event(
     detail: dict[str, Any] | None = None,
     *,
     event_id: int | None = None,
+    at: datetime | None = None,
 ) -> DeviceLog:
+    """Append one audit row. Pass ``at=clock.now()`` so rows follow the demo clock."""
     row = DeviceLog(
         device_id=device_id,
         category=category.value if isinstance(category, LogCategory) else str(category),
@@ -25,5 +28,7 @@ def log_event(
         detail=detail or {},
         event_id=event_id,
     )
+    if at is not None:
+        row.created_at = at
     session.add(row)
     return row

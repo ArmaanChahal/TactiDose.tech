@@ -22,7 +22,7 @@ any thread; ``sync_once``/``status``/``report``/``start``/``close`` never raise.
 Tables (``ensure_schema``): column names are the upper-cased keys of
 ``db.outbox.adherence_payload`` (+ ``SYNCED_AT``); every ``*_AT`` column is a
 ``TIMESTAMP_NTZ`` holding UTC. Named analytics queries live in
-``analytics/snowflake_queries.sql`` (blocks introduced by ``-- name:`` and
+``snowflake_queries.sql`` (shipped next to this module; blocks introduced by ``-- name:`` and
 ``-- description:``) and are run by :meth:`SnowflakeSync.report`.
 """
 
@@ -476,8 +476,10 @@ def parse_named_queries(text: str) -> list[NamedQuery]:
 
 
 def default_queries_path() -> Path | None:
-    """``analytics/snowflake_queries.sql`` next to the package (repo checkout) or in the CWD."""
+    """``snowflake_queries.sql`` shipped inside the package (next to this module); falls back to
+    ``analytics/snowflake_queries.sql`` in a repo checkout or the CWD (older layouts)."""
     candidates = (
+        Path(__file__).with_name("snowflake_queries.sql"),
         Path(__file__).resolve().parents[2] / "analytics" / "snowflake_queries.sql",
         Path.cwd() / "analytics" / "snowflake_queries.sql",
     )
@@ -490,7 +492,7 @@ def default_queries_path() -> Path | None:
 def load_named_queries(path: Path | None = None) -> list[NamedQuery]:
     target = path or default_queries_path()
     if target is None:
-        raise FileNotFoundError("analytics/snowflake_queries.sql not found")
+        raise FileNotFoundError("snowflake_queries.sql not found")
     return parse_named_queries(Path(target).read_text(encoding="utf-8"))
 
 

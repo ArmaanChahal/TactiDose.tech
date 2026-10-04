@@ -1,325 +1,311 @@
-# TactiDose host software — architecture & module contracts
+# TactiDose — architecture v2 (product structure of 2026-10-03)
 
-Audience: the software team (and the agents/people implementing each module).
-Read with `docs/SERIAL_PROTOCOL.md` (hardware contract) and `docs/API.md` (HTTP contract).
+Audience: the software team and the engineers/agents implementing each module.
+Read with `docs/SERIAL_PROTOCOL.md` (hardware contract, v1.1) and `docs/API.md` (HTTP contract, v2).
+Where this document conflicts with the original handoff, **this document wins**.
 
-## 1. Principles (from the handoff, made concrete)
+## 1. Product structure
 
-1. **AI interprets, deterministic code authorizes and actuates** (§33). Gemini, Vosk and
-   ElevenLabs only produce *data*. Eligibility, duplicate prevention, slot mapping and
-   motor commands live in `medication/` and `hardware/` and never depend on model output.
-2. **Fail closed.** If the database, the hardware link or the outcome of a command is
-   uncertain, nothing is dispensed and the user is told to ask for assistance. An uncertain
-   dispense is never recorded as successful and never retried automatically.
-3. **Speech is a request, not an authorization.** A recognized phrase becomes an `Intent`;
-   the schedule + dose state decide whether anything moves.
-4. **Offline first.** SQLite + simulator/serial + Vosk + cached/offline TTS run with no
-   internet. Gemini, ElevenLabs, TiDB and Snowflake are optional layers.
-5. **One serialization point.** All user actions flow through the assistant's single action
-   worker; the dose service additionally holds a lock and uses a DB compare-and-set, so a
-   dose can never be dispensed twice even under concurrent requests.
+| Area | Behaviour |
+|---|---|
+| Device | ESP32 with **3 pill containers**. The host asks it to **drop one pill** from a container (`DROP_SLOT n`). |
+| Drops | Triggered by the **schedule** (automatic, even if the patient forgets), the patient's **Drop button** in the app, or the **AI agent** on the patient's behalf. Every request and outcome is stored (`pill_drops`). Every successful drop decrements that container's `pill_count`. |
+| Cooldown | **One global cooldown** per device: after *any* drop, *manual/agent/button* drops of *any* pill are refused for `devices.manual_cooldown_minutes` (default 60). Scheduled drops are not blocked by it. |
+| Double-dose guard | A scheduled dose is **satisfied** by any drop of the same medication from `scheduled_at − dose_early_minutes` onward; a satisfied dose is never auto-dropped again. |
+| Notifications | "Pill dropped" (and problems: denied, failed, uncertain, low stock, empty, missed) are stored per recipient, pushed live (SSE) and shown in the app. |
+| Agent | The patient talks to it (voice or text). It checks the database (status, history) and decides whether to request a pill; the deterministic rules above have the final say. All patient↔agent messages, tool calls and results are stored. |
+| Reports | PDF for the last *N* days (drops, schedule adherence, inventory, conversation summary), stored in the DB, viewable in both portals, emailable to the doctor. |
+| Portals | **Patient** and **doctor/family** with login. Caregivers link to a patient with the patient's database ID + link code. Only doctor/family can edit schedules, cooldown, containers/refills and medications. |
+| Optional extras | Gemini label scanning, Snowflake analytics, TiDB, blind-friendly kiosk screen, offline device-side voice loop — kept behind config, off the main flow. |
 
-## 2. Package map and ownership
+## 2. Principles
+
+1. **AI interprets; deterministic code authorizes and actuates.** The agent can only call
+   `request_pill`; `DropService` re-checks every rule. A model mistake cannot over-dispense.
+2. **Fail closed.** DB unreadable, device unavailable or a drop outcome uncertain ⇒ no (further)
+   drop; uncertain drops are flagged `needs_review` and the cooldown starts as if it dropped.
+3. **Every pill is accounted for.** One `pill_drops` row per request (DENIED included); counts are
+   changed in the same transaction as the drop record.
+4. **Least privilege.** Every `/api/patients/{pid}` call checks the session user against
+   `care_links`; SSE is filtered per user; only patients' conversations are stored.
+5. **Offline first.** SQLite + simulator/serial + rule-based agent + offline TTS/STT run with no
+   internet; Gemini, ElevenLabs, SMTP, TiDB and Snowflake are optional layers.
+
+## 3. Package map (v2) and ownership
 
 ```
 tactidose/
-├── __main__.py              CLI (run, simulator, serial-console, hw-test, init-db, seed-demo, doctor, ...)   [app]
-├── app.py                   FastAPI app factory, Services container, lifespan wiring                        [app]
-├── config.py                Settings (env / .env)                                                           [foundation]
-├── core/
-│   ├── bus.py               EventBus (pub/sub, SSE feed)                                                    [foundation]
-│   ├── clock.py             Clock (timezone, demo time travel)                                              [foundation]
-│   ├── interfaces.py        Cross-module protocols and outcome dataclasses                                  [foundation]
-│   ├── assistant.py         Intent orchestrator: action worker, dialogue, gate timer, button mapping        [voice]
-│   └── phrases.py           Every spoken sentence (single place; critical ones pre-cached)                  [voice]
-├── hardware/
-│   ├── protocol.py          Wire format, parsing, classification (pure)                                     [foundation]
-│   ├── conformance.json     Shared protocol scenarios                                                       [foundation]
-│   ├── commands.py          Re-exports Command builders (handoff §32 layout)                                [hardware]
-│   ├── transports.py        Transport abstraction: pyserial (COMx, socket://, loop://) + in-process sim      [hardware]
-│   ├── ports.py             ESP32 USB auto-detection (VID/PID)                                              [hardware]
-│   ├── serial_client.py     HardwareClient (implements HardwareController), NullHardware, create_hardware()  [hardware]
-│   ├── simulator.py         VirtualESP32 (tick-driven firmware twin) + SimulatedDevice (real-time + faults)
-│   │                        + ConformanceSimTarget                                                          [hardware]
-│   ├── conformance.py       Conformance runner, ConformanceTarget protocol, CLI                             [foundation]
-│   ├── conformance_native.py NativeTarget: drives the firmware/native harness over stdin/stdout             [firmware]
-│   └── selftest.py          `hw-test` checklist against a real board (handoff §29) + SerialConformanceTarget [hardware]
-├── db/
-│   ├── models.py, types.py, session.py, outbox.py, devlog.py                                                [foundation]
-│   └── seed.py              Demo data (candy/tokens only)                                                   [app]
+├── app.py                    Services container, FastAPI app factory, lifespan, page routes          [platform]
+├── __main__.py               CLI                                                                      [platform]
+├── config.py · core/{bus,clock,interfaces}.py · db/* · hardware/protocol.py · conformance.*            [foundation]
+├── hardware/                 serial client, simulator (+DROP_SLOT, pill counts, drop sensor)           [hardware]
 ├── medication/
-│   ├── scheduler.py         Schedules -> DoseEvents (materialize, DUE/MISSED transitions)                   [domain]
-│   ├── safety.py            Deterministic eligibility rules (pure functions)                                [domain]
-│   ├── dispense.py          DoseService (implements DoseServiceAPI) + caregiver dose operations             [domain]
-│   ├── compartments.py      Slot <-> medication assignment                                                  [domain]
-│   ├── catalog.py           Medication CRUD (confirmed records only)                                        [domain]
-│   ├── onboarding.py        Label scan -> UNCONFIRMED LabelScan -> human confirm -> Medication              [domain]
-│   └── analytics.py         Local adherence analytics (works without Snowflake)                             [integrations]
-├── voice/
-│   ├── intents.py           Deterministic text -> Intent parser + Vosk grammar                              [voice]
-│   └── recognizer.py        Vosk + sounddevice listener (half-duplex mute while speaking)                   [voice]
-├── audio/
-│   ├── speaker.py           SpeakerService (implements Speaker): queue, captions, fallback chain            [voice]
-│   ├── cache.py             TTS disk cache                                                                  [voice]
-│   ├── playback.py          PCM/WAV playback (sounddevice, winsound fallback)                               [voice]
-│   └── offline_tts.py       OS speech (Windows SAPI via PowerShell, macOS `say`, Linux `espeak`)            [voice]
-├── integrations/
-│   ├── elevenlabs.py        ElevenLabs REST client (httpx)                                                  [voice]
-│   ├── gemini.py            GeminiLabelExtractor, FakeLabelExtractor, create_label_extractor()              [integrations]
-│   ├── tidb.py              TiDB helpers (connection check, doctor info)                                    [integrations]
-│   └── snowflake.py         Outbox -> Snowflake sync worker, DDL, analytics report                          [integrations]
-├── api/                     FastAPI routers (see docs/API.md)                                               [app]
-└── ui/static/               Kiosk, caregiver, demo panel (vanilla HTML/CSS/JS, no CDN)                       [ui]
-firmware/                    Reference ESP32 firmware + native test harness                                  [firmware]
-analytics/snowflake_queries.sql                                                                              [integrations]
-tests/                       pytest; files are prefixed by owner: test_hw_*, test_med_*, test_voice_*, ...
+│   ├── drops.py              DropService (implements DropServiceAPI): rules, inventory, auto-drops      [domain]
+│   ├── notifications.py      NotificationService (implements NotificationServiceAPI)                   [domain]
+│   ├── scheduler.py          schedules -> dose_events (unchanged semantics) + caregiver-only editing    [domain]
+│   ├── compartments.py       containers: assignment + inventory (refill, thresholds)                    [domain]
+│   ├── catalog.py · onboarding.py · errors.py · safety.py (v1 helpers kept where useful)               [domain]
+│   ├── dispense.py           v1 DoseService — superseded by drops.py; kept only for the optional kiosk [domain]
+│   └── analytics.py          local adherence analytics (used by reports and the optional dashboard)    [integrations]
+├── agent/
+│   ├── service.py            AgentService (implements AgentServiceAPI): conversation store + routing    [agent]
+│   ├── tools.py              tool schemas + executor bound to one patient                              [agent]
+│   ├── gemini_agent.py       Gemini function-calling loop (google-genai)                               [agent]
+│   ├── rules_agent.py        offline deterministic agent (voice/intents.py based)                       [agent]
+│   └── voice.py              server-side STT (Vosk, PCM16) + reply TTS to WAV (ElevenLabs -> offline)  [agent]
+├── reports/
+│   ├── data.py · stats.py    gather + compute report data                                               [reports]
+│   ├── narrative.py          Gemini factual summary of conversations, rules fallback                   [reports]
+│   ├── pdf.py                PDF rendering (fpdf2)                                                      [reports]
+│   ├── mailer.py             SMTP send with PDF attachment; .eml to data/outbox when SMTP is absent     [reports]
+│   └── service.py            ReportService (implements ReportServiceAPI)                                [reports]
+├── auth/
+│   ├── passwords.py          scrypt hashing (stdlib)                                                    [platform]
+│   ├── service.py            AuthService (implements AuthServiceAPI): register/login/sessions/links    [platform]
+│   └── deps.py               FastAPI dependencies: current_user, require_patient_access, ...            [platform]
+├── api/                      routers per docs/API.md v2, SSE with per-user filtering                   [platform]
+├── voice/ · audio/ · integrations/ · core/{assistant,phrases}.py   (wave 1, reused)                      [agent / extras]
+└── ui/static/                login, patient portal, care portal, demo panel, optional kiosk           [ui]
+firmware/                     reference ESP32 firmware (+DROP_SLOT, 3 containers)                        [hardware]
 ```
 
-## 3. Runtime and threading model
+## 4. Runtime and threading
 
-| Thread | Owner | Does |
-|---|---|---|
-| uvicorn event loop | app | HTTP + SSE. Blocking work runs in the threadpool. |
-| `hw-reader` | HardwareClient | Reads serial lines, updates the DeviceSnapshot, resolves the in-flight command, dispatches EVENTs. |
-| `hw-supervisor` | HardwareClient | Connect / handshake (PING+STATUS) / heartbeat / reconnect with backoff / auto-home. |
-| `sim-device` | SimulatedDevice | Ticks the VirtualESP32 in (scaled) real time; serves the in-process transport. |
-| `assistant` | Assistant | Single action worker: pops intents, calls DoseService (blocking), speaks replies, runs the gate-open timer. |
-| `speaker` | SpeakerService | Plays queued utterances in order. Exposes `is_speaking` for half-duplex muting. |
-| `voice` (+ PortAudio callback) | VoiceRecognizer | Mic -> Vosk -> text -> `Assistant.handle_text`. Drops audio while speaking. |
-| `scheduler` | app (calls Scheduler.tick) | Every `scheduler_tick_s`: materialize events, SCHEDULED->DUE, ->MISSED. |
-| `analytics-sync` | SnowflakeSync | Every `analytics_sync_interval_s`: drain outbox -> MERGE into Snowflake. |
-
-Rules: hardware EVENT callbacks run on `hw-reader` and must only enqueue work.
-`HardwareController.stop()` is the only hardware call allowed to bypass the command lock.
-
-## 4. Construction (wiring contract used by `app.py`)
-
-```python
-settings = Settings()
-clock    = Clock(settings.timezone)
-bus      = EventBus()
-db       = Database(settings); db.create_all()
-
-hardware, sim = create_hardware(settings, bus=bus, clock=clock)   # hardware/serial_client.py
-#   hardware_mode="sim"    -> (HardwareClient over in-process SimulatedDevice transport, SimulatedDevice)
-#   hardware_mode="serial" -> (HardwareClient over pyserial/auto-detected port, None)
-#   hardware_mode="none"   -> (NullHardware, None)  # every command -> NOT_CONNECTED
-
-compartments = CompartmentService(db, settings, bus=bus)          # ensure_device() creates user/device/slots
-catalog      = MedicationCatalog(db, settings, clock, bus=bus)
-scheduler    = Scheduler(db, clock, settings, bus=bus)
-dose         = DoseService(db, hardware, clock, settings, bus=bus)
-extractor    = create_label_extractor(settings)                   # None when disabled
-onboarding   = OnboardingService(db, extractor, catalog, settings, clock, bus=bus)
-speaker      = SpeakerService(settings, bus)                      # ElevenLabs -> cache -> offline -> captions only
-assistant    = Assistant(dose, speaker, bus, settings, clock)
-hardware.add_event_listener(assistant.on_hardware_event)
-recognizer   = VoiceRecognizer(settings, on_text=assistant.handle_voice_text,
-                               is_muted=lambda: speaker.is_speaking, bus=bus)
-analytics    = SnowflakeSync(db, settings, clock, bus=bus) if settings.snowflake_configured else None
-
-startup: compartments.ensure_device(); dose.recover_on_startup(); scheduler.tick();
-         hardware.start(); speaker.start(); assistant.start(); recognizer.start(); analytics.start()
-shutdown in reverse order; every start()/close() is idempotent and must not raise.
-```
-
-All services accept fakes in tests (`FakeHardware`, `FakeSpeaker`, `FakeExtractor` live in
-`tests/fakes.py`).
-
-### Constructor / method signatures (normative)
-
-```python
-# hardware/simulator.py
-@dataclass
-class SimConfig:
-    num_slots: int = 6; steps_per_rev: int = 3200; initial_offset_steps: int = 1600
-    max_speed_sps: float = 1600; accel_sps2: float = 3200; homing_speed_sps: float = 400
-    settle_ms: int = 300; gate_travel_ms: int = 400; home_timeout_ms: int = 20000
-    gate_max_open_ms: int = 120000; debounce_ms: int = 30; sensor_zone_steps: int = 40
-    fw_version: str = "sim-1.0.0"; home_sensor: str = "ok"   # ok | dead | none
-class VirtualESP32:                       # deterministic, no threads, no wall clock
-    def __init__(self, config: SimConfig | None = None) -> None
-    def boot(self, sensor: str | None = None) -> None
-    def feed_line(self, line: str) -> None
-    def tick(self, ms: int = 1) -> None
-    def set_button(self, name: str, pressed: bool) -> None      # "CONFIRM" | "CANCEL"
-    def set_sensor(self, mode: str) -> None                     # "ok" | "dead"
-    def set_jam(self, on: bool) -> None
-    def drain_output(self) -> list[str]                         # lines emitted since last drain
-    def physical(self) -> dict                                   # angle_deg, slot, gate_open, state, ...
-class SimulatedDevice:                    # real-time wrapper (thread) + fault injection
-    def __init__(self, settings: Settings, bus: EventBus | None = None, config: SimConfig | None = None)
-    def start(self) -> None; def close(self) -> None
-    def open_transport(self) -> Transport                       # in-process byte pipe
-    def set_fault(self, name: str, enabled: bool) -> None       # home_sensor_dead | motor_jam | unresponsive | brownout_on_gate | disconnect
-    def faults(self) -> dict[str, bool]
-    def press(self, name: str) -> None; def reboot(self) -> None; def physical(self) -> dict
-
-# hardware/serial_client.py
-class HardwareClient:                     # implements HardwareController
-    def __init__(self, settings, *, bus=None, clock=None, transport_factory: Callable[[], Transport] | None = None, mode: str = "serial")
-def create_hardware(settings, *, bus=None, clock=None) -> tuple[HardwareController, SimulatedDevice | None]
-
-# medication/*
-class CompartmentService:  __init__(db, settings, bus=None); ensure_device() -> None; list() -> list[dict]; assign(slot: int, medication_id: int | None) -> list[dict]
-class MedicationCatalog:   __init__(db, settings, clock, bus=None); list(include_inactive=False) -> list[dict]; get(id) -> dict;
-                           create(fields: dict, *, confirmed: bool, confirmed_by: str | None, source="manual", scan_id=None) -> dict;
-                           update(id, fields: dict, *, confirmed: bool, confirmed_by=None) -> dict; archive(id) -> None
-class Scheduler:           __init__(db, clock, settings, bus=None); tick() -> int; list_schedules() -> list[dict];
-                           create_schedule(medication_id, time_of_day, frequency="DAILY", days_of_week=None) -> dict;
-                           update_schedule(schedule_id, **fields) -> dict; deactivate_schedule(schedule_id) -> None
-class DoseService:         __init__(db, hardware, clock, settings, bus=None)   # implements DoseServiceAPI
-                           recover_on_startup() -> int; list_events(local_date: date | None = None) -> list[dict]
-                           resolve_review(event_id, *, accessed: bool, note: str | None, by: str | None) -> dict
-                           skip_dose(event_id, *, note=None, by=None) -> dict
-                           mark_taken_by_caregiver(event_id, *, by=None) -> dict
-                           present_compartment(slot: int, *, by=None) -> CommandResult      # caregiver loading mode
-                           finish_loading(slot: int, *, by=None) -> CommandResult
-                           create_demo_dose_now(medication_id: int | None = None) -> dict  # demo mode helper
-class OnboardingService:   __init__(db, extractor: LabelExtractor | None, catalog, settings, clock, bus=None)
-                           scan(image: bytes, mime_type: str) -> dict; list_scans(status=None) -> list[dict]
-                           confirm_scan(scan_id, fields: dict, *, confirmed: bool, confirmed_by=None) -> dict
-                           reject_scan(scan_id, *, by=None) -> dict
-# medication/analytics.py
-def local_summary(db, clock, settings, days: int = 7) -> dict
-
-# core/assistant.py
-class Assistant:           __init__(dose: DoseServiceAPI, speaker: Speaker, bus, settings, clock)
-                           start(); close()
-                           submit(intent: Intent, source: IntentSource, *, text: str = "", wait: bool = False, timeout: float = 60) -> Reply | None
-                           handle_text(text: str, source: IntentSource, confidence: float = 1.0, *, wait=False) -> Reply | None
-                           handle_voice_text(text: str, confidence: float) -> None
-                           on_hardware_event(msg: Message) -> None
-                           state() -> dict      # phase, last_reply, awaiting dose
-# voice/intents.py
-def parse_intent(text: str) -> ParsedIntent;   GRAMMAR_PHRASES: list[str]
-# voice/recognizer.py
-class VoiceRecognizer:     __init__(settings, *, on_text: Callable[[str, float], None], is_muted: Callable[[], bool], bus=None)
-                           start() -> bool (False = unavailable, logged + published, never raises); close(); status() -> dict
-# audio/speaker.py
-class SpeakerService:      __init__(settings, bus, *, tts=None, offline=None, player=None)   # implements Speaker
-                           warm_cache(texts: Iterable[str] | None = None) -> dict; status() -> dict
-# integrations/*
-class ElevenLabsClient:    __init__(api_key, voice_id, model_id, output_format, timeout_s); synthesize(text) -> bytes  # raises ElevenLabsError
-def create_label_extractor(settings) -> LabelExtractor | None
-class SnowflakeSync:       __init__(db, settings, clock, bus=None); start(); close(); sync_once() -> dict; status() -> dict; report() -> dict
-```
-
-## 5. Dose event lifecycle (deterministic)
-
-```
-             tick/now≥start              claim (CAS)               OK GATE_OPEN             "Taken"/button
-SCHEDULED ───────────────► DUE ───────────────────► DISPENSING ─────────────► DISPENSED ───────────────► TAKEN
-    │                       │                           │  ERR (definitive)          │
-    │                       │                           ├──────────► HARDWARE_ERROR ─┤ (retry allowed if
-    │                       │                           │  TIMEOUT/DISCONNECT        │  !needs_review and
-    │                       │                           ├──────────► HARDWARE_ERROR  │  attempts < max)
-    │                       │                           │  (needs_review = gate may be open → locked)
-    │                       │                           │  ERR STOPPED (user cancel) → back to DUE
-    └──────── now > end ────┴──────────────► MISSED (also HARDWARE_ERROR without review)
-caregiver: skip → CANCELLED · resolve review → DISPENSED (accessed) or DUE (not accessed)
-startup recovery: any DISPENSING → HARDWARE_ERROR(needs_review, "UNCERTAIN RESTART")
-```
-
-Window: `start = scheduled_at − dose_early_minutes`, `end = scheduled_at + dose_late_minutes`.
-
-**Eligibility (all must hold) — `medication/safety.py`:**
-1. `start ≤ now ≤ end`.
-2. status ∈ {SCHEDULED, DUE}, or HARDWARE_ERROR with `needs_review = False` and `attempts < max_dispense_attempts`.
-3. medication `active` and `confirmed_by_user`; schedule `active`.
-4. medication has an active compartment on this device with `0 ≤ slot < num_slots`
-   (resolved **now**, not at event generation).
-5. no event on this device is DISPENSING.
-6. the same medication was not DISPENSED/TAKEN within `min_dose_interval_minutes` (TOO_SOON).
-
-**Selection:** earliest `scheduled_at`, then lowest slot. **When nothing is eligible**, the
-decision is, in priority order: IN_PROGRESS → BLOCKED(NEEDS_REVIEW) → DUPLICATE (an in-window
-dose is DISPENSED/TAKEN, or TOO_SOON) → BLOCKED(NO_COMPARTMENT/UNCONFIRMED/INACTIVE) → NOTHING_DUE.
-
-**Claim:** `UPDATE dose_events SET status='DISPENSING', attempts=attempts+1 … WHERE event_id=:id
-AND status=:expected` — proceed only if exactly one row changed.
-
-**Hardware preparation before the claim** (no dose state change on failure → HARDWARE_UNAVAILABLE):
-not connected → refuse; FAULT → refuse (caregiver re-home); SAFE_STOP/BOOT/not homed → `HOME`
-if `hw_auto_home`; GATE_OPEN → `CLOSE_GATE`; HOMING → wait for READY up to `timeout_home_s`.
-
-**Outcome mapping of `DISPENSE_SLOT n`:**
-
-| Result | Dose becomes | needs_review | User hears |
-|---|---|---|---|
-| `OK GATE_OPEN` | DISPENSED (`dispensed_at`) | – | ready + how to confirm |
-| `ERR STOPPED` | DUE | – | cancelled, nothing dispensed |
-| other `ERR …`, `DEVICE_RESET`, `NOT_CONNECTED` | HARDWARE_ERROR | only if attempts ≥ max | could not prepare, ask for assistance |
-| `TIMEOUT`, `DISCONNECTED` (uncertain) | HARDWARE_ERROR | **True** | could not prepare, ask for assistance |
-
-Every status change: same transaction → `enqueue_adherence(...)` (outbox) and `log_event(...)`
-(device_log); after commit → `bus.publish(Topic.DOSE_UPDATED, ...)`.
-
-**Confirm ("Taken"/button):** the most recent DISPENSED dose on the device with
-`dispensed_at ≥ now − confirm_window_minutes` → TAKEN (`confirmed_taken_at`), then close the gate
-if it is open. If none: ALREADY_CONFIRMED when the latest accessed dose is TAKEN within the window,
-else NOTHING_TO_CONFIRM.
-
-**Cancel:** if a long-running command is in flight → `interrupt()` sends `STOP` immediately
-(the in-flight dispense returns `ERR STOPPED` → dose back to DUE); if the gate is open →
-`CLOSE_GATE` (dose stays DISPENSED — it was accessible, so duplicate prevention still applies).
-
-## 6. Assistant behaviour (dialogue contract)
-
-* All intents go through `Assistant.submit` → one worker → handler → `Reply` → `Speaker.say` +
-  `Topic.SPOKEN` + `Topic.ASSISTANT_STATE`. `REPEAT` replays the last reply.
-* `CHECK_DUE` announces what is due and asks for consent ("Say 'dispense' or press the big
-  button"); it dispenses directly only when `check_due_auto_dispense=True`.
-* Before motion the assistant says "Preparing … please keep your hands clear" (via the
-  `on_motion_start` callback of `dispense_next`).
-* After DISPENSED, a gate timer (`gate_open_timeout_s`, monotonic) enqueues `GATE_TIMEOUT`
-  → close gate → "I've closed the compartment. If you took your dose, say 'taken'."
-* Hardware events: `EVENT CONFIRM_BUTTON` → `PRIMARY_ACTION` (confirm if awaiting confirmation,
-  else dispense if due, else check); `EVENT CANCEL_BUTTON` → `CANCEL`;
-  `EVENT BOOT` → notice "device restarted"; unsolicited FAULT → "The device needs attention".
-* `CANCEL` must take effect immediately even while the worker is blocked in a dispense:
-  `submit()` calls `dose.interrupt(source)` synchronously before enqueueing.
-* Voice: text below `voice_min_confidence` or with no intent is ignored silently unless it
-  contained real words (then "Sorry, I didn't catch that…"); negated phrases ("I haven't taken
-  it") never confirm.
-* Every sentence lives in `core/phrases.py`; `CRITICAL_PHRASES` (static, no names) is what
-  `warm-tts-cache` pre-renders for offline use. Handoff-mandated wording is kept verbatim:
-  "That scheduled dose has already been accessed.", "I could not prepare the compartment.
-  Please ask for assistance.", "Cancelled.", "Please ask for assistance.", "Network unavailable.",
-  "Hardware error.", "You do not have a scheduled medication due right now."
-
-## 7. Conformance harness protocol (Python runner ↔ native firmware build)
-
-The native harness binary (`firmware/native/`) wraps the firmware core with a fake HAL and
-simulated time. It reads commands on **stdin**, one per line, and writes to **stdout**:
-
-| stdin | Meaning |
+| Thread | Does |
 |---|---|
-| `> <text>` | Deliver `<text>` to the firmware as one serial line (`>` alone = empty line). |
-| `!reset` | Fresh device: physical carousel at the initial offset (1600 steps before home), sensor ok, jam off, buttons released, firmware not booted, sim time 0. Sent by the runner before every scenario. |
-| `!boot ok\|dead\|none` | (Re)initialise the firmware core (`setup()`) with that home-sensor mode; keeps the physical position. |
-| `!tick <ms>` | Advance simulated time `<ms>` milliseconds, calling `loop()` every 1 ms. |
-| `!button CONFIRM\|CANCEL 1\|0` | Set the button pin pressed (1) / released (0). |
-| `!sensor ok\|dead` | Home sensor works / never triggers. |
-| `!jam 1\|0` | Motor jammed: commanded steps do not move the carousel and moves never complete. |
-| `!quit` | Exit. |
+| uvicorn loop | HTTP + SSE. Blocking work (DB, drops, Gemini, PDF) runs in the threadpool. |
+| `hw-reader` / `hw-supervisor` | serial link (unchanged from v1). |
+| `sim-device` | simulator in sim mode. |
+| `scheduler` | every `scheduler_tick_s` (and immediately after schedule edits / demo clock travel): `Scheduler.tick()` then `DropService.run_scheduled_drops()`. |
+| `speaker` / `voice` | optional device-side voice loop (laptop mic/speaker) feeding `AgentService.chat` for the device's patient. |
+| `analytics-sync` | optional Snowflake outbox sync. |
 
-stdout: every firmware serial line verbatim (without `\r`), and after processing each stdin line
-exactly one `!ack <sim_time_ms>` line. The runner treats lines starting with `!` as harness
-lines and lines starting with `#` as firmware debug output.
+`DropService` serialises all hardware drops with one lock (non-blocking acquire ⇒ `DENIED/IN_PROGRESS`)
+and a DB claim; `interrupt()` (STOP) bypasses it.
 
-The Python `VirtualESP32` exposes the same operations as methods, so `hardware/conformance.py`
-drives both through one `ConformanceTarget` interface; a third target drives a real board over
-serial for scenarios marked `hardware_safe` (real time, no fault injection).
+## 5. Drop rules (deterministic) — `medication/drops.py`
 
-## 8. Error-handling summary (handoff §30)
+`request_drop(patient_id, source, slot=None | medication_id=None, requested_by_user_id, conversation_id, dose_event_id)`
+
+Checks, in order (the first failing check produces a `DENIED` row with that reason; nothing is sent
+to the hardware):
+
+1. **Device** — the patient has a device (`devices.user_id`); else `DEVICE_UNAVAILABLE`.
+2. **Target** — resolve the container: by `slot` (0..num_slots-1) or by `medication_id` (its assigned
+   active compartment). Unknown ⇒ `UNKNOWN_MEDICATION`; slot without an active, *confirmed*
+   medication ⇒ `NO_MEDICATION`.
+3. **Pending review** — an `UNCERTAIN` drop with `needs_review` on this device ⇒ `NEEDS_REVIEW`
+   (a doctor/family member must resolve it first; prevents double dosing after a glitch).
+4. **Cooldown** (sources `manual`, `agent`, `button`) — `now < last_drop_at + cooldown` where
+   `last_drop_at` is the latest `DROPPED` *or* `UNCERTAIN` drop of **any** pill on the device ⇒
+   `COOLDOWN` with `cooldown_remaining_s` / `next_allowed_at`. Cooldown 0 disables the check.
+5. **Scheduled satisfaction** (source `schedule`) — the dose event is already `DISPENSED/TAKEN`, or
+   the same medication was `DROPPED/UNCERTAIN` at/after `scheduled_at − dose_early_minutes` ⇒
+   `ALREADY_SATISFIED` (the event is linked to that earlier drop and marked `DISPENSED`).
+6. **Inventory** — `pill_count <= 0` ⇒ `EMPTY` (+ `EMPTY` notification).
+7. **Concurrency** — the drop lock is held ⇒ `IN_PROGRESS`.
+8. **Hardware readiness** — not connected / `FAULT` ⇒ `DEVICE_UNAVAILABLE`; `SAFE_STOP`/unhomed ⇒
+   `HOME` first (if `hw_auto_home`); gate open ⇒ `CLOSE_GATE` first; failure ⇒ `DEVICE_UNAVAILABLE`.
+
+Then: insert the `pill_drops` row as *in flight* (`status='UNCERTAIN'`, `completed_at` NULL — so a
+crash mid-drop leaves an uncertain record, never a silent one), send `DROP_SLOT n` (or the v1
+emulation `DISPENSE_SLOT n` → wait `drop_close_delay_ms` → `CLOSE_GATE` when the device does not
+report `proto ≥ 1.1`), and finalise the row from `protocol.drop_certainty(result)`:
+
+| Hardware outcome | `pill_drops.status` | Inventory | Dose event (if scheduled / matching) | Notifications |
+|---|---|---|---|---|
+| DROPPED | `DROPPED` | `pill_count − 1` | `DISPENSED`, `drop_id`, `dispensed_at` | PILL_DROPPED (+ LOW_STOCK / EMPTY when crossing thresholds) |
+| NOT_DROPPED (`ERR …`) | `FAILED`, reason = code | unchanged | scheduled: `HARDWARE_ERROR`, retry at `now + auto_drop_retry_minutes` while in window | DROP_FAILED |
+| `ERR NO_PILL` | `FAILED`, reason `NO_PILL` | set to 0 (the container is physically empty) | as above | EMPTY |
+| UNCERTAIN | `UNCERTAIN`, `needs_review=True` | unchanged until reviewed | scheduled: `HARDWARE_ERROR`, `needs_review`, **no retry** | DROP_UNCERTAIN to caregivers |
+
+A manual/agent `DROPPED` drop also satisfies today's matching due/scheduled dose of that medication
+whose window has opened (so the auto-drop will not repeat it).
+
+Startup recovery: any `pill_drops` row left in-flight (no `completed_at`) ⇒ `UNCERTAIN` +
+`needs_review`. Caregiver resolution (`resolve_drop(dropped: bool)`) adjusts inventory and clears the
+review flag.
+
+Every state change: same transaction ⇒ `pill_drops`, `compartments.pill_count`, `dose_events`,
+`notifications`, `device_log`, `analytics_outbox` (optional); after commit ⇒ bus events.
+
+## 6. Scheduled auto-drops
+
+`run_scheduled_drops()` (scheduler thread): for each dose event on the device with
+`scheduled_at ≤ now ≤ scheduled_at + dose_late_minutes`, status in {SCHEDULED, DUE, HARDWARE_ERROR
+(without needs_review, `next_attempt_at ≤ now`)} and `devices.auto_drop_enabled` ⇒
+`request_drop(source="schedule", dose_event_id=…)`, oldest first, one at a time. After the window
+closes, undispensed doses become `MISSED` (Scheduler.refresh) with a MISSED_DOSE notification to
+the patient and caregivers.
+
+## 7. Conversational agent — `agent/`
+
+* `AgentService.chat(patient_id, text, input_mode, conversation_id)`:
+  1. open/continue a `conversations` row (a new one when the last message is > 30 min old);
+  2. store the user message (`role="user"`, `input_mode`);
+  3. run the provider (`gemini` via function calling, or `rules`), executing tool calls through
+     `tools.py` bound to *this* patient (the model never chooses the patient id);
+  4. store every tool call (`role="tool"`, `tool_name`, `tool_args`, `tool_result`) and the final
+     reply (`role="assistant"`, `model`);
+  5. publish `agent` + (for drops) `drop` events; return `AgentReply`.
+* **Tools** (JSON-schema function declarations):
+  `get_patient_status()` → PatientStatus (containers, cooldown remaining, last drop, today's doses,
+  next scheduled); `get_recent_drops(days≤14)`; `request_pill(container_number? | medication_name?,
+  reason)` → DropOutcome (source `agent`); `confirm_pill_taken(medication_name?)` → marks the most
+  recent DISPENSED dose TAKEN (optional extra signal).
+* **System prompt rules:** you are the assistant inside the patient's pill dispenser; be brief and
+  clear (replies may be spoken; ≤ 3 short sentences); always call `get_patient_status` before
+  deciding about a pill; only `request_pill` when the patient asks for a pill (or confirms they
+  want one) and status says it is allowed; never claim a pill dropped unless the tool returned
+  DROPPED; explain refusals using the tool's message (cooldown time, empty container, already
+  dropped); never diagnose, recommend, change doses or suggest extra pills; for symptoms or
+  side-effects suggest contacting their doctor, and for emergencies (chest pain, trouble breathing,
+  overdose) tell them to call emergency services (911) immediately; never reveal other people's data.
+* **Rules agent (offline fallback):** `voice/intents.parse_intent` + keyword matching for container
+  numbers / medication names; same tools, same storage; deterministic replies.
+* **Voice:** browser mic → Web Speech API when available, otherwise 16 kHz PCM16 upload to
+  `/api/agent/transcribe` (Vosk, full vocabulary). Replies: `speak=true` renders WAV via the TTS chain
+  (ElevenLabs → cache → offline OS voice) served from `/api/agent/audio/{id}.wav`; the browser falls back
+  to `speechSynthesis`. The optional device-side loop (laptop mic + speaker) reuses VoiceRecognizer +
+  SpeakerService and routes text to `AgentService.chat` for the device's patient.
+
+## 8. Reports — `reports/`
+
+`ReportService.generate(patient_id, days, created_by_user_id)`:
+* **Data** for `[now − days, now]`: patient + device, medications/containers/inventory, schedules, dose
+  events (status counts, on-time vs late vs missed), all `pill_drops` (by source/status, denied
+  reasons, uncertain), notifications of kind LOW_STOCK/EMPTY/MISSED, conversations + messages.
+* **Stats** (stored in `reports.stats` JSON): scheduled doses, dropped (on time ≤ 15 min, late), missed,
+  adherence rate = dispensed ÷ (dispensed + missed) for scheduled doses, manual / agent drops, denied
+  requests by reason, uncertain drops, per-medication table, per-day table, current pill counts and
+  estimated days of supply (pill_count ÷ scheduled doses/day).
+* **Narrative:** Gemini (when configured and `report_ai_summary`) summarises the conversations
+  factually — what the patient asked for, concerns/symptoms they *mentioned* (quoted, not
+  interpreted), refused requests — with an explicit instruction not to diagnose or recommend;
+  fallback: deterministic bullet summary. `narrative_source` records which.
+* **PDF** (fpdf2): title page header (patient, period, generated at/by), summary tiles, adherence-by-day
+  bar chart + table, per-medication table, missed / failed / uncertain list, inventory, narrative, selected
+  conversation excerpts (timestamped), footer disclaimer ("Prototype — not a medical device …") and page
+  numbers. Unicode-safe (TTF font when available, else latin-1 sanitising).
+* Stored in `reports.pdf` (LONGBLOB on TiDB); `REPORT_READY` notification to the creator.
+* **Send:** `send(report_id, to_email=None)` ⇒ every linked doctor's email (or the given address);
+  SMTP with STARTTLS/SSL; when SMTP is not configured the message is written to
+  `data/outbox/report-<id>-<ts>.eml` and the delivery status is `SAVED`. Each attempt is a
+  `report_deliveries` row.
+
+## 9. Accounts, access and sessions — `auth/`
+
+* Passwords: `hashlib.scrypt` (n=2¹⁴, r=8, p=1, 16-byte salt), stored as
+  `scrypt$n$r$p$salt_b64$hash_b64`; constant-time compare; minimum 8 characters.
+* Sessions: `secrets.token_urlsafe(32)`; DB stores SHA-256 of the token; TTL `session_ttl_hours`
+  (sliding `last_seen_at`); cookie `td_session` HttpOnly, SameSite=Lax, Secure when `cookie_secure`.
+* Registration: patient ⇒ gets `link_code` (8 chars, unambiguous alphabet) and, if the configured
+  device has no real patient yet, the device is bound to them. Doctor/family ⇒ link later via
+  `POST /api/care/links {patient_id, link_code}`.
+* Permission matrix:
+
+| Action | Patient (self) | Linked doctor/family | Others |
+|---|---|---|---|
+| View status, containers, schedules, drops, doses, conversations, reports, notifications | ✓ | ✓ | ✗ |
+| Drop a pill (manual) / chat with the agent | ✓ | ✗ | ✗ |
+| Edit schedules, cooldown, containers/refills, medications, resolve reviews, skip doses | ✗ | ✓ | ✗ |
+| Generate a report / send it to the doctor | ✓ | ✓ | ✗ |
+| Device home/reconnect | ✗ | ✓ | ✗ |
+| Device stop | ✓ | ✓ | ✗ |
+
+* Demo mode seeds: patient `alex@demo.tactidose`, family `sam@demo.tactidose`, doctor
+  `dr.lee@demo.tactidose`, password `demo1234` (configurable), linked, with 3 demo "pills" (candy).
+
+## 10. Notifications
+
+`NotificationService.notify(patient_id, kind, title, body, data, to_patient, to_caregivers)` stores one
+row per recipient and publishes `Topic.NOTIFICATION`; the SSE endpoint forwards it to that recipient.
+The portals show a live toast, a bell list and (with permission) a browser `Notification`; the patient
+portal also speaks "pill dropped" when audio is enabled.
+
+| Kind | Patient | Caregivers |
+|---|---|---|
+| PILL_DROPPED | ✓ | if `notify_caregivers_on_drop` |
+| DROP_DENIED (cooldown etc.) | (shown inline, not stored) | ✗ |
+| DROP_FAILED / DROP_UNCERTAIN / DEVICE_ALERT | ✓ | ✓ |
+| LOW_STOCK / EMPTY | ✓ | ✓ |
+| MISSED_DOSE | ✓ | ✓ |
+| REPORT_READY / REPORT_SENT | creator | creator |
+
+## 11. Wiring (`app.py`)
+
+```python
+settings, clock, bus, db = Settings(), Clock(settings.timezone), EventBus(), Database(settings)
+hardware, sim     = create_hardware(settings, bus=bus, clock=clock)
+notifications     = NotificationService(db, settings, clock, bus=bus)
+compartments      = CompartmentService(db, settings, bus=bus)
+catalog           = MedicationCatalog(db, settings, clock, bus=bus)
+scheduler         = Scheduler(db, clock, settings, bus=bus)
+drops             = DropService(db, hardware, clock, settings, notifications=notifications, bus=bus)
+auth              = AuthService(db, settings, clock, bus=bus)
+agent             = AgentService(db, drops, clock, settings, bus=bus)          # provider per settings
+reports           = ReportService(db, clock, settings, auth=auth, notifications=notifications, bus=bus)
+extractor/onboarding/speaker/recognizer/analytics_sync  — optional extras
+startup: create_all → seed (demo) → drops.recover_on_startup() → scheduler loop → hardware.start() → extras
+```
+
+## 12. Failure handling (v2)
 
 | Failure | Behaviour |
 |---|---|
-| Internet down | Dispensing unaffected with SQLite. TTS → cached audio → OS voice. Gemini scan → "Could not reliably read label…"; manual entry still works. Snowflake rows wait in the outbox. |
-| TiDB unreachable (when used) | `DB_ERROR` → no motor command, "I can't check your schedule right now…" |
-| Serial disconnect | Reconnect loop with backoff; in-flight dispense → uncertain → HARDWARE_ERROR(needs_review). |
-| Device reset (`EVENT BOOT`) | In-flight command → `DEVICE_RESET`; auto-home on reconnect. |
-| Home failure / motor fault | Device in FAULT → dispensing refused until caregiver re-homes. |
-| Speech recognition unavailable | Big button, kiosk buttons, demo text box all produce the same intents. |
-| Process crash mid-dispense | Startup recovery marks DISPENSING → HARDWARE_ERROR(needs_review). |
+| Internet down | Drops, schedule, cooldown, rule-based agent, offline TTS, PDF generation all work; Gemini → rules agent and rules narrative; ElevenLabs → offline voice; SMTP → `.eml` saved in `data/outbox`. |
+| DB error | `DENIED/DB_ERROR`, nothing sent to the device. |
+| Device disconnected / FAULT | `DENIED/DEVICE_UNAVAILABLE`; scheduled doses retry until their window closes, then MISSED + notification. |
+| Uncertain drop | `UNCERTAIN` + `needs_review`; cooldown applies; further drops `NEEDS_REVIEW` until a caregiver resolves it. |
+| Empty container | `DENIED/EMPTY` (or `ERR NO_PILL` from the drop sensor) + EMPTY notification. |
+| Agent tool error / model error | reply "I can't do that right now — please use the Drop button or ask your caregiver."; logged. |
+
+## 13. Facts from the wave-1 build (binding for v2 work)
+
+**Hardware (`hardware/serial_client.py`, `simulator.py`)**
+* `hardware, sim = create_hardware(settings, bus=bus, clock=clock)`. In sim mode the
+  **HardwareClient owns the SimulatedDevice**: `hardware.start()` opens the in-process link and
+  boots the sim; `hardware.close()` closes it. The app must not start/close `sim` itself; `sim` is
+  only for the demo panel (`physical()`, `faults()`, `set_fault()`, `press()`, `reboot()`).
+* `start()` never blocks or raises; `connected` becomes True only after a PING+STATUS handshake.
+  Auto-home only right after (re)connecting. `reconnect() -> bool`. `exchange_raw()` is diagnostics only.
+* A concurrent user command gets `BUSY_LOCAL` immediately (it waits only for a heartbeat probe).
+  After a TIMEOUT the next command first resyncs with STATUS; if that fails the command is not sent
+  (`NOT_CONNECTED`). A write that raises counts as written (`DISCONNECTED`, uncertain).
+* Event listeners also receive unsolicited `ERR HOME_TIMEOUT` / `ERR MOTOR_FAULT`.
+* Every command line is published on `Topic.DEVICE_LINE {dir:"tx"}` (heartbeat PINGs included).
+
+**Domain (`medication/`)** — all services are thread-safe, start no threads, raise
+`errors.ValidationError` (422) / `NotFoundError` (404) / `ConflictError` (409) for caregiver ops and
+never raise for expected dose/hardware failures. Serializers: `scheduler.schedule_to_dict`,
+`catalog.medication_to_dict`, `compartments.compartment_to_dict`, `dispense.event_view`,
+`onboarding.scan_to_dict`. Schedule edits keep still-matching occurrences, delete stale untouched
+future events, cancel other stale open ones, and reset `Schedule.created_at` (no invented past
+MISSED doses). `log_event(..., at=clock.now())` keeps audit rows on the demo clock.
+
+**Voice/audio (`voice/`, `audio/`, `core/assistant.py`)** — `Topic.SPOKEN` is published only by
+`SpeakerService` (once per utterance, right before playback). The physical cancel button only
+*enqueues* CANCEL (the firmware already stopped locally); UI/voice/API cancel calls `interrupt()`
+synchronously. `VoiceRecognizer.start()` blocks while the Vosk model loads (1–16 s): call it last,
+or from a background thread. Offline Windows speech costs ~1.9 s per new sentence (cached after).
+Raw Vosk text keeps `[unk]` tokens; pills are never dispensed/confirmed from text containing `[unk]`.
+
+**Integrations** — `create_label_extractor(settings)` returns None when disabled/no key.
+`SnowflakeSync` is safe to construct when not configured. Gemini: default temperature recommended
+for Gemini 3 models (the label extractor uses 0 — revisit if output degrades).
+
+**UI serving** — mount `tactidose/ui/static` at `/static`; on Windows call
+`mimetypes.add_type("text/javascript", ".js")` (plus `.css`, `.svg`) **before** mounting, or
+browsers refuse ES modules. SSE: `event: <topic>` + JSON data, `Cache-Control: no-cache`,
+`X-Accel-Buffering: no`, no gzip.
+
+**Native harness (`firmware/native`)** — protocol in `ARCHITECTURE_v1.md` §7 plus v1.1 directive
+`!pills <slot> <count>` (sets a container's physical pill count; drop sensor present by default,
+20 pills per container) and the optional `!peek <max_ms>` speed-up used by `NativeTarget`.
+`!boot none` leaves the physical sensor mode unchanged.
+
+**Known gaps entering v2** — the Python simulator, HardwareClient, `commands.build` and the
+firmware core do not implement `DROP_SLOT` yet (10 sim tests + the native DROP scenarios fail
+until the hardware engineer finishes); `medication/dispense.py` (v1 consent/gate flow) and
+`core/assistant.py` (v1 dialogue) are superseded by `drops.py` and `agent/` and must not drive the
+hardware in the v2 app.

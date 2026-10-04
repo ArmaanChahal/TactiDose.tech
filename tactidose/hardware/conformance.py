@@ -54,6 +54,10 @@ class ConformanceTarget(Protocol):
     def set_button(self, name: str, pressed: bool) -> None: ...
     def set_sensor(self, mode: str) -> None: ...
     def set_jam(self, on: bool) -> None: ...
+
+    def set_pills(self, slot: int, count: int) -> None:
+        """v1.1: set the physical pill count of one container (drop-sensor scenarios)."""
+
     def close(self) -> None: ...
 
 
@@ -175,10 +179,13 @@ def scenario_skip_reason(target: ConformanceTarget, scenario: dict[str, Any], *,
     if "slow" in tags and not include_slow:
         return "slow scenario not requested"
     if not target.supports_faults and any(
-        ("sensor" in s) or ("jam" in s) or (s.get("boot") not in (None, "ok")) for s in steps
+        ("sensor" in s) or ("jam" in s) or ("pills" in s) or (s.get("boot") not in (None, "ok"))
+        for s in steps
     ):
         return "scenario needs fault injection"
     if not target.supports_boot and not scenario.get("hardware_safe", False):
+        return "scenario is not hardware_safe"
+    if getattr(target, "real_hardware", False) and not scenario.get("hardware_safe", False):
         return "scenario is not hardware_safe"
     return None
 
@@ -191,7 +198,9 @@ def run_scenario(target: ConformanceTarget, scenario: dict[str, Any]) -> Scenari
         expect: list[str] = list(step.get("expect", []))
         within = int(step.get("within_ms", DEFAULT_BOOT_WITHIN_MS if "boot" in step else DEFAULT_WITHIN_MS))
         quiet = int(step.get("quiet_ms", 0))
-        pure_wait = "wait_ms" in step and not any(k in step for k in ("boot", "send", "press", "sensor", "jam"))
+        pure_wait = "wait_ms" in step and not any(
+            k in step for k in ("boot", "send", "press", "sensor", "jam", "pills")
+        )
         try:
             if "boot" in step:
                 target.boot(step["boot"])
@@ -205,6 +214,9 @@ def run_scenario(target: ConformanceTarget, scenario: dict[str, Any]) -> Scenari
                 target.set_sensor(step["sensor"])
             elif "jam" in step:
                 target.set_jam(bool(step["jam"]))
+            elif "pills" in step:
+                slot, count = step["pills"]
+                target.set_pills(int(slot), int(count))
 
             if pure_wait and not expect:
                 col.advance_exact(int(step["wait_ms"]))

@@ -47,7 +47,8 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------ device
     device_id: str = "tactidose-001"
     device_name: str = "TactiDose demo unit"
-    num_slots: int = Field(6, ge=MIN_SLOTS, le=MAX_SLOTS)
+    #: Pill containers on the device (v2 hardware has 3).
+    num_slots: int = Field(3, ge=MIN_SLOTS, le=MAX_SLOTS)
     #: IANA zone, e.g. "America/Vancouver". Empty = system local zone.
     timezone: str | None = None
 
@@ -71,6 +72,55 @@ class Settings(BaseSettings):
     #: How far ahead dose events are materialised from schedules.
     schedule_horizon_hours: int = Field(36, ge=1, le=168)
     scheduler_tick_s: float = Field(20.0, ge=1, le=600)
+
+    # ------------------------------------------------------------------ v2 drops & inventory
+    #: Default global cooldown for new devices: after ANY drop, manual/agent drops of ANY pill
+    #: are refused for this many minutes. Doctor/family change it per device in the care portal.
+    manual_cooldown_minutes: int = Field(60, ge=0, le=1440)
+    #: Scheduled doses drop automatically at their time even if the patient forgets.
+    auto_drop_enabled: bool = True
+    #: After a failed scheduled drop, retry this often until the dose window closes.
+    auto_drop_retry_minutes: int = Field(5, ge=1, le=120)
+    default_container_capacity: int = Field(30, ge=1, le=500)
+    default_low_stock_threshold: int = Field(3, ge=0, le=100)
+    #: v1 firmware (no DROP_SLOT): keep the gate open this long, then CLOSE_GATE.
+    drop_close_delay_ms: int = Field(1500, ge=200, le=10000)
+    timeout_drop_s: float = Field(30.0, gt=0, le=120)
+    #: Also notify linked doctor/family accounts about every drop (not just problems).
+    notify_caregivers_on_drop: bool = True
+
+    # ------------------------------------------------------------------ v2 accounts & portals
+    session_ttl_hours: int = Field(12, ge=1, le=720)
+    session_cookie_name: str = "td_session"
+    #: Set True when serving over HTTPS (adds the Secure cookie flag).
+    cookie_secure: bool = False
+    allow_registration: bool = True
+    #: Demo mode only: create demo patient / family / doctor logins on first start.
+    seed_demo_accounts: bool = True
+    demo_password: SecretStr = SecretStr("demo1234")
+
+    # ------------------------------------------------------------------ v2 conversational agent
+    #: "auto" = Gemini when a key is configured, else the offline rule-based agent.
+    agent_provider: Literal["auto", "gemini", "rules"] = "auto"
+    #: Empty = use gemini_model.
+    agent_model: str | None = Field(None, validation_alias=_alias("TACTIDOSE_AGENT_MODEL", "AGENT_MODEL"))
+    agent_max_steps: int = Field(4, ge=1, le=10)
+    agent_timeout_s: float = Field(30.0, gt=0, le=120)
+    agent_history_messages: int = Field(20, ge=2, le=100)
+
+    # ------------------------------------------------------------------ v2 reports & email
+    report_max_days: int = Field(90, ge=1, le=366)
+    #: Ask Gemini for a factual summary of the period's conversations (falls back to rules).
+    report_ai_summary: bool = True
+    smtp_host: str | None = Field(None, validation_alias=_alias("SMTP_HOST", "TACTIDOSE_SMTP_HOST"))
+    smtp_port: int = Field(587, validation_alias=_alias("SMTP_PORT", "TACTIDOSE_SMTP_PORT"))
+    smtp_user: str | None = Field(None, validation_alias=_alias("SMTP_USER", "SMTP_USERNAME", "TACTIDOSE_SMTP_USER"))
+    smtp_password: SecretStr | None = Field(None, validation_alias=_alias("SMTP_PASSWORD", "TACTIDOSE_SMTP_PASSWORD"))
+    smtp_from: str | None = Field(None, validation_alias=_alias("SMTP_FROM", "TACTIDOSE_SMTP_FROM"))
+    #: STARTTLS on smtp_port (587). Set smtp_ssl for implicit TLS (465) instead.
+    smtp_starttls: bool = Field(True, validation_alias=_alias("SMTP_STARTTLS", "TACTIDOSE_SMTP_STARTTLS"))
+    smtp_ssl: bool = Field(False, validation_alias=_alias("SMTP_SSL", "TACTIDOSE_SMTP_SSL"))
+    smtp_timeout_s: float = Field(20.0, gt=0, le=120)
 
     # ------------------------------------------------------------------ hardware
     hardware_mode: Literal["sim", "serial", "none"] = "sim"
@@ -185,6 +235,25 @@ class Settings(BaseSettings):
         return self.data_dir / "label_scans"
 
     @property
+    def outbox_dir(self) -> Path:
+        """Where report emails are saved as .eml when SMTP is not configured."""
+        return self.data_dir / "outbox"
+
+    @property
+    def smtp_configured(self) -> bool:
+        return bool(self.smtp_host and (self.smtp_from or self.smtp_user))
+
+    @property
+    def effective_agent_provider(self) -> str:
+        if self.agent_provider == "auto":
+            return "gemini" if self.gemini_configured else "rules"
+        return self.agent_provider
+
+    @property
+    def effective_agent_model(self) -> str:
+        return self.agent_model or self.gemini_model
+
+    @property
     def snowflake_configured(self) -> bool:
         return bool(
             self.snowflake_account
@@ -216,10 +285,11 @@ class Settings(BaseSettings):
             CommandName.OPEN_GATE: self.timeout_gate_s,
             CommandName.CLOSE_GATE: self.timeout_gate_s,
             CommandName.STOP: self.timeout_stop_s,
+            CommandName.DROP_SLOT: self.timeout_drop_s,
         }[name]
 
     def ensure_dirs(self) -> None:
-        for p in (self.data_dir, self.tts_cache_dir, self.scans_dir):
+        for p in (self.data_dir, self.tts_cache_dir, self.scans_dir, self.outbox_dir):
             p.mkdir(parents=True, exist_ok=True)
 
     def public_summary(self) -> dict[str, object]:
@@ -241,6 +311,12 @@ class Settings(BaseSettings):
             "snowflake_configured": self.snowflake_configured,
             "check_due_auto_dispense": self.check_due_auto_dispense,
             "caregiver_pin_required": self.caregiver_pin is not None,
+            "agent_provider": self.effective_agent_provider,
+            "agent_model": self.effective_agent_model if self.effective_agent_provider == "gemini" else None,
+            "smtp_configured": self.smtp_configured,
+            "manual_cooldown_minutes_default": self.manual_cooldown_minutes,
+            "auto_drop_enabled": self.auto_drop_enabled,
+            "allow_registration": self.allow_registration,
         }
 
 
