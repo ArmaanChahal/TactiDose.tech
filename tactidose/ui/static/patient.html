@@ -4,18 +4,19 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark light">
-  <title>My pills — TactiDose</title>
+  <title>My pills — CareBridge</title>
   <link rel="icon" href="/static/img/favicon.svg" type="image/svg+xml">
   <script src="/static/js/theme-init.js"></script>
   <link rel="stylesheet" href="/static/css/base.css">
   <link rel="stylesheet" href="/static/css/patient.css">
+  <link rel="stylesheet" href="/static/css/refinements.css">
   <script type="module" src="/static/js/patient.js"></script>
 </head>
 <body class="portal patient">
   <a class="skip-link" href="#main">Skip to main content</a>
 
   <header class="app-header">
-    <p class="brand"><span class="icon-slot" data-icon="pill"></span> <span class="brand-name">TactiDose</span> <span class="brand-sub">My pills</span></p>
+    <p class="brand"><span class="icon-slot" data-icon="pill"></span> <span class="brand-name">CareBridge</span> <span class="brand-sub">My pills</span></p>
     <p id="who" class="who"></p>
     <div class="header-tools">
       <span id="conn" class="conn" role="status" hidden></span>
@@ -71,7 +72,8 @@
 
     <!-- ============================================================ Home -->
     <section id="view-home" class="view" aria-labelledby="home-title">
-      <h1 id="home-title" class="view-title" tabindex="-1">Your pills</h1>
+      <h1 id="home-title" class="view-title" tabindex="-1">Your medication</h1>
+      <p class="page-intro">Your next dose, your schedule, and the support you need.</p>
       <div id="drop-result" class="drop-result" hidden></div>
 
       <div class="status-grid">
@@ -177,7 +179,7 @@
           <dd><span id="share-code" class="code-box" aria-describedby="share-code-spelled">–</span><span id="share-code-spelled" class="visually-hidden"></span></dd>
         </div>
       </dl>
-      <p>Share these with your doctor or family. They sign in to TactiDose, choose "Link a patient" and type both codes.</p>
+      <p>Share these with your doctor or family. They sign in to CareBridge, choose "Link a patient" and type both codes.</p>
       <button type="button" id="share-copy" class="btn btn-primary"><span class="icon-slot" data-icon="copy"></span> Copy both codes</button>
       <p id="share-status" role="status"></p>
     </section>
@@ -186,7 +188,7 @@
   <div id="toasts" class="toasts" role="region" aria-label="New notifications"></div>
 
   <footer class="app-footer">
-    <p>TactiDose prototype — not a medical device. The demo uses candy, never real medication.</p>
+    <p>CareBridge prototype — not a medical device. The demo uses candy, never real medication.</p>
   </footer>
 </body>
 </html>

@@ -223,7 +223,7 @@ export function outcomeView(outcome) {
  * Returns {key, word, detail, tone, icon}.
  */
 export function kioskBanner({ status = null, remainingS = 0, dropping = false, online = true } = {}) {
-  if (!online) return { key: 'offline', word: 'Offline', detail: 'Cannot reach TactiDose. Trying again…', tone: 'bad', icon: 'offline' };
+  if (!online) return { key: 'offline', word: 'Offline', detail: 'Cannot reach CareBridge. Trying again…', tone: 'bad', icon: 'offline' };
   if (!status) return { key: 'loading', word: 'Starting', detail: 'Getting your pill status…', tone: 'neutral', icon: 'rotate' };
   if (dropping) return { key: 'dropping', word: 'Dropping', detail: 'A pill is dropping. Please wait.', tone: 'caution', icon: 'rotate' };
   const dev = deviceView(status.device);

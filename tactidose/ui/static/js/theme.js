@@ -32,11 +32,11 @@ function store(key, value) {
 
 export function currentTheme() {
   const t = document.documentElement.getAttribute('data-theme');
-  return THEMES.some((x) => x.id === t) ? t : 'dark';
+  return THEMES.some((x) => x.id === t) ? t : 'light';
 }
 
 export function applyTheme(theme) {
-  const id = THEMES.some((x) => x.id === theme) ? theme : 'dark';
+  const id = THEMES.some((x) => x.id === theme) ? theme : 'light';
   document.documentElement.setAttribute('data-theme', id);
   store(THEME_KEY, id);
   document.dispatchEvent(new CustomEvent('tactidose:theme', { detail: { theme: id } }));

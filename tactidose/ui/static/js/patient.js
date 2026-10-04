@@ -273,7 +273,7 @@ async function requestDrop(v) {
   } catch (err) {
     const uncertain = err?.timeout || err?.network;
     const message = uncertain
-      ? `There was no answer from TactiDose (${errorText(err)}). The pill may or may not have dropped. Check History before you try again.`
+      ? `There was no answer from CareBridge (${errorText(err)}). The pill may or may not have dropped. Check History before you try again.`
       : `The pill was not dropped: ${errorText(err)}`;
     showResult({ word: uncertain ? 'Not sure if it dropped' : 'Not dropped', icon: 'warning', tone: 'bad', message });
     announce(message, { assertive: true });
@@ -324,7 +324,7 @@ function renderShare() {
   byId('share-pid-spelled').textContent = pid ? `Spelled out: ${spellOut(String(pid))}` : '';
   byId('share-code-spelled').textContent = code ? `Spelled out: ${spellOut(code)}` : '';
   byId('share-copy').addEventListener('click', async () => {
-    const text = `TactiDose — Patient ID: ${pid}, link code: ${code}`;
+    const text = `CareBridge — Patient ID: ${pid}, link code: ${code}`;
     try {
       await navigator.clipboard.writeText(text);
       byId('share-status').textContent = 'Copied. You can paste it into a message.';

@@ -139,7 +139,7 @@ function showPatientCodes(resp) {
   byId('codes-continue').setAttribute('href', destinationFor('patient', next));
   byId('codes-copy').addEventListener('click', async () => {
     try {
-      await navigator.clipboard.writeText(`TactiDose — Patient ID: ${pid}, link code: ${code}`);
+      await navigator.clipboard.writeText(`CareBridge — Patient ID: ${pid}, link code: ${code}`);
       byId('codes-status').textContent = 'Copied. You can paste it into a message.';
     } catch {
       byId('codes-status').textContent = `Copying is not possible here. The codes are: Patient ID ${pid}, link code ${code}.`;

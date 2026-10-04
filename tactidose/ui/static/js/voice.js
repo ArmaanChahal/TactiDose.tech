@@ -102,7 +102,7 @@ export class VoiceInput {
     try {
       this.onState(state, message);
     } catch (err) {
-      console.error('TactiDose voice: state handler failed', err);
+      console.error('CareBridge voice: state handler failed', err);
     }
   }
 
@@ -316,7 +316,7 @@ export class VoiceInput {
           capture.node.port.addEventListener('message', (e) => onChunk(e.data));
           capture.node.port.start();
         } catch (err) {
-          console.warn('TactiDose voice: AudioWorklet unavailable, using ScriptProcessor', err);
+          console.warn('CareBridge voice: AudioWorklet unavailable, using ScriptProcessor', err);
           capture.node = null;
         }
       }

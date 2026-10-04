@@ -4,26 +4,35 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark light">
-  <title>Sign in — TactiDose</title>
+  <title>Sign in — CareBridge</title>
   <link rel="icon" href="/static/img/favicon.svg" type="image/svg+xml">
   <script src="/static/js/theme-init.js"></script>
   <link rel="stylesheet" href="/static/css/base.css">
   <link rel="stylesheet" href="/static/css/login.css">
+  <link rel="stylesheet" href="/static/css/refinements.css">
   <script type="module" src="/static/js/login.js"></script>
 </head>
 <body class="portal login">
   <a class="skip-link" href="#main">Skip to main content</a>
 
   <header class="app-header">
-    <p class="brand"><span class="icon-slot" data-icon="pill"></span> <span class="brand-name">TactiDose</span> <span class="brand-sub">Pill dispenser</span></p>
+    <p class="brand"><span class="icon-slot" data-icon="pill"></span> <span class="brand-name">CareBridge</span> <span class="brand-sub">Pill dispenser</span></p>
     <div class="header-tools">
       <button type="button" id="theme-btn" class="btn btn-small">Colours</button>
     </div>
   </header>
 
   <main id="main" class="login-main" tabindex="-1">
-    <h1>Welcome to TactiDose</h1>
-    <p class="lead">Sign in to see your pills, or create an account.</p>
+    <div class="login-intro">
+      <h1>Care, within reach.</h1>
+      <p class="lead">Manage your medication and stay connected to the people who care for you.</p>
+      <ul class="login-details" aria-label="CareBridge features">
+        <li><span class="icon-slot" data-icon="pill"></span><div><strong>Your medication</strong><p>Schedules and dose history, in one place.</p></div></li>
+        <li><span class="icon-slot" data-icon="mic"></span><div><strong>Your way to connect</strong><p>Speak or type. Choose what works for you.</p></div></li>
+        <li><span class="icon-slot" data-icon="users"></span><div><strong>Your care team</strong><p>Keep family and doctors involved in your care.</p></div></li>
+      </ul>
+    </div>
+    <div class="login-content">
     <div id="page-error" class="page-error" hidden></div>
 
     <section id="signed-in" class="card" aria-labelledby="signed-in-title" hidden>
@@ -126,7 +135,7 @@
     <!-- ============================================================ caregiver: link a patient -->
     <section id="link-step" class="card" aria-labelledby="link-title" hidden>
       <h2 id="link-title" tabindex="-1">Link a patient</h2>
-      <p>Ask the patient for their Patient ID and link code. They find both under "Care team" on their TactiDose page.</p>
+      <p>Ask the patient for their Patient ID and link code. They find both under "Care team" on their CareBridge page.</p>
       <form id="link-form" novalidate>
         <div class="field">
           <label for="link-pid">Patient ID</label>
@@ -143,10 +152,11 @@
         </div>
       </form>
     </section>
+    </div>
   </main>
 
   <footer class="app-footer">
-    <p>TactiDose prototype — not a medical device. The demo uses candy, never real medication.</p>
+    <p>CareBridge prototype — not a medical device. The demo uses candy, never real medication.</p>
   </footer>
 </body>
 </html>

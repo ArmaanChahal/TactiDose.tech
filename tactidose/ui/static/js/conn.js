@@ -9,7 +9,7 @@ import { icon } from './icons.js';
 const LABELS = {
   idle: ['Connecting…', 'rotate', 'connecting'],
   connecting: ['Connecting…', 'rotate', 'connecting'],
-  open: ['Live', 'dot', 'open'],
+  open: ['Connected', 'dot', 'open'],
   reconnecting: ['Reconnecting…', 'warning', 'reconnecting'],
   closed: ['Offline', 'offline', 'closed'],
 };
@@ -20,7 +20,9 @@ export function bindConnIndicator(el, stream, { quietWhenOpen = false } = {}) {
     const [word, iconName, cls] = LABELS[status] || LABELS.connecting;
     el.className = `conn conn-${cls}`;
     el.replaceChildren(icon(iconName), document.createTextNode(` ${word}`));
-    el.setAttribute('aria-label', `Live updates: ${word}`);
-    el.hidden = quietWhenOpen && (status === 'open' || status === 'idle' || status === 'connecting');
+    el.setAttribute('aria-label', `Connection: ${word}`);
+    // A healthy connection is quiet; never show a decorative Live badge.
+    // Reconnecting and Offline remain visible and announced.
+    el.hidden = status === 'open' || (quietWhenOpen && (status === 'idle' || status === 'connecting'));
   });
 }

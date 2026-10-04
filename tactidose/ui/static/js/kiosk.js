@@ -149,7 +149,7 @@ async function pressDrop(v) {
   } catch (err) {
     const uncertain = err?.timeout || err?.network;
     caption(uncertain
-      ? 'There was no answer from TactiDose. The pill may or may not have dropped. Ask your caregiver to check before trying again.'
+      ? 'There was no answer from CareBridge. The pill may or may not have dropped. Ask your caregiver to check before trying again.'
       : `The pill was not dropped: ${errorText(err)}`, { assertive: true });
   } finally {
     // Keep "Dropping" until the fresh status is in, then show the new state directly.

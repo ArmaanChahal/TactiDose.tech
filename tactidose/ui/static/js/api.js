@@ -1,5 +1,5 @@
 /**
- * Fetch wrapper for the TactiDose HTTP API v2 (docs/API.md is the contract).
+ * Fetch wrapper for the CareBridge HTTP API v2 (docs/API.md is the contract).
  *
  * - Cookie session: every request is sent with credentials 'same-origin', so the
  *   HttpOnly `td_session` cookie set by POST /api/auth/login travels with it.
@@ -148,10 +148,10 @@ export async function request(method, path, opts = {}) {
     res = await doFetch(path, { method, headers, body: payload, signal: controller.signal, credentials: 'same-origin' });
   } catch (err) {
     if (timedOut) {
-      throw new ApiError('The TactiDose server did not answer in time. Please try again.', { method, path, timeout: true });
+      throw new ApiError('The CareBridge server did not answer in time. Please try again.', { method, path, timeout: true });
     }
     if (signal && signal.aborted) throw err;
-    throw new ApiError('Cannot reach the TactiDose server. Check that it is running.', { method, path, network: true });
+    throw new ApiError('Cannot reach the CareBridge server. Check that it is running.', { method, path, network: true });
   } finally {
     clearTimeout(timer);
     if (signal) signal.removeEventListener('abort', onAbort);

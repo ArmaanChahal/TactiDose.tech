@@ -160,7 +160,7 @@ export class EventStream {
       try {
         handler(status);
       } catch (err) {
-        console.error('TactiDose events: status handler failed', err);
+        console.error('CareBridge events: status handler failed', err);
       }
     }
   }
@@ -174,7 +174,7 @@ export class EventStream {
     try {
       es = this._factory(this.url);
     } catch (err) {
-      console.error('TactiDose events: could not open stream', err);
+      console.error('CareBridge events: could not open stream', err);
       this._failures += 1;
       this._scheduleReconnect();
       return;
@@ -228,7 +228,7 @@ export class EventStream {
     try {
       envelope = JSON.parse(raw);
     } catch {
-      console.warn('TactiDose events: ignoring malformed message', raw);
+      console.warn('CareBridge events: ignoring malformed message', raw);
       return;
     }
     if (!envelope || typeof envelope !== 'object') return;
@@ -253,7 +253,7 @@ export class EventStream {
       try {
         handler(data, envelope, meta);
       } catch (err) {
-        console.error(`TactiDose events: handler for ${topic} failed`, err);
+        console.error(`CareBridge events: handler for ${topic} failed`, err);
       }
     }
   }

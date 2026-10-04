@@ -1,5 +1,5 @@
 /**
- * Small DOM helpers shared by every TactiDose page.
+ * Small DOM helpers shared by every CareBridge page.
  *
  * Safety rule: text that comes from the server (medication names, label-scan
  * output, error details) is only ever inserted as text nodes / textContent,
@@ -93,7 +93,7 @@ export function s(tag, props = {}, ...children) {
 /** getElementById that reports (instead of silently returning null) a missing element. */
 export function byId(id) {
   const el = document.getElementById(id);
-  if (!el) console.error(`TactiDose UI: element #${id} not found`);
+  if (!el) console.error(`CareBridge UI: element #${id} not found`);
   return el;
 }
 

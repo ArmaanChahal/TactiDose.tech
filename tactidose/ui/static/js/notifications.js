@@ -233,7 +233,7 @@ export function createNotificationCenter(els, {
       try {
         onLive(n);
       } catch (err) {
-        console.error('TactiDose notifications: onLive failed', err);
+        console.error('CareBridge notifications: onLive failed', err);
       }
     }
   });
