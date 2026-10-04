@@ -52,6 +52,7 @@ class ArduinoHal : public tactidose::Hal {
   bool homeSensorActive() override;
   bool buttonPressed(tactidose::Button button) override;
   bool dropSensorActive() override;
+  void buzzerWrite(bool on) override; /* config.h BUZZER block; no-op while BUZZER_PIN is -1 */
   int serialRead() override;
   void serialWriteLine(const char* line) override;
 

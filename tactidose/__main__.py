@@ -16,6 +16,8 @@ doctor                 configuration and environment check (offline)
 check-apis             tiny live requests to each configured cloud service (keys, network)
 download-voice-model   fetch the offline Vosk speech model
 warm-tts-cache         pre-render the critical spoken phrases
+guided-demo            headless MORNING / NOON / NIGHT judge demo on the simulator (scripted answers)
+buzzer-test            sound the configured buzzer backend for 2 s (wiring check, docs/BUZZER.md)
 generate-report        PDF report for a patient (optionally saved to a file)
 send-test-email        check the report e-mail set-up
 =====================  ==================================================================
@@ -228,6 +230,8 @@ def _cmd_run(args: argparse.Namespace) -> int:
         overrides["TACTIDOSE_HARDWARE_MODE"] = "none"
     if args.no_voice:
         overrides["TACTIDOSE_VOICE_ENABLED"] = "false"
+    if args.demo_pause_seconds is not None:
+        overrides["TACTIDOSE_DEMO_PAUSE_SECONDS"] = str(args.demo_pause_seconds)
     if args.host:
         overrides["TACTIDOSE_HOST"] = args.host
     if args.port is not None:
@@ -706,6 +710,152 @@ def _cmd_warm_tts_cache(args: argparse.Namespace) -> int:
     return EXIT_OK if not result.get("failed") else EXIT_FAILURE
 
 
+# =========================================================================== guided demo
+
+#: Default scripted answers: morning yes/taken, noon unclear -> no, night yes/not taken.
+GUIDED_SCRIPT = (
+    "yes", "yes", "Pretty good day, no problems.",
+    "maybe", "no", "A bit tired and I have a mild headache.",
+    "yes please", "not yet", "Okay, a little worried about my sleep.",
+)
+
+
+def _cmd_guided_demo(args: argparse.Namespace) -> int:
+    import time as _time
+
+    base = _settings()
+    data_dir = Path(args.data_dir) if args.data_dir else base.data_dir / "guided-demo"
+    os.environ.update({
+        "TACTIDOSE_HARDWARE_MODE": "sim", "TACTIDOSE_DEMO_MODE": "true", "TACTIDOSE_VOICE_ENABLED": "false",
+        "TACTIDOSE_DATA_DIR": str(data_dir), "TACTIDOSE_DEMO_PAUSE_SECONDS": str(args.pause),
+        "TACTIDOSE_DEMO_BUZZER_SECONDS": "1", "TACTIDOSE_HW_BOOT_WAIT_S": "0",
+        **({} if args.speak else {"TACTIDOSE_TTS_PROVIDER": "none"}),
+    })
+    os.environ.setdefault("TACTIDOSE_SIM_SPEED", "10")
+    settings = _settings()
+    script = [a.strip() for a in (args.answers.split("|") if args.answers else GUIDED_SCRIPT)]
+    from sqlalchemy import select
+
+    from tactidose.api.views import device_owner_id
+    from tactidose.app import build_services, shutdown, startup
+    from tactidose.core.bus import Topic
+    from tactidose.db.models import DoseEvent, GuidedDemoSlot, PillDrop
+
+    services = build_services(settings)
+    startup(services)
+    try:
+        deadline = _time.monotonic() + 30
+        while not services.hardware.snapshot().connected and _time.monotonic() < deadline:
+            _time.sleep(0.1)
+        pid = device_owner_id(services.db, settings)
+        if pid is None or services.guided is None:
+            raise CliError("The demo patient or the guided demo is not available.")
+
+        def show(ev: Any) -> None:
+            d = ev.data or {}
+            at = services.clock.local_now().strftime("%a %H:%M")
+            if d.get("say"):
+                _out(f"[{at}] SAY   ({d.get('step')}) {d['say']}")
+            elif d.get("step") in ("buzzer_off",) or (d.get("step") == "dispensed"):
+                _out(f"[{at}] {'BUZZER off' if d['step'] == 'buzzer_off' else 'DROP  ' + str((d.get('outcome') or {}).get('outcome'))}")
+
+        services.bus.add_listener(show, [Topic.DEMO_GUIDED])
+        services.guided.start(pid, reset=True)
+        for answer in script:
+            if services.guided.wait_awaiting(pid, settings.demo_answer_timeout_s + 30) is None:
+                break
+            _out(f"{'':13}HEARD {answer}")
+            services.guided.answer(pid, answer)
+        services.guided.wait_done(pid, 120)
+        state = services.guided.state(pid) or {}
+        _out(f"\nRun {state.get('run_id')}: {state.get('state')}")
+        with services.db.session() as s:
+            _out("\nguided_demo_slots:")
+            for r in s.scalars(select(GuidedDemoSlot).where(GuidedDemoSlot.run_id == state.get("run_id"))
+                               .order_by(GuidedDemoSlot.slot_index)):
+                _out(f"  {r.slot_name:7} answer={r.take_answer:7} outcome={r.outcome:9} drop_id={r.drop_id} "
+                     f"dose_event_id={r.dose_event_id} taken={r.taken} mood={r.mood} symptoms={r.symptoms} "
+                     f"severity={r.severity} source={r.extraction_source} alert={r.alert}")
+            _out("pill_drops:")
+            for d in s.scalars(select(PillDrop).where(PillDrop.patient_id == pid).order_by(PillDrop.drop_id)):
+                _out(f"  #{d.drop_id} {d.source:8} {d.status:9} {d.medication_name} (container {d.slot_number + 1 if d.slot_number is not None else '-'}) "
+                     f"dose_event_id={d.dose_event_id} pills {d.pill_count_before}->{d.pill_count_after}")
+            _out("dose_events (demo day):")
+            ids = [r.dose_event_id for r in s.scalars(select(GuidedDemoSlot).where(
+                GuidedDemoSlot.run_id == state.get("run_id"))) if r.dose_event_id]
+            for ev in s.scalars(select(DoseEvent).where(DoseEvent.event_id.in_(ids)).order_by(DoseEvent.scheduled_at)):
+                _out(f"  #{ev.event_id} {services.clock.to_local(ev.scheduled_at):%a %H:%M} {ev.status:10} "
+                     f"drop_id={ev.drop_id} note={getattr(ev, 'review_note', None)!r}")
+        return EXIT_OK if state.get("state") == "finished" else EXIT_FAILURE
+    finally:
+        shutdown(services)
+
+
+# =========================================================================== buzzer test
+
+
+def _cmd_buzzer_test(args: argparse.Namespace) -> int:
+    import time as _time
+
+    from tactidose.hardware import buzzer_config
+    from tactidose.hardware.buzzer import create_buzzer
+
+    if args.sim:
+        os.environ["TACTIDOSE_HARDWARE_MODE"] = "sim"
+    elif args.serial is not None:
+        os.environ.update({"TACTIDOSE_HARDWARE_MODE": "serial", "TACTIDOSE_SERIAL_PORT": args.serial})
+    settings = _settings()
+    backend = args.backend or settings.buzzer_backend
+    settings = settings.model_copy(update={"buzzer_backend": backend})
+    ms = int(args.ms or buzzer_config.TEST_DURATION_MS)
+    _out(f"Buzzer test: backend {backend}, {ms} ms (hardware: {settings.hardware_mode}).")
+    hardware = None
+    if backend in ("serial", "both"):
+        from tactidose.hardware.serial_client import create_hardware
+
+        hardware, _sim = create_hardware(settings)
+        hardware.start()
+        deadline = _time.monotonic() + 15
+        while not hardware.snapshot().connected and _time.monotonic() < deadline:
+            _time.sleep(0.1)
+        if not hardware.snapshot().connected:
+            _out("  The device is not connected (check the USB cable / port).")
+        else:
+            probe = getattr(hardware, "buzzer_query", None)
+            reply = probe() if callable(probe) else None
+            meaning = {
+                "BUZZER": "the firmware has the BUZZER command",
+                "UNKNOWN_COMMAND": "the firmware is older than the BUZZER command (flash the new firmware)",
+                "NO_BUZZER": "BUZZER_PIN is still -1 in config.h (set the pin and flash again)",
+            }
+            code = getattr(reply, "code", "no reply")
+            _out(f"  Device probe: {code} - {meaning.get(code, 'no usable reply')}.")
+    buzzer = create_buzzer(settings, hardware, play_locally=True)
+    try:
+        sounded = buzzer.on(ms)
+        hw_on = buzzer.hardware_active
+        _time.sleep(ms / 1000.0)
+        buzzer.off()
+    finally:
+        buzzer.close()
+        if hardware is not None:
+            hardware.close()
+    if backend == "none":
+        _out("  Backend 'none': nothing sounds (expected).")
+        return EXIT_OK
+    if backend in ("serial", "both"):
+        if hw_on:
+            _out("  OK: the device's buzzer was switched on.")
+            return EXIT_OK
+        serial_part = getattr(buzzer, "serial", buzzer)
+        error = getattr(serial_part, "last_error", None) or "not connected"
+        fallback = "the laptop tone played instead" if backend == "serial" else "only the laptop tone played"
+        _out(f"  The device's buzzer was NOT used ({error}); {fallback}.")
+        return EXIT_FAILURE
+    _out("  OK: laptop tone played on this computer's speaker." if sounded else "  Nothing sounded.")
+    return EXIT_OK if sounded else EXIT_FAILURE
+
+
 # =========================================================================== reports / e-mail
 
 
@@ -842,6 +992,19 @@ def _int_in(lo: int, hi: int | None, what: str) -> Callable[[str], int]:
     return parse
 
 
+def _float_in(lo: float, hi: float, what: str) -> Callable[[str], float]:
+    def parse(text: str) -> float:
+        try:
+            value = float(text)
+        except ValueError:
+            raise argparse.ArgumentTypeError(f"{what} must be a number") from None
+        if not lo <= value <= hi:
+            raise argparse.ArgumentTypeError(f"{what} must be between {lo:g} and {hi:g}")
+        return value
+
+    return parse
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m tactidose",
@@ -864,6 +1027,8 @@ def build_parser() -> argparse.ArgumentParser:
     hw.add_argument("--serial", metavar="PORT", help="use a real ESP32: COM5, /dev/ttyUSB0, socket://HOST:PORT or auto")
     hw.add_argument("--no-hardware", action="store_true", help="no device: every drop is refused")
     p.add_argument("--no-voice", action="store_true", help="turn off the device-side microphone loop")
+    p.add_argument("--demo-pause-seconds", type=_float_in(0, 120, "the pause"), metavar="N",
+                   help="pause between the guided demo's slots (default: TACTIDOSE_DEMO_PAUSE_SECONDS or 7)")
     p.set_defaults(handler=_cmd_run, default_log_level=logging.INFO)
 
     p = sub.add_parser("init-db", help="create the database and tables")
@@ -934,6 +1099,31 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("download-voice-model", help="download the offline Vosk speech model")
     p.add_argument("--dest", help="folder for the model (default: the folder of TACTIDOSE_VOSK_MODEL_PATH)")
     p.set_defaults(handler=_cmd_download_voice_model)
+
+    p = sub.add_parser("guided-demo", help="run the guided judge demo headless on the simulator",
+                       description="Run the MORNING / NOON / NIGHT guided demo on the built-in simulator with "
+                                   "scripted answers, print every spoken line, then the stored rows. Uses its "
+                                   "own data folder (<data dir>/guided-demo) and re-seeds the demo data there.")
+    p.add_argument("--answers", help=f"answers separated by '|' (default: {'|'.join(GUIDED_SCRIPT)!r})")
+    p.add_argument("--pause", type=_float_in(0, 120, "the pause"), default=1.0, metavar="N",
+                   help="seconds between slots (default 1)")
+    p.add_argument("--data-dir", help="data folder (default: <TACTIDOSE_DATA_DIR>/guided-demo)")
+    p.add_argument("--speak", action="store_true", help="render speech too (default: captions only)")
+    p.set_defaults(handler=_cmd_guided_demo)
+
+    p = sub.add_parser("buzzer-test", help="sound the buzzer for 2 seconds (wiring check)",
+                       description="Fire the buzzer backend (TACTIDOSE_BUZZER_BACKEND, or --backend) once, "
+                                   "without running the demo, and say what happened. serial/both talk to "
+                                   "the device (TACTIDOSE_HARDWARE_MODE / --serial PORT / --sim). Exit 0 when "
+                                   "the chosen backend sounded, 1 when it fell back. See docs/BUZZER.md.")
+    p.add_argument("--backend", choices=["laptop", "serial", "both", "none"],
+                   help="override TACTIDOSE_BUZZER_BACKEND for this test")
+    hw_choice = p.add_mutually_exclusive_group()
+    hw_choice.add_argument("--serial", metavar="PORT", help="the device's port: COM5, /dev/ttyUSB0 or auto")
+    hw_choice.add_argument("--sim", action="store_true", help="use the built-in simulated ESP32")
+    p.add_argument("--ms", type=_int_in(1, 65535, "the duration"), default=None,
+                   help="how long to sound it (default: buzzer_config.TEST_DURATION_MS = 2000)")
+    p.set_defaults(handler=_cmd_buzzer_test)
 
     p = sub.add_parser("warm-tts-cache", help="pre-render the critical spoken phrases")
     p.set_defaults(handler=_cmd_warm_tts_cache)

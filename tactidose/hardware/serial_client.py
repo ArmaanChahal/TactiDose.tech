@@ -363,6 +363,38 @@ class HardwareClient:
         with self._stop_lock:
             return self._roundtrip(cmd, stop=True)
 
+    # ------------------------------------------------------------------ buzzer (optional extension)
+    def buzzer_on(self, ms: int) -> CommandResult:
+        """``BUZZER ON <ms>`` (docs §13). Never waits for another command: if one is in flight the
+        result is ``BUSY_LOCAL`` at once. While it is in flight, a drop request waits for it (like a
+        heartbeat probe) instead of being refused. ``ERR UNKNOWN_COMMAND`` = firmware without the
+        extension, ``ERR NO_BUZZER`` = no buzzer fitted. Timeout: ``buzzer_config.COMMAND_TIMEOUT_S``."""
+        try:
+            cmd = Command.buzzer_on(int(ms))
+        except (ProtocolError, TypeError, ValueError) as exc:
+            return CommandResult.host_failure(Command.buzzer_off(), HostCode.INVALID_ARGUMENT, detail=str(exc))
+        return self._buzzer(cmd)
+
+    def buzzer_off(self) -> CommandResult:
+        return self._buzzer(Command.buzzer_off())
+
+    def buzzer_query(self) -> CommandResult:
+        """``BUZZER`` -> ``OK BUZZER ON <remaining ms>`` / ``OK BUZZER OFF`` (also the capability probe)."""
+        return self._buzzer(Command.buzzer_query())
+
+    def _buzzer(self, cmd: Command) -> CommandResult:
+        if self._closing.is_set():
+            return CommandResult.host_failure(cmd, HostCode.NOT_CONNECTED, detail="client closed")
+        if not self._is_connected():
+            return CommandResult.host_failure(cmd, HostCode.NOT_CONNECTED, detail="hardware not connected")
+        result = self._try_probe(cmd)   # probe-style lock: a drop waits for it, it never waits for a drop
+        if result is None:
+            busy = self._in_flight_line()
+            return CommandResult.host_failure(
+                cmd, HostCode.BUSY_LOCAL, detail=f"{busy} in flight" if busy else "another command is in flight"
+            )
+        return result
+
     def send_raw(self, line: str) -> CommandResult:
         """Demo console: validate with ``protocol.parse_command``; invalid lines are not sent."""
         parsed = parse_command(line, self.num_slots)

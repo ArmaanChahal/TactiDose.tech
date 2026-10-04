@@ -10,6 +10,7 @@ import { byId, debounce, errorText } from '../dom.js';
 import { createChatLog } from '../chat.js';
 import { displayTranscript } from '../pcm.js';
 import { VoiceInput, voiceInputAvailable } from '../voice.js';
+import { speakAfter } from '../wellbeing.js';
 
 const TALK_LABELS = {
   idle: 'Talk',
@@ -20,7 +21,11 @@ const TALK_LABELS = {
 };
 
 /**
- * ctx: {pid, prefs, speaker, stream, getOffset, getNow, onActions(actions), isVisible(), show()}
+ * ctx: {pid, prefs, speaker, stream, getOffset, getNow, onActions(actions), isVisible(), show(), notify()}
+ *
+ * After a pill drops the server offers a well-being check-in (SSE "wellbeing.prompt", or
+ * appended to the reply when the assistant dropped it): it is shown here, spoken after the
+ * "pill dropped" speech, and the patient answers yes or no like any other message.
  */
 export function createAssistant(ctx) {
   const log = byId('chat-log');
@@ -35,6 +40,8 @@ export function createAssistant(ctx) {
   let conversationId = null;
   let busy = false;
   let loaded = false;
+  /** after-drop check-in offers already shown (the SSE event and a chat reply can both carry one) */
+  const offered = new Set();
 
   async function loadConversation() {
     loaded = true;
@@ -87,6 +94,7 @@ export function createAssistant(ctx) {
       const body = { text, input_mode: mode, speak: Boolean(ctx.prefs.get('speakReplies')) };
       if (conversationId) body.conversation_id = conversationId;
       const reply = await post('/api/agent/chat', body, { timeoutMs: LONG_TIMEOUT_MS });
+      if (reply?.wellbeing?.offer_id) offered.add(reply.wellbeing.offer_id);
       conversationId = reply?.conversation_id ?? conversationId;
       const messages = Array.isArray(reply?.messages) ? reply.messages : [];
       pending.confirm(messages);
@@ -168,10 +176,23 @@ export function createAssistant(ctx) {
   });
 
   byId('stop-speaking').addEventListener('click', () => ctx.speaker.stop());
+  // Optional well-being check-in (tactidose/wellbeing.py): the server answers these turns
+  // itself and never stores them in the conversation. It does not affect pills.
+  byId('start-checkin')?.addEventListener('click', () => send('Start a well-being check-in', 'text'));
+
   byId('new-chat').addEventListener('click', () => {
     conversationId = null;
     chat.set([], { emptyText: 'New conversation. Ask about your pills, or ask for a pill.' });
     input.focus();
+  });
+
+  ctx.stream.on('wellbeing.prompt', (d, _env, meta) => {
+    if (meta?.replayed || !d?.offer_id || !d.text || offered.has(d.offer_id)) return;
+    offered.add(d.offer_id);
+    if (busy) return; // the reply of the message in flight carries the offer
+    chat.add([{ message_id: `wb-${d.offer_id}`, role: 'assistant', content: d.text }]);
+    if (ctx.prefs.get('speakReplies') || ctx.prefs.get('speakDrops')) speakAfter(ctx.speaker, d.text);
+    if (!ctx.isVisible()) ctx.notify?.('Would you like a quick well-being check-in? Open Assistant and say yes or no.', 'info');
   });
 
   ctx.stream.on('agent.message', (d, _env, meta) => {

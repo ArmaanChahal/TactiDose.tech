@@ -1,0 +1,16 @@
+{
+  "method": "GET",
+  "path": "/v1/health",
+  "status": 200,
+  "headers": {
+    "X-Dev-User-Id": "synthetic-user-001"
+  },
+  "request": null,
+  "response": {
+    "schema_version": "1.0",
+    "status": "ok",
+    "service": "tactidose-wellbeing",
+    "auth_configured": true,
+    "auth_mode": "dev"
+  }
+}

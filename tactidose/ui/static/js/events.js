@@ -22,6 +22,7 @@ export const PORTAL_TOPICS = Object.freeze([
   'agent.message',
   'report.updated',
   'device.state',
+  'wellbeing.prompt',
 ]);
 
 /** Extra topics sent in demo mode to users linked to the device's patient. */

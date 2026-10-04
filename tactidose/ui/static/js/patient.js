@@ -32,6 +32,7 @@ import {
 import { advanceLocalIso, spellOut } from './format.js';
 import { notificationSpeech } from './notifications.js';
 import { createDropHistory } from './history.js';
+import { createCheckinHistory } from './wellbeing.js';
 import { createReports } from './reports.js';
 import { ReplySpeaker } from './voice.js';
 import { createAssistant } from './patient/assistant.js';
@@ -66,6 +67,7 @@ let notifications = null;
 let assistant = null;
 let schedule = null;
 let history = null;
+let checkins = null;
 let reports = null;
 let statusSeq = 0;
 
@@ -88,7 +90,10 @@ function showView(name, { focus = true } = {}) {
   if (focus) byId(`${name}-title`).focus();
   if (name === 'assistant') assistant?.show();
   if (name === 'schedule') schedule?.load();
-  if (name === 'history') history?.load();
+  if (name === 'history') {
+    history?.load();
+    checkins?.load();
+  }
   if (name === 'reports') reports?.load();
 }
 
@@ -383,6 +388,7 @@ async function start() {
     getNow,
     onActions: onAssistantActions,
     isVisible: () => state.view === 'assistant',
+    notify: (message, kind) => notify(message, kind),
     show: () => {
       window.location.hash = '#assistant';
       showView('assistant', { focus: false });
@@ -402,6 +408,13 @@ async function start() {
     getOffset,
     getNow,
   });
+  checkins = createCheckinHistory(byId('wellbeing-root'), {
+    getPatientId: () => state.pid,
+    audience: 'patient',
+    canDelete: true,
+    notify,
+    getOffset,
+  });
   reports = createReports(byId('reports-root'), {
     getPatientId: () => state.pid,
     audience: 'patient',
@@ -415,6 +428,7 @@ async function start() {
     if (d?.patient_id !== undefined && Number(d.patient_id) !== Number(state.pid)) return;
     loadStatusSoon();
     if (state.view === 'schedule') schedule.load();
+    if (d?.reason === 'wellbeing' && state.view === 'history') checkins.load();
   });
   stream.on('drop.updated', (d, _env, meta) => {
     loadStatusSoon();

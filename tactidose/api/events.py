@@ -9,12 +9,13 @@ before a restart replays the history instead of hiding every new event.
 Who receives what (:meth:`EventScope.permits`):
 
 * ``notification`` — only its recipient (``data.user_id``);
+* ``wellbeing.prompt`` — only the patient it asks (``data.user_id``), never caregivers;
 * ``drop.updated`` / ``patient.status`` / ``agent.message`` / ``report.updated`` — the
   patient (``data.patient_id``) themself and caregivers linked to them;
 * ``device.state`` (+ the device-side voice captions ``assistant.spoken`` / ``voice.*``) — users
   linked to the device's patient;
 * demo mode only: ``device.line``, ``device.event``, ``sim.physical``, ``clock.changed``,
-  ``system.notice`` — users linked to the device's patient;
+  ``system.notice``, ``demo.guided`` — users linked to the device's patient;
 * anything else is never forwarded.
 
 The scope (links, device owner) and the session are re-checked every
@@ -54,7 +55,8 @@ MIN_WAIT_S = 0.01
 
 PATIENT_TOPICS = frozenset({Topic.DROP, Topic.PATIENT_STATUS, Topic.AGENT, Topic.REPORT})
 DEVICE_TOPICS = frozenset({Topic.DEVICE_STATE, Topic.SPOKEN, Topic.VOICE_HEARD, Topic.VOICE_STATUS})
-DEMO_TOPICS = frozenset({Topic.DEVICE_LINE, Topic.DEVICE_EVENT, Topic.SIM_PHYSICAL, Topic.CLOCK_CHANGED, Topic.NOTICE})
+DEMO_TOPICS = frozenset({Topic.DEVICE_LINE, Topic.DEVICE_EVENT, Topic.SIM_PHYSICAL, Topic.CLOCK_CHANGED, Topic.NOTICE,
+                         Topic.DEMO_GUIDED})
 
 HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
 
@@ -113,7 +115,7 @@ class EventScope:
 
     def permits(self, ev: BusEvent) -> bool:
         topic, data = ev.topic, ev.data or {}
-        if topic == Topic.NOTIFICATION:
+        if topic in (Topic.NOTIFICATION, Topic.WELLBEING_PROMPT):
             return _as_int(data.get("user_id")) == self.user_id
         if topic in PATIENT_TOPICS:
             return _as_int(data.get("patient_id")) in self.patient_ids

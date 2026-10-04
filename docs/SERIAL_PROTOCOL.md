@@ -339,3 +339,46 @@ answered after `OK DROPPED n` / `ERR NO_PILL` and `OK READY`.
 | Carousel (stepper) over one chute + trapdoor servo | stepper positions container `n` over the chute | trapdoor servo |
 | 3 fixed containers, one dispensing wheel/servo each | no motion (report `OK MOVING n`, `OK AT_SLOT n` immediately) | servo of container `n` rotates one pocket |
 | Drop sensor (optional, recommended) | – | IR break-beam in the chute sampled during the release |
+
+## 13. Optional extension — `BUZZER` **(added 2026-10-04)**
+
+A buzzer helps a blind user find the pill ("follow the sound to the table"). The extension is
+optional and additive: `STATUS` is unchanged and so is `proto=1.1`. The host discovers it by
+asking (13.3).
+
+### 13.1 Commands
+
+| Host sends | Device answers |
+|---|---|
+| `BUZZER ON <ms>` (`ms` = 1–65535, 1–5 digits) | `OK BUZZER ON <effective ms>`. The buzzer sounds for `min(ms, BUZZER_MAX_ON_MS)` and then stops by itself, with no further line |
+| `BUZZER OFF` | `OK BUZZER OFF` (also when it was already off) |
+| `BUZZER` | `OK BUZZER ON <remaining ms>` or `OK BUZZER OFF` (query, and the capability probe) |
+
+Errors:
+* Malformed arguments → `ERR UNKNOWN_COMMAND`. Examples: missing or zero `ms`, more than 65535,
+  more than 5 digits, a non-digit, an extra token, or a word other than `ON`/`OFF`.
+* `ERR NO_BUZZER`: the firmware has the extension but no buzzer is fitted (`BUZZER_PIN -1`).
+
+### 13.2 Device rules
+
+* **Accepted in every state**, like `STATUS`, and answered at once. It never moves anything and
+  never changes the state.
+* **Never blocks:** a timer in `loop()` serviced before anything else. The hard limit therefore
+  holds even during gate travel and releases. A `BUZZER` received during a `DROP_SLOT` release
+  waits like any other input (§12.2).
+* **Never delays `DROP_SLOT`:** a running buzzer and a drop run side by side. Scenario
+  `buzzer_never_delays_drop_slot` checks this.
+* **Silenced by `STOP`** (the `STOP` replies are unchanged) and **by a reset or reboot**.
+* **Hard maximum:** `BUZZER_MAX_ON_MS` (firmware `config.h`, default 10000 ms).
+
+### 13.3 Host behaviour (`tactidose/hardware/buzzer.py`)
+
+* Firmware without the extension answers `ERR UNKNOWN_COMMAND`. So do v1 devices.
+* `ERR UNKNOWN_COMMAND` or `ERR NO_BUZZER` → the host remembers "no buzzer" until the device
+  reboots or reconnects, and uses the laptop tone.
+* A timeout or a busy link → one retry (`buzzer_config.RETRIES`), then the laptop tone.
+* Timeout per command: `buzzer_config.COMMAND_TIMEOUT_S` (0.5 s).
+* The host sends `BUZZER` like a heartbeat probe. It is never sent while another command is in
+  flight. A drop requested during its round trip (a few ms) waits for it instead of being refused.
+* A buzzer failure never blocks or changes a drop.
+* Setup and rollback: `docs/BUZZER.md`.

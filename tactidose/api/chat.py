@@ -5,6 +5,10 @@ The patient id is always the session user's id — never taken from the request 
 
 * ``POST /api/agent/chat`` → ``AgentServiceAPI.chat``; with ``speak`` the reply is rendered
   to WAV (``AgentService.speak``) and served from ``/api/agent/audio/{id}.wav``.
+  When the well-being check-in is on, ``WellbeingBridge.handle_chat`` sees the text first:
+  check-in turns are answered there (``model="wellbeing"``) and never reach the agent or the
+  stored conversation; a turn that dropped a pill gets the check-in offer appended
+  (tactidose/wellbeing.py).
 * ``POST /api/agent/transcribe`` — raw 16-bit little-endian mono PCM at 16 kHz
   (``application/octet-stream``, ≤ 30 s = 960 000 bytes) → ``AgentService.transcribe``.
   503 when the offline recognizer (Vosk + model) is unavailable.
@@ -53,11 +57,21 @@ def chat(body: ChatBody, user: PatientUser, services: ServicesDep) -> dict[str, 
     text = body.text.strip()
     if not text:
         raise HTTPException(422, "Please say or type something.")
+    wellbeing = getattr(services, "wellbeing", None)
+    if wellbeing is not None:
+        routed = wellbeing.handle_chat(user.user_id, text, conversation_id=body.conversation_id)
+        if routed is not None:
+            if body.speak and wellbeing.server_tts and services.agent is not None:
+                routed["audio_url"] = _speak(services.agent, user.user_id, routed.get("text") or "")
+            return routed
     agent = require_service(services, "agent", AGENT_NAME)
     reply = agent.chat(
         patient_id=user.user_id, text=text, input_mode=body.input_mode, conversation_id=body.conversation_id,
     )
     out = to_dict(reply)
+    if wellbeing is not None and out.get("text"):
+        out = dict(out)
+        wellbeing.after_agent_turn(user.user_id, text, out)
     if body.speak and not out.get("audio_url"):
         out["audio_url"] = _speak(agent, user.user_id, out.get("text") or "")
     return out

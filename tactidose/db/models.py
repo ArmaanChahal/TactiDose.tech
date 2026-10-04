@@ -17,6 +17,9 @@ Tables
 * ``schedules`` / ``dose_events`` — editable schedule and its materialised occurrences.
 * ``pill_drops`` — every drop request and its outcome (DROPPED / DENIED / FAILED / UNCERTAIN).
 * ``conversations`` / ``conversation_messages`` — patient ↔ agent chats (patients only).
+* ``guided_demo_slots`` — results of the guided judge demo (one row per MORNING / NOON / NIGHT slot).
+* ``wellbeing_checkins`` / ``wellbeing_answers`` — consented, finished well-being check-ins
+  (optional ``tactidose-wellbeing`` package), usually asked right after a drop (``drop_id``).
 * ``reports`` / ``report_deliveries`` — generated PDF reports (bytes in the DB) and emails.
 * ``notifications`` — in-app notifications per recipient.
 * ``device_log`` / ``analytics_outbox`` — audit trail and Snowflake outbox (optional extra).
@@ -131,6 +134,8 @@ class NotificationKind(str, Enum):
     REPORT_READY = "REPORT_READY"
     REPORT_SENT = "REPORT_SENT"
     DEVICE_ALERT = "DEVICE_ALERT"
+    #: The patient used emergency / severe wording (guided demo check-in). Not a diagnosis.
+    HEALTH_CONCERN = "HEALTH_CONCERN"
 
 
 class ScanStatus(str, Enum):
@@ -444,6 +449,94 @@ class ConversationMessage(Base):
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
 
     conversation: Mapped[Conversation] = relationship(back_populates="messages")
+
+
+# --------------------------------------------------------------------------- well-being check-ins
+
+
+class WellbeingCheckin(Base):
+    """A finished check-in the patient consented to save (``tactidose/wellbeing.py``).
+
+    Informal, non-clinical self-reported answers (no scores). Usually asked right after a pill
+    dropped (``drop_id``). Visible to the patient and linked doctor/family; only the patient
+    deletes them. ``record_id`` is the package's id and makes saving idempotent.
+    """
+
+    __tablename__ = "wellbeing_checkins"
+    __table_args__ = (Index("ix_wellbeing_patient_time", "patient_id", "completed_at"),)
+
+    checkin_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    record_id: Mapped[str] = mapped_column(String(64), unique=True)
+    patient_id: Mapped[int] = mapped_column(ForeignKey("users.user_id"))
+    drop_id: Mapped[int | None] = mapped_column(ForeignKey("pill_drops.drop_id"), nullable=True, index=True)
+    schema_version: Mapped[str] = mapped_column(String(8))
+    started_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    completed_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    support_requested: Mapped[bool] = mapped_column(Boolean, default=False)
+    share_answers: Mapped[bool] = mapped_column(Boolean, default=False)
+    share_notes: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    answers: Mapped[list["WellbeingAnswer"]] = relationship(
+        back_populates="checkin", cascade="all, delete-orphan", order_by="WellbeingAnswer.position")
+
+
+class WellbeingAnswer(Base):
+    """One question of a check-in: its rating (or skipped / not reached) and the optional note."""
+
+    __tablename__ = "wellbeing_answers"
+    __table_args__ = (UniqueConstraint("checkin_id", "question_id", name="uq_wellbeing_answer"),)
+
+    answer_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    checkin_id: Mapped[int] = mapped_column(ForeignKey("wellbeing_checkins.checkin_id", ondelete="CASCADE"))
+    question_id: Mapped[str] = mapped_column(String(16))   # mood | stress | sleep | support
+    position: Mapped[int] = mapped_column(Integer, default=0)
+    answer_value: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    status: Mapped[str] = mapped_column(String(16))         # answered | skipped | not_reached
+    recorded_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    #: The patient's own words, confirmed by them; stored verbatim, never interpreted.
+    note_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    note_recorded_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+
+    checkin: Mapped[WellbeingCheckin] = relationship(back_populates="answers")
+
+
+# --------------------------------------------------------------------------- guided demo
+
+
+class GuidedDemoSlot(Base):
+    """One MORNING / NOON / NIGHT slot of a guided judge demo run (``tactidose/guided/``).
+
+    The drop itself lives in ``pill_drops`` (``drop_id``), the scheduled dose in ``dose_events``
+    (``dose_event_id``) and the spoken transcript in ``conversation_messages`` (``conversation_id``);
+    this row ties them together with the patient's answers and the check-in extraction.
+    """
+
+    __tablename__ = "guided_demo_slots"
+    __table_args__ = (UniqueConstraint("run_id", "slot_index", name="uq_guided_slot"),
+                      Index("ix_guided_patient_time", "patient_id", "created_at"))
+
+    slot_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    run_id: Mapped[str] = mapped_column(String(40), index=True)
+    patient_id: Mapped[int] = mapped_column(ForeignKey("users.user_id"))
+    slot_index: Mapped[int] = mapped_column(Integer)                 # 0 morning, 1 noon, 2 night
+    slot_name: Mapped[str] = mapped_column(String(16))
+    dose_event_id: Mapped[int | None] = mapped_column(ForeignKey("dose_events.event_id"), nullable=True)
+    drop_id: Mapped[int | None] = mapped_column(ForeignKey("pill_drops.drop_id"), nullable=True)
+    conversation_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    take_answer: Mapped[str] = mapped_column(String(16))             # yes | no | unclear
+    #: DROPPED | DECLINED | DENIED | FAILED | UNCERTAIN | NO_DOSE | STOPPED
+    outcome: Mapped[str] = mapped_column(String(16))
+    outcome_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    taken: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    #: The patient's own words for "How has your day been?" (verbatim, never interpreted as advice).
+    checkin_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    mood: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    symptoms: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    concerns: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    severity: Mapped[str | None] = mapped_column(String(16), nullable=True)   # none|mild|moderate|severe
+    extraction_source: Mapped[str | None] = mapped_column(String(16), nullable=True)   # rules | gemini
+    alert: Mapped[bool] = mapped_column(Boolean, default=False)      # emergency/severe wording (rules)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
 
 
 # --------------------------------------------------------------------------- reports

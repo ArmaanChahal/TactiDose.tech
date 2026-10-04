@@ -1,0 +1,95 @@
+{
+  "method": "POST",
+  "path": "/v1/sessions/ses_00000000000000000000000000000001/actions",
+  "status": 200,
+  "headers": {
+    "X-Dev-User-Id": "synthetic-user-001"
+  },
+  "request": {
+    "schema_version": "1.0",
+    "request_id": "req-0011",
+    "action": "answer",
+    "answer": "yes"
+  },
+  "response": {
+    "schema_version": "1.0",
+    "request_id": "req-0011",
+    "session_id": "ses_00000000000000000000000000000001",
+    "user_id": "synthetic-user-001",
+    "action": "answer",
+    "session_status": "awaiting_finish",
+    "step": 9,
+    "storage_mode": "save",
+    "next_question": {
+      "kind": "finish_review",
+      "question_id": null,
+      "prompt": "Here is what you told me. Mood: good, with a note. Stress: skipped. Sleep: poor. Support from a person: yes. Say finish to save this check-in, or cancel to discard it.",
+      "options": [
+        "finish",
+        "cancel"
+      ],
+      "position": null,
+      "total": 4
+    },
+    "speech_text": "Thank you. I've noted that you would like support from a person. I can't contact anyone myself, but your TactiDose app can help you choose how to reach someone. Here is what you told me. Mood: good, with a note. Stress: skipped. Sleep: poor. Support from a person: yes. Say finish to save this check-in, or cancel to discard it.",
+    "pending_input": null,
+    "confirmed_answers": [
+      {
+        "question_id": "mood",
+        "answer_value": "good",
+        "status": "answered",
+        "recorded_at": "2026-01-15T09:00:20Z",
+        "note_text": "Went for a walk in the park",
+        "note_recorded_at": "2026-01-15T09:00:30Z"
+      },
+      {
+        "question_id": "stress",
+        "answer_value": null,
+        "status": "skipped",
+        "recorded_at": "2026-01-15T09:00:40Z",
+        "note_text": null,
+        "note_recorded_at": null
+      },
+      {
+        "question_id": "sleep",
+        "answer_value": "poor",
+        "status": "answered",
+        "recorded_at": "2026-01-15T09:00:45Z",
+        "note_text": null,
+        "note_recorded_at": null
+      },
+      {
+        "question_id": "support",
+        "answer_value": "yes",
+        "status": "answered",
+        "recorded_at": "2026-01-15T09:00:55Z",
+        "note_text": null,
+        "note_recorded_at": null
+      }
+    ],
+    "summary": "Here is what you told me. Mood: good, with a note. Stress: skipped. Sleep: poor. Support from a person: yes.",
+    "support_requested": true,
+    "handoff": {
+      "type": "human_support",
+      "host_action_required": true,
+      "contacted_anyone": false,
+      "message": "I can't contact anyone myself, but your TactiDose app can help you choose how to reach someone."
+    },
+    "urgent_support": null,
+    "record_id": null,
+    "events": [
+      {
+        "event_id": "evt_03dacb4837c35b8984c943fdd667a85b",
+        "type": "support.requested",
+        "session_id": "ses_00000000000000000000000000000001",
+        "occurred_at": "2026-01-15T09:00:55Z",
+        "data": {
+          "handoff": "host_controlled"
+        }
+      }
+    ],
+    "expires_at": "2026-01-15T09:30:55Z",
+    "idempotent_replay": false,
+    "error": null
+  }
+}

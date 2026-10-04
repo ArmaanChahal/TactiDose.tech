@@ -31,6 +31,7 @@ const CommandEntry kCommands[] = {
     {"CLOSE_GATE", Command::kCloseGate},
     {"STOP", Command::kStop},
     {"DROP_SLOT", Command::kDropSlot},
+    {"BUZZER", Command::kBuzzer},
 };
 
 /* ASCII characters for which Python's str.isspace() is true (protocol.py tokenises with str.split()). */
@@ -74,6 +75,7 @@ ParsedLine parseLine(const char* text, size_t length, uint8_t numSlots) {
   r.command = Command::kNone;
   r.error = ErrorCode::kNone;
   r.slot = -1;
+  r.buzzerMs = -1;
   if (length > kMaxLineLength) {
     r.error = ErrorCode::kUnknownCommand;
     return r;
@@ -104,6 +106,33 @@ ParsedLine parseLine(const char* text, size_t length, uint8_t numSlots) {
     }
   }
   if (r.command == Command::kNone) {
+    r.error = ErrorCode::kUnknownCommand;
+    return r;
+  }
+  if (r.command == Command::kBuzzer) {
+    /* BUZZER | BUZZER OFF | BUZZER ON <1..65535>; anything else -> UNKNOWN_COMMAND (section 13). */
+    if (count == 1) return r;
+    if (count == 2 && tokenEquals(text + starts[1], lengths[1], "OFF")) {
+      r.buzzerMs = 0;
+      return r;
+    }
+    if (count == 3 && tokenEquals(text + starts[1], lengths[1], "ON") && lengths[2] >= 1 &&
+        lengths[2] <= kMaxBuzzerDigits) {
+      long value = 0;
+      bool digits = true;
+      for (size_t k = 0; k < lengths[2]; ++k) {
+        const char c = text[starts[2] + k];
+        if (c < '0' || c > '9') {
+          digits = false;
+          break;
+        }
+        value = value * 10 + (c - '0');
+      }
+      if (digits && value >= 1 && value <= kMaxBuzzerArgMs) {
+        r.buzzerMs = value;
+        return r;
+      }
+    }
     r.error = ErrorCode::kUnknownCommand;
     return r;
   }
@@ -153,6 +182,7 @@ const char* errorName(ErrorCode code) {
     case ErrorCode::kUnknownCommand: return "UNKNOWN_COMMAND";
     case ErrorCode::kStopped: return "STOPPED";
     case ErrorCode::kNoPill: return "NO_PILL";
+    case ErrorCode::kNoBuzzer: return "NO_BUZZER";
     case ErrorCode::kNone: break;
   }
   return "NONE";
@@ -195,6 +225,9 @@ void TactiDoseCore::resetState() {
   cancelPending_ = false;
   lineLen_ = 0;
   lineOverflow_ = false;
+  buzzerOn_ = false; /* a reset silences the buzzer (begin() also drives the pin off) */
+  buzzerStartMs_ = 0;
+  buzzerDurMs_ = 0;
 }
 
 void TactiDoseCore::begin() {
@@ -203,6 +236,7 @@ void TactiDoseCore::begin() {
   if (cfg_.numSlots > kMaxSlots) cfg_.numSlots = kMaxSlots;
   if (!carousel()) cfg_.hasHomeSensor = false; /* fixed containers: nothing to home */
   const uint32_t now = hal_->millis();
+  hal_->buzzerWrite(false);
   if (carousel()) {
     hal_->stepperEnable(false);
     hal_->stepperSetMaxSpeed(cfg_.maxSpeed);
@@ -230,6 +264,7 @@ void TactiDoseCore::begin() {
 
 void TactiDoseCore::loop() {
   const uint32_t now = hal_->millis();
+  serviceBuzzer(now); /* first: its hard max holds even during gate travel and releases */
   serviceButtons(now); /* debounced continuously, also during gate travel and releases */
   if (releasing_) sampleDropSensor(now); /* the whole release, gate travel included */
   if (gateMoving_) {
@@ -363,6 +398,9 @@ void TactiDoseCore::execute(const ParsedLine& parsed, uint32_t now) {
     case Command::kStop:
       handleStop(now);
       return;
+    case Command::kBuzzer: /* accepted in every state, like STATUS; never blocks (section 13) */
+      handleBuzzer(parsed, now);
+      return;
     case Command::kHome:
       if (busy) {
         emitError(ErrorCode::kBusy);
@@ -416,6 +454,7 @@ void TactiDoseCore::execute(const ParsedLine& parsed, uint32_t now) {
 }
 
 void TactiDoseCore::handleStop(uint32_t now) {
+  silenceBuzzer(); /* STOP silences the buzzer; the STOP replies are unchanged */
   switch (state_) {
     case DeviceState::kHoming:
     case DeviceState::kMoving:
@@ -429,6 +468,50 @@ void TactiDoseCore::handleStop(uint32_t now) {
       enterSafeStop(); /* OK STOPPED */
       return;
   }
+}
+
+/* ------------------------------------------------------------------------- buzzer (section 13) */
+
+void TactiDoseCore::handleBuzzer(const ParsedLine& parsed, uint32_t now) {
+  if (!cfg_.hasBuzzer) {
+    emitError(ErrorCode::kNoBuzzer);
+    return;
+  }
+  char line[40];
+  if (parsed.buzzerMs < 0) { /* query: OK BUZZER ON <remaining ms> | OK BUZZER OFF */
+    if (buzzerOn_) {
+      const uint32_t done = static_cast<uint32_t>(now - buzzerStartMs_);
+      const uint32_t left = buzzerDurMs_ > done ? buzzerDurMs_ - done : 1U;
+      snprintf(line, sizeof(line), "OK BUZZER ON %lu", static_cast<unsigned long>(left));
+      emit(line);
+    } else {
+      emit("OK BUZZER OFF");
+    }
+    return;
+  }
+  if (parsed.buzzerMs == 0) {
+    silenceBuzzer();
+    emit("OK BUZZER OFF");
+    return;
+  }
+  uint32_t ms = static_cast<uint32_t>(parsed.buzzerMs);
+  if (ms > cfg_.buzzerMaxOnMs) ms = cfg_.buzzerMaxOnMs; /* hard max */
+  buzzerOn_ = true;
+  buzzerStartMs_ = now;
+  buzzerDurMs_ = ms;
+  hal_->buzzerWrite(true);
+  snprintf(line, sizeof(line), "OK BUZZER ON %lu", static_cast<unsigned long>(ms));
+  emit(line);
+}
+
+void TactiDoseCore::serviceBuzzer(uint32_t now) {
+  if (buzzerOn_ && elapsed(now, buzzerStartMs_, buzzerDurMs_)) silenceBuzzer(); /* stops by itself, no line */
+}
+
+void TactiDoseCore::silenceBuzzer() {
+  if (!buzzerOn_) return;
+  buzzerOn_ = false;
+  hal_->buzzerWrite(false);
 }
 
 /* ------------------------------------------------------------------------- homing (rule 8.5) */

@@ -64,6 +64,11 @@ class Hal {
    * The core samples it only during a DROP_SLOT release and only if CoreConfig::hasDropSensor. */
   virtual bool dropSensorActive() = 0;
 
+  /* ---- buzzer (optional BUZZER extension, SERIAL_PROTOCOL.md section 13) ---- */
+  /* Sound (true) or silence (false) the buzzer. Must return at once (no delay, no tone loop):
+   * the core calls it from loop() and from command handling. Default: no buzzer fitted. */
+  virtual void buzzerWrite(bool on) { (void)on; }
+
   /* ---- serial link to the host ---- */
   /* Next received byte, or -1 if none is waiting. */
   virtual int serialRead() = 0;

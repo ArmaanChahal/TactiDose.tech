@@ -421,6 +421,111 @@
         {"wait_ms": 2000, "expect": []},
         {"send": "STATUS", "expect": ["status:state=FAULT,gate=CLOSED"]}
       ]
+    },
+    {
+      "name": "buzzer_on_off_and_query",
+      "hardware_safe": false,
+      "tags": ["buzzer"],
+      "steps": [
+        {"boot": "ok", "expect": ["re:EVENT BOOT \\S+", "OK HOMING", "OK HOMED", "OK READY"]},
+        {"send": "BUZZER", "expect": ["OK BUZZER OFF"]},
+        {"send": "BUZZER ON 500", "expect": ["OK BUZZER ON 500"]},
+        {"send": "BUZZER", "expect": ["re:OK BUZZER ON [1-9][0-9]*"]},
+        {"send": "BUZZER OFF", "expect": ["OK BUZZER OFF"]},
+        {"send": "BUZZER", "expect": ["OK BUZZER OFF"]},
+        {"send": "buzzer on 300", "expect": ["OK BUZZER ON 300"]},
+        {"send": "BUZZER OFF", "expect": ["OK BUZZER OFF"]},
+        {"send": "BUZZER OFF", "expect": ["OK BUZZER OFF"]},
+        {"send": "STATUS", "expect": ["status:state=READY,proto=1.1"]}
+      ]
+    },
+    {
+      "name": "buzzer_stops_by_itself",
+      "hardware_safe": false,
+      "tags": ["buzzer"],
+      "steps": [
+        {"boot": "ok", "expect": ["re:EVENT BOOT \\S+", "OK HOMING", "OK HOMED", "OK READY"]},
+        {"send": "BUZZER ON 200", "expect": ["OK BUZZER ON 200"]},
+        {"wait_ms": 300, "expect": []},
+        {"send": "BUZZER", "expect": ["OK BUZZER OFF"]}
+      ]
+    },
+    {
+      "name": "buzzer_hard_max_duration",
+      "hardware_safe": false,
+      "tags": ["buzzer"],
+      "steps": [
+        {"boot": "ok", "expect": ["re:EVENT BOOT \\S+", "OK HOMING", "OK HOMED", "OK READY"]},
+        {"send": "BUZZER ON 65535", "expect": ["OK BUZZER ON 10000"]},
+        {"wait_ms": 9800, "expect": []},
+        {"send": "BUZZER", "expect": ["re:OK BUZZER ON [1-9][0-9]*"]},
+        {"wait_ms": 300, "expect": []},
+        {"send": "BUZZER", "expect": ["OK BUZZER OFF"]}
+      ]
+    },
+    {
+      "name": "buzzer_invalid_arguments",
+      "hardware_safe": false,
+      "tags": ["buzzer"],
+      "steps": [
+        {"boot": "ok", "expect": ["re:EVENT BOOT \\S+", "OK HOMING", "OK HOMED", "OK READY"]},
+        {"send": "BUZZER ON", "expect": ["ERR UNKNOWN_COMMAND"]},
+        {"send": "BUZZER ON 0", "expect": ["ERR UNKNOWN_COMMAND"]},
+        {"send": "BUZZER ON 65536", "expect": ["ERR UNKNOWN_COMMAND"]},
+        {"send": "BUZZER ON 123456", "expect": ["ERR UNKNOWN_COMMAND"]},
+        {"send": "BUZZER ON 12A", "expect": ["ERR UNKNOWN_COMMAND"]},
+        {"send": "BUZZER OFF 5", "expect": ["ERR UNKNOWN_COMMAND"]},
+        {"send": "BUZZER LOUD", "expect": ["ERR UNKNOWN_COMMAND"]},
+        {"send": "BUZZERS ON 5", "expect": ["ERR UNKNOWN_COMMAND"]},
+        {"send": "BUZZER", "expect": ["OK BUZZER OFF"]}
+      ]
+    },
+    {
+      "name": "stop_silences_buzzer",
+      "hardware_safe": false,
+      "tags": ["buzzer"],
+      "steps": [
+        {"boot": "ok", "expect": ["re:EVENT BOOT \\S+", "OK HOMING", "OK HOMED", "OK READY"]},
+        {"send": "BUZZER ON 5000", "expect": ["OK BUZZER ON 5000"]},
+        {"send": "STOP", "expect": ["OK STOPPED"]},
+        {"send": "BUZZER", "expect": ["OK BUZZER OFF"]}
+      ]
+    },
+    {
+      "name": "reboot_silences_buzzer",
+      "hardware_safe": false,
+      "tags": ["buzzer"],
+      "steps": [
+        {"boot": "ok", "expect": ["re:EVENT BOOT \\S+", "OK HOMING", "OK HOMED", "OK READY"]},
+        {"send": "BUZZER ON 5000", "expect": ["OK BUZZER ON 5000"]},
+        {"boot": "ok", "expect": ["re:EVENT BOOT \\S+", "OK HOMING", "OK HOMED", "OK READY"]},
+        {"send": "BUZZER", "expect": ["OK BUZZER OFF"]}
+      ]
+    },
+    {
+      "name": "buzzer_accepted_while_homing",
+      "hardware_safe": false,
+      "tags": ["buzzer"],
+      "steps": [
+        {"boot": "ok", "expect": ["re:EVENT BOOT \\S+", "OK HOMING"]},
+        {"send": "BUZZER ON 400", "expect": ["OK BUZZER ON 400"]},
+        {"wait_ms": 45000, "expect": ["OK HOMED", "OK READY"]},
+        {"send": "BUZZER", "expect": ["OK BUZZER OFF"]}
+      ]
+    },
+    {
+      "name": "buzzer_never_delays_drop_slot",
+      "hardware_safe": false,
+      "tags": ["buzzer"],
+      "steps": [
+        {"boot": "ok", "expect": ["re:EVENT BOOT \\S+", "OK HOMING", "OK HOMED", "OK READY"]},
+        {"send": "BUZZER ON 3000", "expect": ["OK BUZZER ON 3000"]},
+        {"send": "DROP_SLOT 1", "within_ms": 30000, "expect": ["OK MOVING 1", "OK AT_SLOT 1", "OK GATE_OPEN", "OK GATE_CLOSED", "OK DROPPED 1", "OK READY"]},
+        {"send": "DROP_SLOT 2", "expect": ["OK MOVING 2"]},
+        {"send": "BUZZER ON 1000", "expect": ["OK BUZZER ON 1000"]},
+        {"wait_ms": 30000, "expect": ["OK AT_SLOT 2", "OK GATE_OPEN", "OK GATE_CLOSED", "OK DROPPED 2", "OK READY"]},
+        {"send": "STATUS", "expect": ["status:state=READY,homed=1,slot=2,gate=CLOSED"]}
+      ]
     }
   ]
 }

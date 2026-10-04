@@ -126,6 +126,7 @@ The UI in `tactidose/ui/static/` uses only these endpoints.
 | `GET …/conversations/{cid}/messages` | – | `[Message]` |
 | `GET …/reports` | – | `[ReportMeta]` newest first |
 | `POST …/reports` | `{days: 1–90}` | 201 `ReportMeta` (generated synchronously) |
+| `GET …/wellbeing?days=30` | – | `[CheckinView]` newest first: saved well-being check-ins `{checkin_id, record_id, completed_at, completed_local, support_requested, after_drop: {drop_id, medication_name, container_number, source, dropped_at, dropped_local}\|null, answers: [{question_id, label, answer_value, status, note_text}]}` (patient + linked caregivers; read-only) |
 
 Patient-only conversations: only messages exchanged between the patient and the agent are stored;
 caregivers *read* them through the endpoints above but never create conversation records.
@@ -137,6 +138,38 @@ caregivers *read* them through the endpoints above but never create conversation
 | `POST /api/agent/chat` | `{text, conversation_id?, input_mode?: "text"\|"voice", speak?: bool}` | `AgentReply` (`audio_url` set when `speak` and TTS is available) |
 | `POST /api/agent/transcribe` | raw 16-bit little-endian mono PCM at 16 kHz (`Content-Type: application/octet-stream`, ≤ 30 s) | `{text, confidence, engine: "vosk"}`; 503 if the offline recognizer is unavailable |
 | `GET /api/agent/audio/{audio_id}.wav` | – | `audio/wav` (short-lived, only for the requesting patient) |
+
+With the optional well-being check-in installed, `POST /api/agent/chat` first offers the text to
+`tactidose/wellbeing.py`. A check-in turn comes back in the same shape with `model: "wellbeing"`,
+`actions: []`, echo `messages` with string ids (nothing is stored in `conversations`) and a
+`wellbeing` object (`session_id, session_status, step, next_question, storage_mode, handoff,
+urgent_support, record_id, events, error`). Emergencies, "stop", pill requests and "what do I take
+now" always reach the agent; while a check-in is open the agent's reply gets a one-line reminder.
+
+## Well-being check-in (patient only, optional)
+
+The `tactidose-wellbeing` package's own REST API, mounted at `/api/wellbeing` with TactiDose
+sessions as identity (cookie or bearer; caregivers get 403 `patient_only` and read check-ins
+through `GET /api/patients/{pid}/wellbeing` instead). Saved check-ins live in the main database
+(`wellbeing_checkins` / `wellbeing_answers`). Contract:
+`tactidose-wellbeing/docs/integration-contract.md`; Swagger: `/api/wellbeing/docs`.
+
+| Method & path | Body | Response |
+|---|---|---|
+| `GET /api/wellbeing/v1/health` | – | `{auth_mode: "tactidose_session", ...}` |
+| `POST /api/wellbeing/v1/sessions` | `{request_id}` | 201 `CheckinResponse` |
+| `POST /api/wellbeing/v1/sessions/{session_id}/actions` | `{request_id, action, answer?, note_text?, expected_step?, question_id?}` | `CheckinResponse` |
+| `GET /api/wellbeing/v1/me/history` | – | `HistoryResponse` |
+| `DELETE /api/wellbeing/v1/me/history` | – | `DeleteResponse` (all of the patient's check-ins) |
+| `DELETE /api/wellbeing/v1/me/history/{record_id}` | – | `DeleteResponse` (one check-in) |
+| `DELETE /api/wellbeing/v1/me/history/{record_id}/notes/{question_id}` | – | `DeleteResponse` (one note; the rating stays) |
+
+**After a drop.** Every `DROPPED` pill offers the patient a check-in: SSE `wellbeing.prompt`
+`{user_id, patient_id, offer_id, drop_id, kind: "offer", text}` (patient only, never caregivers)
+and, when the agent dropped the pill, the offer is appended to that chat reply
+(`wellbeing: {kind: "offer", offer_id, drop_id}`). The patient answers through
+`POST /api/agent/chat`: yes starts the check-in linked to that drop; anything else dismisses the
+offer. At most one offer per `TACTIDOSE_WELLBEING_AFTER_DROP_GAP_MINUTES` (default 120).
 
 ## Reports
 
@@ -169,6 +202,19 @@ Access to `/api/reports/{rid}…` follows the report's patient (patient themself
 | `POST /api/demo/jump-to-next-dose` *(demo; same)* | – | `{clock, next: DoseView\|null}` |
 | `GET/POST /api/demo/simulator` *(demo; same)* | `{fault, enabled}` \| `{press: "CONFIRM"\|"CANCEL"}` \| `{reboot: true}` \| `{pills: {slot, count}}` | `{available, physical:{angle_deg, slot, target_slot, gate_open, state, releasing, pills:[physical count per container], pills_dropped, drop_sensor, proto, num_slots, fw_version, ...}, faults:{home_sensor_dead, motor_jam, unresponsive, brownout_on_gate, brownout_on_release, disconnect}}` — simulated *physical* pill counts are separate from the database's `pill_count` |
 | `POST /api/demo/reset` *(demo; linked doctor/family)* | `{reseed?: bool}` | `{ok, summary}` — wipes drops, doses, conversations, reports and notifications and resets the demo clock; accounts and sessions are kept |
+| `POST /api/demo/guided/start` *(demo; device's patient or linked doctor/family)* | `{reset?: bool}` (`reset` = re-seed the demo data at the morning slot first; doctor/family only) | `GuidedState` `{patient_id, run_id, state: starting\|running\|finished\|stopped\|alerted\|error, step, slot, awaiting: yes_no\|free_text\|null, buzzer, results:[SlotResult], transcript}`; 409 while a run is going |
+| `POST /api/demo/guided/answer` *(demo; same)* | `{text, input_mode?: "text"\|"voice"}` | `{accepted}` (false when no question is waiting; one answer per question) |
+| `POST /api/demo/guided/stop` *(demo; same)* | – | `{stopped}` — ends the run and stops the dispenser |
+| `GET /api/demo/guided` *(demo; same)* | – | `GuidedState` or `{state: "idle"}` |
+
+**Guided judge demo** (`tactidose/guided/`): MORNING / NOON / NIGHT = containers 1 / 2 / 3 and their
+scheduled doses. Per slot: "Do you want to take it?" (unclear twice = no) → no: the dose is skipped
+(`dose_events` CANCELLED, note "Declined…") → yes: buzzer + one `request_drop(source="schedule",
+dose_event_id)` through every normal rule → "Did you take the pill?" (`confirm_pill_taken`) → "How has
+your day been?" (rules extraction, optional Gemini, validated). Emergency/severe wording: the fixed
+emergency reply + a `HEALTH_CONCERN` notification, and the run ends. The demo clock moves forward to
+15 min before each dose. Progress: SSE `demo.guided` (demo mode, users linked to the device's
+patient). Results: `guided_demo_slots`, transcript in a "Guided demo" conversation.
 
 ## Optional extras (kept from the handoff, off the main flow)
 

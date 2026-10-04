@@ -20,7 +20,7 @@ Audience policy per kind (applied by the callers; documented here for reference)
     PILL_DROPPED                      patient; caregivers if settings.notify_caregivers_on_drop
     DROP_FAILED / DROP_UNCERTAIN /
     DEVICE_ALERT / LOW_STOCK / EMPTY /
-    MISSED_DOSE                       patient + caregivers
+    MISSED_DOSE / HEALTH_CONCERN      patient + caregivers
     REPORT_READY / REPORT_SENT        the report's creator (user_ids=[creator])
     DROP_DENIED                       shown inline by the caller, never stored
 
@@ -71,6 +71,7 @@ KIND_AUDIENCE: dict[str, tuple[bool, bool | None]] = {
     NotificationKind.LOW_STOCK.value: (True, True),
     NotificationKind.EMPTY.value: (True, True),
     NotificationKind.MISSED_DOSE.value: (True, True),
+    NotificationKind.HEALTH_CONCERN.value: (True, True),     # emergency/severe wording (guided demo)
     NotificationKind.REPORT_READY.value: (False, False),      # explicit user_ids (the creator)
     NotificationKind.REPORT_SENT.value: (False, False),
     NotificationKind.DROP_DENIED.value: (False, False),       # never stored

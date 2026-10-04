@@ -25,6 +25,12 @@ active while ``physical_steps mod steps_per_rev`` is in ``[0, sensor_zone_steps)
 records the rising edge, debounces it and returns to the edge, so slot ``k`` is physically
 centred at ``round(k * steps_per_rev / N)`` steps after homing.
 
+Buzzer (optional extension, docs/SERIAL_PROTOCOL.md §13): ``BUZZER ON <ms>`` sounds it for
+``min(ms, buzzer_max_on_ms)`` (non-blocking, serviced every loop - also during gate travel - so
+it never delays a drop), ``BUZZER OFF`` / ``STOP`` / a reboot silence it, ``BUZZER`` queries it.
+Fault hook :attr:`VirtualESP32.buzzer_fault` (``SimulatedDevice.set_buzzer_fault``): ``missing``
+(old firmware: ``ERR UNKNOWN_COMMAND``), ``no_pin`` (``ERR NO_BUZZER``), ``unresponsive`` (no reply).
+
 Pills (v1.1): every container holds ``pills[k]`` pills (physical, survives reboots). Each time
 the gate/release finishes opening, one pill falls from the container that is *physically*
 over the chute (if it has any) and breaks the drop-sensor beam. ``DROP_SLOT n`` = move ->
@@ -78,6 +84,7 @@ __all__ = [
     "SIM_PROTO",
     "SIM_FW_V11",
     "SIM_FW_V1",
+    "BUZZER_FAULTS",
     "SimConfig",
     "VirtualESP32",
     "SimulatedDevice",
@@ -85,6 +92,8 @@ __all__ = [
 ]
 
 BUTTONS = ("CONFIRM", "CANCEL")
+#: Buzzer fault modes (kept apart from FAULT_NAMES, so the demo panel's fault list is unchanged).
+BUZZER_FAULTS = ("missing", "no_pin", "unresponsive")
 SENSOR_MODES = ("ok", "dead", "none")
 FAULT_NAMES = (
     "home_sensor_dead", "motor_jam", "unresponsive", "brownout_on_gate", "brownout_on_release",
@@ -96,6 +105,9 @@ SIM_PROTO = "1.1"
 SIM_FW_V11 = "sim-1.1.0"
 #: Firmware version reported when the simulator plays v1 firmware (``proto=None``).
 SIM_FW_V1 = "sim-1.0.0"
+#: The reference firmware's BUZZER_MAX_ON_MS default (firmware config.h) - the device's own limit,
+#: deliberately not the host's buzzer_config.MAX_ON_MS.
+SIM_BUZZER_MAX_ON_MS = 10_000
 
 #: Homing aborts after this many carousel revolutions without finding home (§8.5).
 HOMING_MAX_REVS = 1.25
@@ -157,6 +169,12 @@ class SimConfig:
     #: Protocol version reported in ``STATUS``. None = behave as v1 firmware: ``DROP_SLOT`` is
     #: ``ERR UNKNOWN_COMMAND`` and ``STATUS`` has no ``proto``/``drop_sensor`` keys.
     proto: str | None = SIM_PROTO
+    #: Optional BUZZER extension implemented (False = firmware without it: ERR UNKNOWN_COMMAND).
+    buzzer: bool = True
+    #: A buzzer is fitted (False = the extension answers ERR NO_BUZZER, like BUZZER_PIN -1).
+    buzzer_fitted: bool = True
+    #: Hard limit of one BUZZER ON (firmware BUZZER_MAX_ON_MS).
+    buzzer_max_on_ms: int = SIM_BUZZER_MAX_ON_MS
 
     def __post_init__(self) -> None:
         if not (MIN_SLOTS <= self.num_slots <= MAX_SLOTS):
@@ -171,6 +189,8 @@ class SimConfig:
             raise ValueError("durations must be >= 0")
         if self.home_timeout_ms <= 0 or self.gate_max_open_ms <= 0:
             raise ValueError("timeouts must be > 0")
+        if not 1 <= int(self.buzzer_max_on_ms) <= 65535:
+            raise ValueError("buzzer_max_on_ms must be in 1..65535")
         pills = self.initial_pills
         if isinstance(pills, bool) or not isinstance(pills, int) or pills < 0:
             raise ValueError("initial_pills must be an int >= 0")
@@ -372,6 +392,8 @@ class VirtualESP32:
         #: Fault hook: the MCU resets as a ``DROP_SLOT`` release starts to close - after
         #: ``OK GATE_OPEN`` (the pill has fallen) but before ``OK GATE_CLOSED`` / ``OK DROPPED``.
         self.brownout_on_release = False
+        #: Buzzer fault hook: None | "missing" | "no_pin" | "unresponsive" (see module docs).
+        self.buzzer_fault: str | None = None
         # ---- firmware
         self._booted = False
         self._boots = 0
@@ -505,6 +527,7 @@ class VirtualESP32:
             "drop_sensor": self.config.drop_sensor,
             "pills": list(self._pills),
             "pills_dropped": self._pills_dropped,
+            "buzzer_on": self._buzz_until is not None,
             "time_ms": self._time,
         }
 
@@ -523,6 +546,7 @@ class VirtualESP32:
         self._gate_opened_at = None
         self._releasing = None
         self._saw_pill = False
+        self._buzz_until: int | None = None     # a reset silences the buzzer
         # A button held through a reset is not reported as a new press.
         self._buttons = {name: _Button(stable=self._raw_buttons[name]) for name in BUTTONS}
         self._rx.clear()
@@ -542,6 +566,8 @@ class VirtualESP32:
     def _loop(self) -> None:
         if not self._booted:
             return
+        if self._buzz_until is not None and self._time >= self._buzz_until:
+            self._buzz_until = None             # hard max: before anything that can block
         if self._travel is not None:
             if not self._advance_travel():
                 return                      # blocked in the servo move (§8.2)
@@ -573,6 +599,10 @@ class VirtualESP32:
         """How many upcoming milliseconds provably do nothing (skipped by :meth:`tick`)."""
         if not self._booted:
             return limit
+        if self._buzz_until is not None:
+            limit = max(0, min(limit, self._buzz_until - self._time - 1))
+            if limit == 0:
+                return 0
         if (
             self._travel is not None
             or self._move is not None
@@ -620,6 +650,12 @@ class VirtualESP32:
         if parsed.name is CommandName.DROP_SLOT and not self.config.drop_slot_supported:
             self._err(Err.UNKNOWN_COMMAND)      # v1 firmware does not know the word at all
             return
+        if parsed.name is CommandName.BUZZER:
+            if not self._buzzer_known():
+                self._err(Err.UNKNOWN_COMMAND)  # firmware without the extension
+                return
+            if self.buzzer_fault == "unresponsive":
+                return                          # fault: the reply never comes
         if parsed.command is None:
             self._err(parsed.error or Err.UNKNOWN_COMMAND)
             return
@@ -640,6 +676,30 @@ class VirtualESP32:
             self._cmd_close_gate()
         elif name is CommandName.STOP:
             self._cmd_stop()
+        elif name is CommandName.BUZZER:
+            self._cmd_buzzer(cmd.args)
+
+    def _buzzer_known(self) -> bool:
+        c = self.config
+        return c.buzzer and c.drop_slot_supported and self.buzzer_fault != "missing"
+
+    def _cmd_buzzer(self, args: tuple[str, ...]) -> None:
+        """``BUZZER ON <ms>`` / ``BUZZER OFF`` / ``BUZZER``: accepted in every state, never blocks."""
+        if not self.config.buzzer_fitted or self.buzzer_fault == "no_pin":
+            self._err(Err.NO_BUZZER)
+            return
+        if not args:
+            if self._buzz_until is None:
+                self._ok(Ok.BUZZER, "OFF")
+            else:
+                self._ok(Ok.BUZZER, "ON", max(1, self._buzz_until - self._time))
+        elif args[0] == "OFF":
+            self._buzz_until = None
+            self._ok(Ok.BUZZER, "OFF")
+        else:
+            ms = min(int(args[1]), int(self.config.buzzer_max_on_ms))
+            self._buzz_until = self._time + ms
+            self._ok(Ok.BUZZER, "ON", ms)
 
     def _status_line(self) -> str:
         c = self.config
@@ -705,6 +765,7 @@ class VirtualESP32:
             self._ok(Ok.GATE_CLOSED)        # re-assert closed, no state change
 
     def _cmd_stop(self) -> None:
+        self._buzz_until = None                 # STOP silences the buzzer (no extra line)
         s = self._state
         if s in BUSY_STATES:
             self._interrupt()
@@ -1270,6 +1331,14 @@ class SimulatedDevice:
         if unplugged is not None:
             unplugged._kill("simulated USB disconnect")
         log.info("simulator fault %s = %s", key, on)
+
+    def set_buzzer_fault(self, mode: str | None) -> None:
+        """Buzzer fault injection: None (healthy) or one of :data:`BUZZER_FAULTS`."""
+        if mode is not None and mode not in BUZZER_FAULTS:
+            raise ValueError(f"buzzer fault must be None or one of {BUZZER_FAULTS}, got {mode!r}")
+        with self._lock:
+            self._esp.buzzer_fault = mode
+        log.info("simulator buzzer fault = %s", mode)
 
     def faults(self) -> dict[str, bool]:
         with self._lock:

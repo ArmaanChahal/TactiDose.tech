@@ -102,10 +102,13 @@ class FakeHal : public tactidose::Hal {
   bool homeSensorActive() override;
   bool buttonPressed(tactidose::Button button) override;
   bool dropSensorActive() override;
+  void buzzerWrite(bool on) override { buzzerOn_ = on; } /* recorded only (conformance uses BUZZER queries) */
+  bool buzzerOn() const { return buzzerOn_; }
   int serialRead() override;
   void serialWriteLine(const char* line) override;
 
  private:
+  bool buzzerOn_ = false;
   long long phase() const; /* physical position mod stepsPerRev, in [0, stepsPerRev) */
   bool sensorReads() const;
   bool beamInterrupted() const;

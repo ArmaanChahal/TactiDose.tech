@@ -1,0 +1,1875 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "TactiDose Well-being Check-in API",
+    "description": "\nOptional, informal well-being check-in for the TactiDose prototype.\n\n* Not a clinical assessment. No scores, diagnoses or inferences are produced.\n* Never affects medication schedules, dispensing or hardware.\n* The host owns microphones, speech recognition, text-to-speech and UI. Send text, play `speech_text`.\n* The authenticated user comes from the configured identity provider, never from the request body.\n",
+    "version": "1.0"
+  },
+  "paths": {
+    "/v1/health": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "Health",
+        "operationId": "health_v1_health_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/sessions": {
+      "post": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "Start a check-in session",
+        "operationId": "start_session_v1_sessions_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StartSessionRequest"
+              },
+              "examples": {
+                "start": {
+                  "summary": "Start a check-in",
+                  "value": {
+                    "schema_version": "1.0",
+                    "request_id": "req-0001"
+                  }
+                }
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CheckinResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "user_id does not match the authenticated user",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found (or not owned by this user)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Authentication not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/sessions/{session_id}/actions": {
+      "post": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "Submit an action (answer, add_note, confirm, reject, remove_note, repeat, skip, cancel, finish)",
+        "operationId": "submit_action_v1_sessions__session_id__actions_post",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ActionRequest"
+              },
+              "examples": {
+                "consent_yes": {
+                  "summary": "Consent to saving",
+                  "value": {
+                    "schema_version": "1.0",
+                    "request_id": "req-0002",
+                    "action": "answer",
+                    "answer": "yes"
+                  }
+                },
+                "answer": {
+                  "summary": "Answer the current question (guarded)",
+                  "value": {
+                    "schema_version": "1.0",
+                    "request_id": "req-0003",
+                    "action": "answer",
+                    "answer": "I feel pretty low",
+                    "question_id": "mood",
+                    "expected_step": 1
+                  }
+                },
+                "add_note": {
+                  "summary": "Add an optional note",
+                  "value": {
+                    "schema_version": "1.0",
+                    "request_id": "req-0004",
+                    "action": "add_note",
+                    "note_text": "A busy week at work."
+                  }
+                },
+                "confirm": {
+                  "summary": "Confirm",
+                  "value": {
+                    "schema_version": "1.0",
+                    "request_id": "req-0005",
+                    "action": "confirm"
+                  }
+                },
+                "skip": {
+                  "summary": "Skip",
+                  "value": {
+                    "schema_version": "1.0",
+                    "request_id": "req-0006",
+                    "action": "skip"
+                  }
+                },
+                "cancel": {
+                  "summary": "Cancel",
+                  "value": {
+                    "schema_version": "1.0",
+                    "request_id": "req-0007",
+                    "action": "cancel"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CheckinResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "user_id does not match the authenticated user",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found (or not owned by this user)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Authentication not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Action not valid in the current state, stale step, question mismatch, ended session, or idempotency conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CheckinResponse"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Session expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CheckinResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/sessions/{session_id}": {
+      "get": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "Read the current session state (no state change)",
+        "operationId": "get_session_v1_sessions__session_id__get",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CheckinResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "user_id does not match the authenticated user",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found (or not owned by this user)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Authentication not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/me/history": {
+      "get": {
+        "tags": [
+          "history"
+        ],
+        "summary": "Get History",
+        "operationId": "get_history_v1_me_history_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HistoryResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "user_id does not match the authenticated user",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found (or not owned by this user)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Authentication not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "history"
+        ],
+        "summary": "Delete History",
+        "operationId": "delete_history_v1_me_history_delete",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeleteResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "user_id does not match the authenticated user",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found (or not owned by this user)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Authentication not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/me/history/{record_id}": {
+      "delete": {
+        "tags": [
+          "history"
+        ],
+        "summary": "Delete Record",
+        "operationId": "delete_record_v1_me_history__record_id__delete",
+        "parameters": [
+          {
+            "name": "record_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Record Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeleteResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "user_id does not match the authenticated user",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found (or not owned by this user)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Authentication not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/me/history/{record_id}/notes/{question_id}": {
+      "delete": {
+        "tags": [
+          "history"
+        ],
+        "summary": "Delete one saved note, keeping its rating",
+        "operationId": "delete_note_v1_me_history__record_id__notes__question_id__delete",
+        "parameters": [
+          {
+            "name": "record_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Record Id"
+            }
+          },
+          {
+            "name": "question_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/QuestionId"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeleteResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "user_id does not match the authenticated user",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found (or not owned by this user)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Authentication not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/me/history/{record_id}/sharing": {
+      "put": {
+        "tags": [
+          "history"
+        ],
+        "summary": "Set explicit sharing permission (off by default, separate from storage consent)",
+        "operationId": "set_sharing_v1_me_history__record_id__sharing_put",
+        "parameters": [
+          {
+            "name": "record_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Record Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SharingUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecordOut"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "user_id does not match the authenticated user",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found (or not owned by this user)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Authentication not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/me/history/{record_id}/shareable": {
+      "get": {
+        "tags": [
+          "history"
+        ],
+        "summary": "Only the parts the user allowed to be shared. This service never sends them anywhere.",
+        "operationId": "get_shareable_v1_me_history__record_id__shareable_get",
+        "parameters": [
+          {
+            "name": "record_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Record Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ShareableRecord"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "user_id does not match the authenticated user",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found (or not owned by this user)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Authentication not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "ActionRequest": {
+        "properties": {
+          "schema_version": {
+            "type": "string",
+            "const": "1.0",
+            "title": "Schema Version",
+            "default": "1.0"
+          },
+          "request_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "title": "Request Id",
+            "description": "Client-generated id; retries reuse it."
+          },
+          "user_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "User Id"
+          },
+          "action": {
+            "$ref": "#/components/schemas/Command"
+          },
+          "answer": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 500
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Answer",
+            "description": "Free text (typed or transcribed). Required for action=answer."
+          },
+          "note_text": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 1000
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note Text",
+            "description": "Optional explanation in the user's own words. Required for action=add_note."
+          },
+          "expected_step": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Step",
+            "description": "Optional optimistic-concurrency guard: the `step` from the last response."
+          },
+          "question_id": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/QuestionId"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Optional guard: the question this input is meant for."
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "request_id",
+          "action"
+        ],
+        "title": "ActionRequest"
+      },
+      "AnswerStatus": {
+        "type": "string",
+        "enum": [
+          "answered",
+          "skipped",
+          "not_reached"
+        ],
+        "title": "AnswerStatus"
+      },
+      "CheckinResponse": {
+        "properties": {
+          "schema_version": {
+            "type": "string",
+            "const": "1.0",
+            "title": "Schema Version",
+            "default": "1.0"
+          },
+          "request_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Request Id"
+          },
+          "session_id": {
+            "type": "string",
+            "title": "Session Id"
+          },
+          "user_id": {
+            "type": "string",
+            "title": "User Id"
+          },
+          "action": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Action"
+          },
+          "session_status": {
+            "$ref": "#/components/schemas/SessionStatus"
+          },
+          "step": {
+            "type": "integer",
+            "title": "Step",
+            "description": "Increments on every state change."
+          },
+          "storage_mode": {
+            "$ref": "#/components/schemas/StorageMode"
+          },
+          "next_question": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/NextQuestion"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "speech_text": {
+            "type": "string",
+            "title": "Speech Text",
+            "description": "Text for the host's text-to-speech, for this user only."
+          },
+          "pending_input": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PendingInputOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "confirmed_answers": {
+            "items": {
+              "$ref": "#/components/schemas/ConfirmedAnswer"
+            },
+            "type": "array",
+            "title": "Confirmed Answers"
+          },
+          "summary": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Summary",
+            "description": "Factual summary of confirmed answers."
+          },
+          "support_requested": {
+            "type": "boolean",
+            "title": "Support Requested",
+            "default": false
+          },
+          "handoff": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Handoff"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "urgent_support": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/UrgentSupport"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "record_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Record Id",
+            "description": "Set once a record was saved."
+          },
+          "events": {
+            "items": {
+              "$ref": "#/components/schemas/EventOut"
+            },
+            "type": "array",
+            "title": "Events"
+          },
+          "expires_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expires At"
+          },
+          "idempotent_replay": {
+            "type": "boolean",
+            "title": "Idempotent Replay",
+            "default": false
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ErrorInfo"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "request_id",
+          "session_id",
+          "user_id",
+          "session_status",
+          "step",
+          "storage_mode",
+          "next_question",
+          "speech_text"
+        ],
+        "title": "CheckinResponse"
+      },
+      "Command": {
+        "type": "string",
+        "enum": [
+          "answer",
+          "add_note",
+          "confirm",
+          "reject",
+          "remove_note",
+          "repeat",
+          "skip",
+          "cancel",
+          "finish"
+        ],
+        "title": "Command"
+      },
+      "ConfirmedAnswer": {
+        "properties": {
+          "question_id": {
+            "$ref": "#/components/schemas/QuestionId"
+          },
+          "answer_value": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Answer Value"
+          },
+          "status": {
+            "$ref": "#/components/schemas/AnswerStatus"
+          },
+          "recorded_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Recorded At"
+          },
+          "note_text": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note Text"
+          },
+          "note_recorded_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note Recorded At"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "question_id",
+          "answer_value",
+          "status"
+        ],
+        "title": "ConfirmedAnswer"
+      },
+      "CrisisResourceOut": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "contact": {
+            "type": "string",
+            "title": "Contact"
+          },
+          "notes": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Notes"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "name",
+          "contact"
+        ],
+        "title": "CrisisResourceOut"
+      },
+      "DeleteResponse": {
+        "properties": {
+          "schema_version": {
+            "type": "string",
+            "const": "1.0",
+            "title": "Schema Version",
+            "default": "1.0"
+          },
+          "user_id": {
+            "type": "string",
+            "title": "User Id"
+          },
+          "deleted_records": {
+            "type": "integer",
+            "title": "Deleted Records",
+            "default": 0
+          },
+          "deleted_notes": {
+            "type": "integer",
+            "title": "Deleted Notes",
+            "default": 0
+          },
+          "speech_text": {
+            "type": "string",
+            "title": "Speech Text"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "user_id",
+          "speech_text"
+        ],
+        "title": "DeleteResponse"
+      },
+      "ErrorInfo": {
+        "properties": {
+          "code": {
+            "type": "string",
+            "title": "Code"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          },
+          "retryable": {
+            "type": "boolean",
+            "title": "Retryable",
+            "default": false
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "code",
+          "message"
+        ],
+        "title": "ErrorInfo"
+      },
+      "ErrorResponse": {
+        "properties": {
+          "schema_version": {
+            "type": "string",
+            "const": "1.0",
+            "title": "Schema Version",
+            "default": "1.0"
+          },
+          "request_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Request Id"
+          },
+          "error": {
+            "$ref": "#/components/schemas/ErrorInfo"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "error"
+        ],
+        "title": "ErrorResponse"
+      },
+      "EventOut": {
+        "properties": {
+          "event_id": {
+            "type": "string",
+            "title": "Event Id",
+            "description": "Deterministic; identical on retries. Deduplicate by this."
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "checkin.started",
+              "checkin.completed",
+              "checkin.cancelled",
+              "support.requested",
+              "support.urgent_response_shown"
+            ],
+            "title": "Type"
+          },
+          "session_id": {
+            "type": "string",
+            "title": "Session Id"
+          },
+          "occurred_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Occurred At"
+          },
+          "data": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Data"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "event_id",
+          "type",
+          "session_id",
+          "occurred_at"
+        ],
+        "title": "EventOut",
+        "description": "A fact the host may act on. NOT proof that anyone was notified."
+      },
+      "Handoff": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "const": "human_support",
+            "title": "Type",
+            "default": "human_support"
+          },
+          "host_action_required": {
+            "type": "boolean",
+            "const": true,
+            "title": "Host Action Required",
+            "default": true
+          },
+          "contacted_anyone": {
+            "type": "boolean",
+            "const": false,
+            "title": "Contacted Anyone",
+            "default": false
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "message"
+        ],
+        "title": "Handoff"
+      },
+      "HealthResponse": {
+        "properties": {
+          "schema_version": {
+            "type": "string",
+            "const": "1.0",
+            "title": "Schema Version",
+            "default": "1.0"
+          },
+          "status": {
+            "type": "string",
+            "const": "ok",
+            "title": "Status",
+            "default": "ok"
+          },
+          "service": {
+            "type": "string",
+            "title": "Service",
+            "default": "tactidose-wellbeing"
+          },
+          "auth_configured": {
+            "type": "boolean",
+            "title": "Auth Configured"
+          },
+          "auth_mode": {
+            "type": "string",
+            "title": "Auth Mode"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "auth_configured",
+          "auth_mode"
+        ],
+        "title": "HealthResponse"
+      },
+      "HistoryResponse": {
+        "properties": {
+          "schema_version": {
+            "type": "string",
+            "const": "1.0",
+            "title": "Schema Version",
+            "default": "1.0"
+          },
+          "user_id": {
+            "type": "string",
+            "title": "User Id"
+          },
+          "records": {
+            "items": {
+              "$ref": "#/components/schemas/RecordOut"
+            },
+            "type": "array",
+            "title": "Records"
+          },
+          "speech_text": {
+            "type": "string",
+            "title": "Speech Text"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "user_id",
+          "records",
+          "speech_text"
+        ],
+        "title": "HistoryResponse"
+      },
+      "NextQuestion": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "consent",
+              "question",
+              "confirm_answer",
+              "note_offer",
+              "note_text",
+              "note_confirmation",
+              "finish_review"
+            ],
+            "title": "Kind"
+          },
+          "question_id": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/QuestionId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "prompt": {
+            "type": "string",
+            "title": "Prompt"
+          },
+          "options": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Options"
+          },
+          "position": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Position",
+            "description": "1-based question number."
+          },
+          "total": {
+            "type": "integer",
+            "title": "Total"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "kind",
+          "prompt",
+          "options",
+          "total"
+        ],
+        "title": "NextQuestion"
+      },
+      "PendingInputOut": {
+        "properties": {
+          "confirmed": {
+            "type": "boolean",
+            "const": false,
+            "title": "Confirmed",
+            "default": false
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "answer_candidate",
+              "note_draft"
+            ],
+            "title": "Kind"
+          },
+          "question_id": {
+            "$ref": "#/components/schemas/QuestionId"
+          },
+          "candidate_value": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Candidate Value"
+          },
+          "note_text": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note Text"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "kind",
+          "question_id"
+        ],
+        "title": "PendingInputOut",
+        "description": "Unconfirmed input. Shown for confirmation; never saved as-is."
+      },
+      "QuestionId": {
+        "type": "string",
+        "enum": [
+          "mood",
+          "stress",
+          "sleep",
+          "support"
+        ],
+        "title": "QuestionId"
+      },
+      "RecordOut": {
+        "properties": {
+          "record_id": {
+            "type": "string",
+            "title": "Record Id"
+          },
+          "started_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Started At"
+          },
+          "completed_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Completed At"
+          },
+          "support_requested": {
+            "type": "boolean",
+            "title": "Support Requested"
+          },
+          "answers": {
+            "items": {
+              "$ref": "#/components/schemas/SavedAnswerOut"
+            },
+            "type": "array",
+            "title": "Answers"
+          },
+          "sharing": {
+            "$ref": "#/components/schemas/SharingOut"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "record_id",
+          "started_at",
+          "completed_at",
+          "support_requested",
+          "answers",
+          "sharing"
+        ],
+        "title": "RecordOut"
+      },
+      "SavedAnswerOut": {
+        "properties": {
+          "question_id": {
+            "$ref": "#/components/schemas/QuestionId"
+          },
+          "answer_value": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Answer Value"
+          },
+          "status": {
+            "$ref": "#/components/schemas/AnswerStatus"
+          },
+          "recorded_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Recorded At"
+          },
+          "note_text": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note Text"
+          },
+          "note_recorded_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note Recorded At"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "question_id",
+          "answer_value",
+          "status",
+          "recorded_at"
+        ],
+        "title": "SavedAnswerOut"
+      },
+      "SessionStatus": {
+        "type": "string",
+        "enum": [
+          "awaiting_consent",
+          "awaiting_answer",
+          "awaiting_answer_confirmation",
+          "awaiting_note_offer",
+          "awaiting_note_text",
+          "awaiting_note_confirmation",
+          "awaiting_finish",
+          "completed",
+          "cancelled",
+          "expired"
+        ],
+        "title": "SessionStatus"
+      },
+      "ShareableRecord": {
+        "properties": {
+          "schema_version": {
+            "type": "string",
+            "const": "1.0",
+            "title": "Schema Version",
+            "default": "1.0"
+          },
+          "record_id": {
+            "type": "string",
+            "title": "Record Id"
+          },
+          "completed_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Completed At"
+          },
+          "answers": {
+            "items": {
+              "$ref": "#/components/schemas/SavedAnswerOut"
+            },
+            "type": "array",
+            "title": "Answers"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "record_id",
+          "completed_at",
+          "answers"
+        ],
+        "title": "ShareableRecord",
+        "description": "Only what the user explicitly allowed to be shared. Empty by default."
+      },
+      "SharingOut": {
+        "properties": {
+          "share_answers": {
+            "type": "boolean",
+            "title": "Share Answers"
+          },
+          "share_notes": {
+            "type": "boolean",
+            "title": "Share Notes"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "share_answers",
+          "share_notes"
+        ],
+        "title": "SharingOut"
+      },
+      "SharingUpdate": {
+        "properties": {
+          "schema_version": {
+            "type": "string",
+            "const": "1.0",
+            "title": "Schema Version",
+            "default": "1.0"
+          },
+          "share_answers": {
+            "type": "boolean",
+            "title": "Share Answers",
+            "default": false
+          },
+          "share_notes": {
+            "type": "boolean",
+            "title": "Share Notes",
+            "default": false
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "SharingUpdate"
+      },
+      "StartSessionRequest": {
+        "properties": {
+          "schema_version": {
+            "type": "string",
+            "const": "1.0",
+            "title": "Schema Version",
+            "default": "1.0"
+          },
+          "request_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "title": "Request Id",
+            "description": "Client-generated id; retries reuse it."
+          },
+          "user_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "User Id",
+            "description": "Optional. If present it must equal the authenticated user, otherwise the request is rejected. It is never used as proof of identity."
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "request_id"
+        ],
+        "title": "StartSessionRequest"
+      },
+      "StorageMode": {
+        "type": "string",
+        "enum": [
+          "undecided",
+          "save",
+          "session_only"
+        ],
+        "title": "StorageMode"
+      },
+      "UrgentSupport": {
+        "properties": {
+          "message": {
+            "type": "string",
+            "title": "Message"
+          },
+          "resources": {
+            "items": {
+              "$ref": "#/components/schemas/CrisisResourceOut"
+            },
+            "type": "array",
+            "title": "Resources"
+          },
+          "disclaimer": {
+            "type": "string",
+            "title": "Disclaimer",
+            "default": "This prototype does not reliably detect crises and does not monitor users."
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "message",
+          "resources"
+        ],
+        "title": "UrgentSupport"
+      }
+    }
+  }
+}
