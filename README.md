@@ -48,7 +48,25 @@ Open **http://127.0.0.1:8000** and sign in with a demo account (password `demo12
 |---|---|---|
 | `alex@demo.tactidose` | patient | patient portal: drop buttons, assistant, schedule, history, reports |
 | `sam@demo.tactidose` | family | care portal for Alex |
-| `dr.lee@demo.tactidose` | doctor | care portal for Alex; receives report emails |
+| `dr.lee@demo.tactidose` | doctor | care portal for Alex (and the test patients below); receives report emails |
+
+**More test patients on the Wi-Fi ESP32.** In Wi-Fi mode (`run --wifi`) the demo also creates four
+test patients:
+* `jordan@demo.tactidose` (Jordan Lee)
+* `maria@demo.tactidose` (Maria Garcia)
+* `priya@demo.tactidose` (Priya Patel)
+* `chen@demo.tactidose` (Chen Wei)
+
+The password is `demo1234` and Dr. Lee is linked to all of them. They all use the **same dispenser**,
+the ESP32 at `172.20.10.9`, and they can all dispense. Each still has their own 3 containers, pill
+counts, medications, schedules, cooldown and history. Patients who sign up in Wi-Fi mode get the
+same setup automatically.
+
+The ESP32 physically has one set of 3 containers. Every patient's "container 1" is the same real
+container 1, while the app keeps a separate pill count per patient.
+
+This is the `TACTIDOSE_SHARED_DEVICE` setting: automatic, so on in Wi-Fi mode and off otherwise. Set
+it to `true` or `false` to force it.
 
 The **demo panel** (`/demo`) has a demo clock ("jump to the next dose"), simulator controls
 (faults, pill counts, button presses) and one-click checklists for the four demo flows. See
@@ -225,6 +243,59 @@ Then check it in the app:
 The serial protocol is in [docs/SERIAL_PROTOCOL.md](docs/SERIAL_PROTOCOL.md). Firmware that only
 supports the older v1 commands still works: the app drops a pill with `DISPENSE_SLOT` + `CLOSE_GATE`.
 
+### Connecting the ESP32 over Wi-Fi
+
+The ESP32 dispenser on the network has a static IP, **`http://172.20.10.9`**, and three endpoints:
+
+| Action | ESP32 endpoint | Who, where in the website |
+|---|---|---|
+| Dispense pill 1, 2, 3 | `GET /dispense?pill=1` (`2`, `3`) | **Patient**: **Dispense pill 1 / 2 / 3** buttons (Home, Pill device card) and the **Drop pill** button on each container. The assistant and scheduled doses use it too |
+| Open the lid (restock) | `GET /lid?state=open` | **Doctor / family**: care portal → Containers → **Restock the dispenser** → **Open lid to restock** |
+| Close the lid | `GET /lid?state=close` | **Doctor / family**: same card → **Close lid** |
+
+**Dispensing** only calls `/dispense?pill=N`. Container 1 is `pill=1`, and the lid is never touched.
+The app's drop rules run first: the global cooldown, the double-dose guard, pill counts, and the
+history and notifications. A pill can't be dropped from the website without them.
+
+**Restocking** is separate and is a doctor/family task, like refills:
+1. Open the lid.
+2. Put the pills in.
+3. Record the new count with **Refill** on each container.
+4. Close the lid.
+
+The lid buttons never dispense. Patients don't see them; the API refuses them with 403.
+
+What the ESP32's answer means:
+
+| ESP32 answer | Recorded as |
+|---|---|
+| HTTP 200 | **dropped** (pill count −1) |
+| Another HTTP status | **failed** (nothing dropped) |
+| Not reachable | refused as **device unavailable** (nothing was sent) |
+| Reached, but no answer within 20 s | **uncertain**: further drops wait until a caregiver checks (History → "It dropped" / "It did not drop") |
+
+The app checks every 5 s that the ESP32 is reachable (`GET /`) and shows it as online or offline.
+
+**Run it:**
+```bash
+python -m tactidose run --wifi                        # uses http://172.20.10.9
+python -m tactidose run --wifi http://192.168.1.60    # another address for this run
+python -m tactidose doctor                            # "the ESP32 answered" when it is reachable
+```
+To make Wi-Fi the default, put `TACTIDOSE_HARDWARE_MODE=wifi` in `.env`. Optionally add
+`TACTIDOSE_ESP32_URL=http://<ip>` if the board gets a different address.
+
+**Changing the IP or endpoints:** everything is in one file,
+[`tactidose/hardware/wifi_config.py`](tactidose/hardware/wifi_config.py):
+* `ESP32_BASE_URL` (the static IP)
+* `LID_OPEN_PATH`, `LID_CLOSE_PATH`, `DISPENSE_PATH` (`{pill}` = container 1–3)
+* `HEALTH_PATH`, `METHOD`
+* the timeouts
+
+The ESP32's endpoints have no stop, home or buzzer command. Over Wi-Fi the **Stop** button
+therefore cannot halt a dispense in progress, and the buzzer setting falls back to the laptop tone.
+Keep the ESP32 and the computer on the same trusted Wi-Fi; the endpoints have no password.
+
 ## Configuration
 
 Copy `.env.example` to `.env`. Everything is optional; without keys the full demo runs offline.
@@ -261,7 +332,7 @@ Design rule: **AI interprets, deterministic code authorizes and actuates.** The 
 
 | Command | What it does |
 |---|---|
-| `python -m tactidose run [--sim \| --serial PORT \| --no-hardware] [--no-voice] [--port 8000]` | start the web app |
+| `python -m tactidose run [--sim \| --serial PORT \| --wifi [URL] \| --no-hardware] [--no-voice] [--port 8000]` | start the web app (`--wifi`: the ESP32 at http://172.20.10.9) |
 | `python -m tactidose doctor` | check configuration and environment |
 | `python -m tactidose check-apis [--only gemini,elevenlabs,snowflake,tidb,smtp] [--json]` | test the cloud keys in `.env` with one tiny live request per configured service |
 | `python -m tactidose init-db` | create the database and tables (run once after setting `TIDB_*`) |
@@ -293,7 +364,7 @@ tactidose/
   reports/      statistics, narrative, PDF, email
   auth/         accounts, sessions, roles, caregiver links
   api/ app.py   FastAPI routes, live events, startup
-  hardware/     serial client, ESP32 simulator, protocol, self-test
+  hardware/     serial client, ESP32 simulator, protocol, self-test, Wi-Fi ESP32 driver (wifi_config.py = IP + endpoints)
   voice/ audio/ offline speech recognition, text-to-speech
   ui/static/    login, patient portal, care portal, demo panel, kiosk
   wellbeing.py  host-side bridge to the optional check-in (identity, chat routing, /api/wellbeing)

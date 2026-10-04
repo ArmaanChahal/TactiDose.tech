@@ -8,7 +8,7 @@ Where this document conflicts with the original handoff, **this document wins**.
 
 | Area | Behaviour |
 |---|---|
-| Device | ESP32 with **3 pill containers**. The host asks it to **drop one pill** from a container (`DROP_SLOT n`). |
+| Device | ESP32 with **3 pill containers**. The host asks it to **drop one pill** from a container (`DROP_SLOT n`). **Shared dispenser** (Wi-Fi mode, `TACTIDOSE_SHARED_DEVICE`): every patient has their own device record (containers, counts, cooldown, schedules), all served by the one ESP32. |
 | Drops | Triggered by the **schedule** (automatic, even if the patient forgets), the patient's **Drop button** in the app, or the **AI agent** on the patient's behalf. Every request and outcome is stored (`pill_drops`). Every successful drop decrements that container's `pill_count`. |
 | Cooldown | **One global cooldown** per device: after *any* drop, *manual/agent/button* drops of *any* pill are refused for `devices.manual_cooldown_minutes` (default 60). Scheduled drops are not blocked by it. |
 | Double-dose guard | A scheduled dose is **satisfied** by any drop of the same medication from `scheduled_at − dose_early_minutes` onward; a satisfied dose is never auto-dropped again. |
@@ -99,7 +99,8 @@ to the hardware):
    (a doctor/family member must resolve it first; prevents double dosing after a glitch).
 4. **Cooldown** (sources `manual`, `agent`, `button`) — `now < last_drop_at + cooldown` where
    `last_drop_at` is the latest `DROPPED` *or* `UNCERTAIN` drop of **any** pill on the device ⇒
-   `COOLDOWN` with `cooldown_remaining_s` / `next_allowed_at`. Cooldown 0 disables the check.
+   `COOLDOWN` with `cooldown_remaining_s` / `next_allowed_at`. Cooldown 0 disables the check. This
+   doctor/family cooldown is the **only** wait on request (no fixed per-pill floor, removed 2026-10-04).
 5. **Scheduled satisfaction** (source `schedule`) — the dose event is already `DISPENSED/TAKEN`, or
    the same medication was `DROPPED/UNCERTAIN` at/after `min(scheduled_at − dose_early_minutes,
    scheduled_at − min_dose_interval_minutes)` ⇒ `ALREADY_SATISFIED` (the event is linked to that

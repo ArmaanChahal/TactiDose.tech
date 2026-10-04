@@ -40,7 +40,7 @@ from tactidose.hardware.protocol import (
 class DeviceSnapshot:
     """Host-side mirror of the device, updated from every received line."""
 
-    mode: str = "none"                    # "sim" | "serial" | "none"
+    mode: str = "none"                    # "sim" | "serial" | "wifi" | "none"
     port: str | None = None
     connected: bool = False
     responsive: bool = False              # answered recently (heartbeat)

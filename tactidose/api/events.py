@@ -97,6 +97,8 @@ class EventScope:
     patient_ids: frozenset[int]
     device_patient_id: int | None
     demo: bool
+    #: Shared dispenser (one ESP32 for everyone): device topics go to every patient and caregiver.
+    shared: bool = False
 
     @classmethod
     def load(cls, services: Any, user: AuthUser) -> "EventScope":
@@ -107,10 +109,13 @@ class EventScope:
         else:
             pids = set()
         owner = views.device_owner_id(services.db, services.settings)
-        return cls(user.user_id, frozenset(pids), owner, bool(services.settings.demo_mode))
+        return cls(user.user_id, frozenset(pids), owner, bool(services.settings.demo_mode),
+                   bool(services.settings.effective_shared_device))
 
     @property
     def device_linked(self) -> bool:
+        if self.shared and self.patient_ids:
+            return True
         return self.device_patient_id is not None and self.device_patient_id in self.patient_ids
 
     def permits(self, ev: BusEvent) -> bool:

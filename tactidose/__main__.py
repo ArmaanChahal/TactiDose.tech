@@ -228,6 +228,10 @@ def _cmd_run(args: argparse.Namespace) -> int:
         overrides["TACTIDOSE_SERIAL_PORT"] = args.serial
     elif args.no_hardware:
         overrides["TACTIDOSE_HARDWARE_MODE"] = "none"
+    elif args.wifi is not None:
+        overrides["TACTIDOSE_HARDWARE_MODE"] = "wifi"
+        if args.wifi:
+            overrides["TACTIDOSE_ESP32_URL"] = args.wifi
     if args.no_voice:
         overrides["TACTIDOSE_VOICE_ENABLED"] = "false"
     if args.demo_pause_seconds is not None:
@@ -249,6 +253,10 @@ def _cmd_run(args: argparse.Namespace) -> int:
         raise CliError("uvicorn is not installed: pip install uvicorn") from None
     level = settings.log_level.lower()
     hw = settings.hardware_mode + (f" on {settings.serial_port}" if settings.hardware_mode == "serial" else "")
+    if settings.hardware_mode == "wifi":
+        from tactidose.hardware import wifi_config
+
+        hw += f" to {settings.esp32_url or wifi_config.ESP32_BASE_URL}"
     host_text = f"[{settings.host}]" if ":" in settings.host else settings.host
     _out(f"TactiDose {__version__} on http://{host_text}:{settings.port}  "
          f"(hardware: {hw}, voice: {'on' if settings.voice_enabled else 'off'}, "
@@ -509,6 +517,20 @@ def _check_ports(settings: Settings) -> tuple[str, list[str]]:
     from tactidose.hardware.ports import describe_ports, format_ports
 
     lines = [f"hardware mode {settings.hardware_mode}, serial port setting {settings.serial_port}"]
+    if settings.hardware_mode == "wifi":
+        from tactidose.hardware import wifi_config
+        from tactidose.hardware.wifi_device import WifiDispenser
+
+        dev = WifiDispenser(settings)
+        try:
+            reachable = dev.reconnect()
+        finally:
+            dev.close()
+        where = f"Wi-Fi mode: ESP32 at {dev.base_url} (endpoints: tactidose/hardware/wifi_config.py)"
+        if reachable:
+            return "OK", lines + [where, "the ESP32 answered"]
+        return "WARN", lines + [where, f"no answer from {dev.base_url}{wifi_config.HEALTH_PATH}: is the ESP32 on "
+                                       "and this computer on the same Wi-Fi?"]
     lines += format_ports().splitlines()
     if settings.hardware_mode != "serial":
         return "INFO", lines
@@ -1026,6 +1048,9 @@ def build_parser() -> argparse.ArgumentParser:
     hw.add_argument("--sim", action="store_true", help="use the built-in simulated ESP32")
     hw.add_argument("--serial", metavar="PORT", help="use a real ESP32: COM5, /dev/ttyUSB0, socket://HOST:PORT or auto")
     hw.add_argument("--no-hardware", action="store_true", help="no device: every drop is refused")
+    hw.add_argument("--wifi", metavar="URL", nargs="?", const="",
+                    help="the ESP32 over Wi-Fi at URL (default: TACTIDOSE_ESP32_URL, else the static "
+                         "http://172.20.10.9 in tactidose/hardware/wifi_config.py)")
     p.add_argument("--no-voice", action="store_true", help="turn off the device-side microphone loop")
     p.add_argument("--demo-pause-seconds", type=_float_in(0, 120, "the pause"), metavar="N",
                    help="pause between the guided demo's slots (default: TACTIDOSE_DEMO_PAUSE_SECONDS or 7)")

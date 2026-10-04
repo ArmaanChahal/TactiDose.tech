@@ -1,7 +1,7 @@
 /**
  * Care portal "Device" tab: the device snapshot in words (GET /api/device, live
  * `device.state` events) and Home / Stop / Reconnect (doctor/family; Stop is always
- * allowed).
+ * allowed). The Wi-Fi ESP32's restocking lid is on the Containers tab.
  */
 
 import { get, post } from '../api.js';

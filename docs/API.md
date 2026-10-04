@@ -138,6 +138,7 @@ caregivers *read* them through the endpoints above but never create conversation
 | `POST /api/agent/chat` | `{text, conversation_id?, input_mode?: "text"\|"voice", speak?: bool}` | `AgentReply` (`audio_url` set when `speak` and TTS is available) |
 | `POST /api/agent/transcribe` | raw 16-bit little-endian mono PCM at 16 kHz (`Content-Type: application/octet-stream`, ≤ 30 s) | `{text, confidence, engine: "vosk"}`; 503 if the offline recognizer is unavailable |
 | `GET /api/agent/audio/{audio_id}.wav` | – | `audio/wav` (short-lived, only for the requesting patient) |
+| `POST /api/agent/speak` | `{text}` (≤ 600 chars) | `{audio_url}`: the server voice (ElevenLabs → cache → offline OS voice) for the page's own announcements such as "pill dropped"; `null` = no server voice, the browser speaks |
 
 With the optional well-being check-in installed, `POST /api/agent/chat` first offers the text to
 `tactidose/wellbeing.py`. A check-in turn comes back in the same shape with `model: "wellbeing"`,
@@ -193,11 +194,12 @@ Access to `/api/reports/{rid}…` follows the report's patient (patient themself
 
 | Method & path | Body | Response |
 |---|---|---|
-| `GET /api/device` | – | `DeviceSnapshot` (patient of the device or linked caregiver) |
+| `GET /api/device` | – | `DeviceSnapshot` (patient of the device or linked caregiver) + `lid_supported`, `lid` (`open`\|`closed`\|null; Wi-Fi ESP32 only) |
+| `POST /api/device/lid` *(caregiver)* | `{state: "open"\|"close"}` | `{ok, lid, detail, device}` — restocking lid of the Wi-Fi ESP32 (`GET /lid?state=…`); linked doctor/family only (403 for the patient); 409 on other devices. Never drops a pill |
 | `POST /api/device/home` *(caregiver)* | – | `{ok, result: CommandResultView, device}` |
 | `POST /api/device/stop` | – | same (patient or caregiver; always allowed) |
 | `POST /api/device/reconnect` *(caregiver)* | – | `{ok, device}` |
-| `POST /api/demo/command` *(demo; linked doctor/family)* | `{line: "DROP_SLOT 1"}` | `{ok, result, device}` — `DROP_SLOT` goes through the drop rules (global cooldown, 60-min per-pill floor); `DISPENSE_SLOT`/`OPEN_GATE` are refused (409) |
+| `POST /api/demo/command` *(demo; linked doctor/family)* | `{line: "DROP_SLOT 1"}` | `{ok, result, device}` — `DROP_SLOT` goes through the drop rules (the doctor/family cooldown); `DISPENSE_SLOT`/`OPEN_GATE` are refused (409) |
 | `GET/POST /api/demo/clock` *(demo; device's patient or linked doctor/family)* | `{local_time: "08:00"}` (today) \| `{local_datetime: "2026-10-05T08:00"}` \| `{offset_minutes: 30}` (absolute offset from real time) \| `{reset: true}` | `{now_local, now_utc, offset_s, travelling, tz}` (runs a scheduler tick). Sessions ignore demo travel, so jumping never signs anyone out. |
 | `POST /api/demo/jump-to-next-dose` *(demo; same)* | – | `{clock, next: DoseView\|null}` |
 | `GET/POST /api/demo/simulator` *(demo; same)* | `{fault, enabled}` \| `{press: "CONFIRM"\|"CANCEL"}` \| `{reboot: true}` \| `{pills: {slot, count}}` | `{available, physical:{angle_deg, slot, target_slot, gate_open, state, releasing, pills:[physical count per container], pills_dropped, drop_sensor, proto, num_slots, fw_version, ...}, faults:{home_sensor_dead, motor_jam, unresponsive, brownout_on_gate, brownout_on_release, disconnect}}` — simulated *physical* pill counts are separate from the database's `pill_count` |

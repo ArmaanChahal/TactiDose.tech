@@ -1,7 +1,8 @@
 /**
  * Care portal "Containers" tab (doctor/family only): per container, assign a medication
  * (PUT /api/patients/{pid}/containers/{slot} {medication_id}), refill
- * (POST …/refill {set} | {add}) and set the capacity / low-stock threshold (PUT).
+ * (POST …/refill {set} | {add}) and set the capacity / low-stock threshold (PUT). On the Wi-Fi
+ * ESP32 the "Restock the dispenser" card opens / closes the lid for refilling (js/lid.js).
  */
 
 import { get, post, put } from '../api.js';
@@ -10,6 +11,7 @@ import { icon } from '../icons.js';
 import { plural } from '../format.js';
 import { containerView } from '../status.js';
 import { lazyPanel } from './panel.js';
+import { createLidControls } from '../lid.js';
 
 function wholeNumber(text) {
   const t = String(text ?? '').trim();
@@ -44,6 +46,7 @@ export function containerSettingsBody(capacityText, thresholdText) {
 /** ctx: {pid, medications(), invalidateMedications(), notify(message, kind), onChanged()} */
 export function createContainersTab(ctx) {
   const root = byId('containers-list');
+  const lid = createLidControls(byId('restock-lid'), { notify: ctx.notify });
   let containers = [];
   let meds = [];
   let seq = 0;
@@ -190,7 +193,10 @@ export function createContainersTab(ctx) {
     }
   }
 
-  const panel = lazyPanel(load);
+  const panel = lazyPanel(() => {
+    lid.load();
+    return load();
+  });
   return {
     show: panel.show,
     hide: panel.hide,

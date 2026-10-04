@@ -13,6 +13,9 @@ The patient id is always the session user's id — never taken from the request 
   (``application/octet-stream``, ≤ 30 s = 960 000 bytes) → ``AgentService.transcribe``.
   503 when the offline recognizer (Vosk + model) is unavailable.
 * ``GET /api/agent/audio/{audio_id}.wav`` — short-lived, only for the patient it was made for.
+* ``POST /api/agent/speak`` ``{text}`` -> ``{audio_url}``: the same voice (ElevenLabs when configured,
+  else cached / offline OS voice) for the page's own announcements such as "pill dropped", instead
+  of the browser's built-in voice. ``audio_url`` is null when no server voice is available.
 """
 
 from __future__ import annotations
@@ -50,6 +53,19 @@ class ChatBody(BaseModel):
     conversation_id: StrictInt | None = Field(None, ge=1)
     input_mode: Literal["text", "voice"] = "text"
     speak: StrictBool = False
+
+
+class SpeakBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    text: StrictStr = Field(min_length=1, max_length=600)
+
+
+@router.post("/speak")
+def speak(body: SpeakBody, user: PatientUser, services: ServicesDep) -> dict[str, Any]:
+    text = " ".join(body.text.split())
+    agent = getattr(services, "agent", None)
+    return {"audio_url": _speak(agent, user.user_id, text) if agent is not None and text else None}
 
 
 @router.post("/chat")

@@ -1155,6 +1155,8 @@ def create_hardware(
       owns the simulator: ``hardware.start()`` starts it and ``hardware.close()`` closes it.
       The returned device is for the demo panel (faults, button presses, physical view).
     * ``serial`` -> (HardwareClient on ``resolve_port(settings.serial_port)``, None)
+    * ``wifi``   -> (:class:`~tactidose.hardware.wifi_device.WifiDispenser`, None) - the ESP32's HTTP
+      endpoints (lid open/close, dispense pill N) from ``hardware/wifi_config.py``
     * ``none``   -> (NullHardware, None)
     """
     mode = settings.hardware_mode
@@ -1165,4 +1167,8 @@ def create_hardware(
         return HardwareClient(settings, bus=bus, clock=clock, mode="sim", sim_device=sim), sim
     if mode == "serial":
         return HardwareClient(settings, bus=bus, clock=clock, mode="serial"), None
+    if mode == "wifi":
+        from tactidose.hardware.wifi_device import WifiDispenser
+
+        return WifiDispenser(settings, bus=bus, clock=clock), None
     return NullHardware(settings, bus=bus), None

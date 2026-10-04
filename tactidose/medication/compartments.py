@@ -87,6 +87,48 @@ def get_device(session: Session, settings: Settings) -> Device | None:
     return session.get(Device, settings.device_id)
 
 
+def actuated(dev: Device | None, settings: Settings) -> bool:
+    """Can this app drop pills for ``dev``? The configured device always; with a shared device
+    (``settings.effective_shared_device``, e.g. the Wi-Fi ESP32) every patient's device record,
+    because they are all served by the one connected dispenser."""
+    return dev is not None and (dev.device_id == settings.device_id or settings.effective_shared_device)
+
+
+def served_device_ids(session: Session, settings: Settings) -> list[str]:
+    """Device records this app actuates: the configured one, or every record when shared."""
+    if not settings.effective_shared_device:
+        return [settings.device_id]
+    ids = list(session.scalars(select(Device.device_id).order_by(Device.device_id)))
+    return ids or [settings.device_id]
+
+
+def shared_device_id(settings: Settings, patient_id: int) -> str:
+    """Device record id for a patient on the shared dispenser (e.g. ``tactidose-001-p7``)."""
+    return f"{settings.device_id}-p{int(patient_id)}"
+
+
+def ensure_patient_device(session: Session, settings: Settings, patient: User, *,
+                          now: datetime | None = None) -> tuple[Device, bool]:
+    """Shared dispenser: the patient's own device record (+ one empty compartment per slot),
+    created if missing. Returns ``(device, created)``. Flushes, never commits."""
+    dev = patient_device(session, settings, patient.user_id)
+    if dev is not None:
+        return dev, False
+    when = now or datetime.now(timezone.utc)
+    dev = Device(device_id=shared_device_id(settings, patient.user_id), user_id=patient.user_id,
+                 name=f"{settings.device_name} (shared)", num_slots=settings.num_slots,
+                 manual_cooldown_minutes=settings.manual_cooldown_minutes,
+                 auto_drop_enabled=settings.auto_drop_enabled, created_at=when, updated_at=when)
+    session.add(dev)
+    session.flush()
+    for slot in range(settings.num_slots):
+        session.add(Compartment(device_id=dev.device_id, slot_number=slot, active=True, pill_count=0,
+                                capacity=settings.default_container_capacity,
+                                low_stock_threshold=settings.default_low_stock_threshold, updated_at=when))
+    session.flush()
+    return dev, True
+
+
 def patient_device(session: Session, settings: Settings, patient_id: int) -> Device | None:
     """The device bound to ``patient_id``: the configured one if it is theirs, else their
     first other device row (which this process cannot actuate), else None."""
@@ -219,12 +261,14 @@ def ensure_device_rows(
 
 def assigned_slots(session: Session, settings: Settings) -> dict[int, tuple[int, int]]:
     """``medication_id -> (slot, compartment_id)`` for active, in-range compartments of the
-    configured device. If (through data corruption) a medication sits in two compartments, the
-    lowest slot wins."""
+    configured device (every served device with a shared dispenser - medications belong to one
+    patient, so they never collide). If (through data corruption) a medication sits in two
+    compartments, the lowest slot wins."""
+    devices = served_device_ids(session, settings)
     rows = session.execute(
         select(Compartment.medication_id, Compartment.slot_number, Compartment.compartment_id)
         .where(
-            Compartment.device_id == settings.device_id,
+            Compartment.device_id.in_(devices),
             Compartment.active.is_(True),
             Compartment.medication_id.is_not(None),
         )
